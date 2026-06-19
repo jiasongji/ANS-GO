@@ -42,6 +42,8 @@ type Config struct {
 	SSMethod           string `json:"ss_method"`
 	AnyTLSPort         int    `json:"anytls_port"`
 	NaivePort          int    `json:"naive_port"`
+	DisguisePanel      string `json:"disguise_panel"`
+	DisguiseNaive      string `json:"disguise_naive"`
 	CertDir            string `json:"cert_dir"`
 	DBPath             string `json:"db_path"`
 }
@@ -71,6 +73,12 @@ func loadConfig() (Config, error) {
 	}
 	if c.LoginLockMinutes <= 0 {
 		c.LoginLockMinutes = 10
+	}
+	if c.DisguisePanel == "" {
+		c.DisguisePanel = "proxy:https://example.com"
+	}
+	if c.DisguiseNaive == "" {
+		c.DisguiseNaive = "proxy:https://example.com"
 	}
 	if c.CertDir == "" {
 		c.CertDir = defCertDir

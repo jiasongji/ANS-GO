@@ -16,14 +16,14 @@ set -uo pipefail
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.0.0"
+VER="v1.1.0"
 ARCH_MAP=( [x86_64]=amd64 [aarch64]=arm64 [arm64]=arm64 )
 AARCH="${ARCH_MAP[$(uname -m)]:-amd64}"
 
 # ---- 默认值 ----
 DOMAIN="" DYNU_KEY="" DYNU_CID="" DYNU_SECRET="" EMAIL=""
 SS_PORT=23456 ANYTLS_PORT=8443 NAIVE_PORT=443 PANEL_PORT=15608
-PANEL_USER="admin" DISGUISE="proxy:https://example.com"
+PANEL_USER="admin" DISGUISE_PANEL="proxy:https://example.com" DISGUISE_NAIVE="proxy:https://example.com"
 NONINT=0 DOCKER=0 FORCE_BIN=0
 
 # ---- 颜色/日志 ----
@@ -47,7 +47,8 @@ usage(){ cat <<EOF
   --naive-port N           NaiveProxy 端口（默认 443）
   --panel-port N           面板端口（默认 15608）
   --panel-user USER        面板管理员用户名（默认 admin）
-  --disguise VAL           域名伪装：proxy:<URL> 反代 / page 默认页（默认 proxy:https://example.com）
+  --disguise-panel VAL     :443 直访伪装站点（proxy:<URL> 反代 / page 默认页，默认 proxy:https://example.com）
+  --disguise-naive VAL     NaiveProxy 端口的伪装站点（同上格式，默认 proxy:https://example.com）
   --docker                 用 ghcr.io 镜像跑面板（否则裸金属）
   --force-bin              强制从 Releases 重装 sing-box/caddy（已装则跳过）
   --non-interactive        不交互，缺项报错退出
@@ -67,7 +68,8 @@ while [ $# -gt 0 ]; do
     --naive-port) NAIVE_PORT="$2"; shift 2;;
     --panel-port) PANEL_PORT="$2"; shift 2;;
     --panel-user) PANEL_USER="$2"; shift 2;;
-    --disguise) DISGUISE="$2"; shift 2;;
+    --disguise-panel) DISGUISE_PANEL="$2"; shift 2;;
+    --disguise-naive) DISGUISE_NAIVE="$2"; shift 2;;
     --docker) DOCKER=1; shift;;
     --force-bin) FORCE_BIN=1; shift;;
     --non-interactive) NONINT=1; shift;;
@@ -116,12 +118,14 @@ if [ "$NONINT" = 0 ]; then
   ask "NaiveProxy 端口" "$NAIVE_PORT"; NAIVE_PORT="${ASK_VAL:-$NAIVE_PORT}"
   ask "面板端口" "$PANEL_PORT"; PANEL_PORT="${ASK_VAL:-$PANEL_PORT}"
   ask "面板管理员用户名" "$PANEL_USER"; PANEL_USER="${ASK_VAL:-$PANEL_USER}"
-  ask "域名伪装 (proxy:<URL> 或 page)" "$DISGUISE"; DISGUISE="${ASK_VAL:-$DISGUISE}"
+  ask "直访伪装 :443 (proxy:<URL> 或 page)" "$DISGUISE_PANEL"; DISGUISE_PANEL="${ASK_VAL:-$DISGUISE_PANEL}"
+  ask "Naive伪装 (代理端口, proxy:<URL> 或 page)" "$DISGUISE_NAIVE"; DISGUISE_NAIVE="${ASK_VAL:-$DISGUISE_NAIVE}"
 fi
 echo "----------------------------------------"
 printf "  域名        : %s\n" "$DOMAIN"
 printf "  端口        : ss=%s anytls=%s naive=%s panel=%s\n" "$SS_PORT" "$ANYTLS_PORT" "$NAIVE_PORT" "$PANEL_PORT"
-printf "  伪装        : %s\n" "$DISGUISE"
+printf "  直访伪装   : %s\n" "$DISGUISE_PANEL"
+printf "  Naive伪装  : %s\n" "$DISGUISE_NAIVE"
 printf "  Dynu 路径   : %s\n" "${DYNU_KEY:+A(API Key)}${DYNU_KEY:-${DYNU_CID:+B(OAuth)}}"
 printf "  面板模式    : %s\n" "$([ "$DOCKER" = 1 ] && echo Docker || echo 裸金属)"
 echo "----------------------------------------"
@@ -189,7 +193,8 @@ if [ ! -f /etc/ansgo/panel.json ]; then
   "ss_method": "2022-blake3-aes-128-gcm",
   "anytls_port": ${ANYTLS_PORT},
   "naive_port": ${NAIVE_PORT},
-  "disguise": "${DISGUISE}",
+  "disguise_panel": "${DISGUISE_PANEL}",
+  "disguise_naive": "${DISGUISE_NAIVE}",
   "cert_dir": "/etc/ssl/ansgo",
   "db_path": "/etc/ansgo/sessions.db"
 }

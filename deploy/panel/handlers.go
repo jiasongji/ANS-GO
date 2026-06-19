@@ -378,7 +378,9 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 			"login_lock_threshold": c.LoginLockThreshold,
 			"login_lock_minutes":   c.LoginLockMinutes,
 			"ss_port":              c.SSPort, "anytls_port": c.AnyTLSPort, "naive_port": c.NaivePort,
-			"cert_days_left": certInfo(c.CertDir)["days_left"],
+			"disguise_panel":       c.DisguisePanel,
+			"disguise_naive":       c.DisguiseNaive,
+			"cert_days_left":       certInfo(c.CertDir)["days_left"],
 		})
 		return
 	}
@@ -391,10 +393,13 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		PanelPort          *int    `json:"panel_port"`
 		LoginLockThreshold *int    `json:"login_lock_threshold"`
 		LoginLockMinutes   *int    `json:"login_lock_minutes"`
+		DisguisePanel      *string `json:"disguise_panel"`
+		DisguiseNaive      *string `json:"disguise_naive"`
 	}
 	json.NewDecoder(r.Body).Decode(&b)
 
 	needRestart := false
+	needCaddyReload := false
 	newURL := ""
 	if b.URLPath != nil {
 		c.URLPath = normalizePath(*b.URLPath)
@@ -429,9 +434,40 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 	if b.LoginLockMinutes != nil {
 		c.LoginLockMinutes = clamp(*b.LoginLockMinutes, 1, 1440)
 	}
+	// 伪装站点设置（格式校验：proxy:<URL> 或 page）
+	validateDisguise := func(v string) bool {
+		return strings.HasPrefix(v, "proxy:http") || v == "page" || v == "file" || v == "file_server"
+	}
+	if b.DisguisePanel != nil && *b.DisguisePanel != "" {
+		if !validateDisguise(*b.DisguisePanel) {
+			jerr(w, 400, "直访伪装格式错误：应为 proxy:<URL> 或 page")
+			return
+		}
+		if c.DisguisePanel != *b.DisguisePanel {
+			c.DisguisePanel = *b.DisguisePanel
+			needCaddyReload = true
+		}
+	}
+	if b.DisguiseNaive != nil && *b.DisguiseNaive != "" {
+		if !validateDisguise(*b.DisguiseNaive) {
+			jerr(w, 400, "Naive伪装格式错误：应为 proxy:<URL> 或 page")
+			return
+		}
+		if c.DisguiseNaive != *b.DisguiseNaive {
+			c.DisguiseNaive = *b.DisguiseNaive
+			needCaddyReload = true
+		}
+	}
 	if err := configSet(c); err != nil {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
+	}
+	if needCaddyReload {
+		// 重新生成 caddy 配置并重启（:443 与 naive 伪装可能变了）
+		go func() {
+			_ = exec.Command(binGenConf, "caddy").Run()
+			_ = exec.Command("systemctl", "restart", "caddy").Run()
+		}()
 	}
 	if needRestart {
 		newURL = fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath)
