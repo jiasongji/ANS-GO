@@ -1,173 +1,229 @@
 #!/bin/bash
 # =============================================================================
-# ansgo-genconf —— 从 config.json(端口) + proxy-secrets.env(密钥) 重新生成服务配置
+# ansgo-genconf —— 从 panel.json + secrets.env 重新生成服务配置
 #
 # 单一事实来源：
-#   /etc/ansgo/panel.json   -> 端口 + 面板设置 + 域名 (JSON, 由面板/管理员维护)
-#   /etc/ansgo/secrets.env      -> SS_KEY / ANYTLS_* / NAIVE_* (shell 可 source)
-#   /etc/ssl/ansgo/*.pem        -> 共享真实证书
+#   /etc/ansgo/panel.json    端口 + 面板设置 + 域名 + 第2组服务 + 落地配置 (JSON)
+#   /etc/ansgo/secrets.env   SS_KEY / ANYTLS_* / NAIVE_* / 第2组密钥 (shell 可 source)
+#   /etc/ssl/ansgo/*.pem     共享真实证书
 #
 # 用法:
-#   ansgo-genconf sing-box          # 重新生成 /etc/sing-box/config.json
-#   ansgo-genconf caddy             # 重新生成 /etc/caddy/Caddyfile
-#   ansgo-genconf all               # 两者都生成
-#   ansgo-genconf validate          # 仅校验语法（sing-box check + caddy validate）
+#   ansgo-genconf sing-box    # 重新生成 /etc/sing-box/config.json
+#   ansgo-genconf caddy       # 重新生成 /etc/caddy/Caddyfile
+#   ansgo-genconf all         # 两者都生成
+#   ansgo-genconf validate    # 仅校验语法
 #
-# 被 ansgo-admin(regen) 和 ansgo-panel(端口/密钥变更) 通过 exec 调用。
+# 核心逻辑用 python3（避免 bash heredoc 拼复杂 JSON 出错）。
 # =============================================================================
 set -euo pipefail
 CONF="/etc/ansgo/panel.json"
 SECRETS="/etc/ansgo/secrets.env"
 CERTDIR="${BV_CERTDIR:-/etc/ssl/ansgo}"
 
-# --- 加载密钥 ---
-if [ -f "$SECRETS" ]; then
-  # shellcheck disable=SC1090
-  set -a; source "$SECRETS"; set +a
-fi
-
-# --- 读端口（JSON，python3 解析；缺省回退）---
-get_conf() { python3 -c "import json,sys; d=json.load(open('$CONF')); print(d.get('$1',''))" 2>/dev/null || true; }
-DOMAIN=$(get_conf domain);        DOMAIN="${DOMAIN:-example.com}"
-SS_PORT=$(get_conf ss_port);      SS_PORT="${SS_PORT:-23456}"
-ANYTLS_PORT=$(get_conf anytls_port); ANYTLS_PORT="${ANYTLS_PORT:-8443}"
-NAIVE_PORT=$(get_conf naive_port); NAIVE_PORT="${NAIVE_PORT:-443}"
-SS_METHOD="${SS_METHOD:-2022-blake3-aes-128-gcm}"
-# 伪装站点（两个独立）：
-#   disguise_panel -> :443 纯反代伪装站（浏览器直访命中，无代理），默认 soft.xiaoz.org
-#   disguise_naive -> :NAIVE_PORT NaiveProxy inbound 的伪装站（未认证命中），默认 soft.xiaoz.org
-# 格式：proxy:<URL>（反代）或 page（/var/www/html 默认页）
-DISGUISE_PANEL=$(get_conf disguise_panel); DISGUISE_PANEL="${DISGUISE_PANEL:-proxy:https://soft.xiaoz.org}"
-DISGUISE_NAIVE=$(get_conf disguise_naive); DISGUISE_NAIVE="${DISGUISE_NAIVE:-proxy:https://soft.xiaoz.org}"
-# 向后兼容：旧 disguise 字段存在时回填 disguise_naive
-DISGUISE_LEGACY=$(get_conf disguise); [ -n "$DISGUISE_LEGACY" ] && [ "$DISGUISE_NAIVE" = "proxy:https://soft.xiaoz.org" ] && DISGUISE_NAIVE="$DISGUISE_LEGACY"
-
-# 校验必备密钥
-need() { [ -n "${!1:-}" ] || { echo "ansgo-genconf: 缺少 $1（检查 $SECRETS）" >&2; exit 2; }; }
-need SS_KEY; need ANYTLS_PASS; need ANYTLS_UUID; need NAIVE_USER; need NAIVE_PASS
-
-gen_singbox() {
-  cat > /etc/sing-box/config.json <<EOF
-{
-  "log": {
-    "level": "warn",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "shadowsocks",
-      "tag": "ss-in",
-      "listen": "::",
-      "listen_port": ${SS_PORT},
-      "method": "${SS_METHOD}",
-      "password": "${SS_KEY}"
-    },
-    {
-      "type": "anytls",
-      "tag": "anytls-in",
-      "listen": "::",
-      "listen_port": ${ANYTLS_PORT},
-      "users": [
-        { "name": "${ANYTLS_UUID}", "password": "${ANYTLS_PASS}" }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${DOMAIN}",
-        "certificate_path": "${CERTDIR}/fullchain.pem",
-        "key_path": "${CERTDIR}/privkey.pem"
-      }
-    }
-  ],
-  "outbounds": [
-    { "type": "direct", "tag": "direct" }
-  ]
-}
-EOF
-  echo "已生成 /etc/sing-box/config.json (ss=${SS_PORT}, anytls=${ANYTLS_PORT}, sni=${DOMAIN})"
-}
-
-# 根据伪装配置生成 caddy 块（反代 or 默认页）
-# 参数 $1 = DISGUISE 值（proxy:<URL> 或 page）
-disguise_block() {
-  case "$1" in
-    proxy:*)
-      local up; up="${1#proxy:}"
-      local host; host="$(echo "$up" | sed -E 's#^https?://([^/:]+).*#\1#')"
-      cat <<BLK
-  reverse_proxy ${up} {
-    header_up Host ${host}
-  }
-BLK
-      ;;
-    page|file|file_server)
-      cat <<BLK
-  file_server {
-    root /var/www/html
-  }
-BLK
-      ;;
-    *)
-      cat <<BLK
-  file_server {
-    root /var/www/html
-  }
-BLK
-      ;;
-  esac
-}
-
-gen_caddy() {
-  local PANEL_BLK NAIVE_BLK
-  PANEL_BLK="$(disguise_block "$DISGUISE_PANEL")"
-  NAIVE_BLK="$(disguise_block "$DISGUISE_NAIVE")"
-  cat > /etc/caddy/Caddyfile <<EOF
-{
-  order forward_proxy before reverse_proxy
-  order forward_proxy before file_server
-  admin off
-  log {
-    level error
-  }
-}
-
-# :443 纯反代伪装站（浏览器直访命中，不提供代理）
-:443 {
-  tls ${CERTDIR}/fullchain.pem ${CERTDIR}/privkey.pem
-  encode zstd gzip
-${PANEL_BLK}
-}
-
-# :${NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）
-:${NAIVE_PORT} {
-  tls ${CERTDIR}/fullchain.pem ${CERTDIR}/privkey.pem
-  encode zstd gzip
-  forward_proxy {
-    basic_auth ${NAIVE_USER} ${NAIVE_PASS}
-    hide_ip
-    hide_via
-    probe_resistance
-  }
-${NAIVE_BLK}
-}
-
-:80 {
-  redir https://${DOMAIN}{uri} permanent
-}
-EOF
-  echo "已生成 /etc/caddy/Caddyfile (:443 纯伪装=${DISGUISE_PANEL}, :${NAIVE_PORT} naive伪装=${DISGUISE_NAIVE}, :80->https 跳转)"
-}
-
-do_validate() {
-  echo "=== sing-box check ==="
-  /usr/local/bin/sing-box check -c /etc/sing-box/config.json && echo "sing-box config OK"
-  echo "=== caddy validate ==="
-  /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-}
+# 加载密钥到环境，供 python 读取
+if [ -f "$SECRETS" ]; then set -a; source "$SECRETS"; set +a; fi
 
 case "${1:-all}" in
-  sing-box) gen_singbox ;;
-  caddy)    gen_caddy ;;
-  all)      gen_singbox; gen_caddy ;;
-  validate) do_validate ;;
+  sing-box|caddy|all|validate) ;;
   *) echo "用法: ansgo-genconf {sing-box|caddy|all|validate}" >&2; exit 1 ;;
 esac
+
+python3 - "$@" <<'PYEOF'
+import json, os, sys
+
+CONF = "/etc/ansgo/panel.json"
+CERTDIR = os.environ.get("BV_CERTDIR", "/etc/ssl/ansgo")
+SECRETS = "/etc/ansgo/secrets.env"
+mode = sys.argv[1] if len(sys.argv) > 1 else "all"
+
+# ---- 读取配置 ----
+with open(CONF) as f:
+    cfg = json.load(f)
+
+def g(k, d=""):
+    return cfg.get(k, d)
+
+DOMAIN = g("domain", "example.com")
+SS_PORT = int(g("ss_port", 23456))
+ANYTLS_PORT = int(g("anytls_port", 8443))
+NAIVE_PORT = int(g("naive_port", 44333))
+SS_METHOD = os.environ.get("SS_METHOD", "2022-blake3-aes-128-gcm")
+
+# 第2组服务（额外 anytls-2 / naive-2，可选走 ss 落地）
+GROUP2_ENABLED = str(g("group2_enabled", "false")).lower() == "true"
+ANYTLS2_PORT = int(g("anytls2_port", 0)) if g("anytls2_port") else 0
+NAIVE2_PORT = int(g("naive2_port", 0)) if g("naive2_port") else 0
+
+# 落地 SS 出口配置（第2组流量走这里）
+LANDING_ENABLED = str(g("ss_landing_enabled", "false")).lower() == "true"
+LANDING_HOST = g("ss_landing_host", "")
+LANDING_PORT = int(g("ss_landing_port", 0)) if g("ss_landing_port") else 0
+LANDING_METHOD = g("ss_landing_method", "2022-blake3-aes-128-gcm")
+LANDING_PASS = g("ss_landing_password", "")
+
+# 伪装站点
+DISGUISE_PANEL = g("disguise_panel", "proxy:https://soft.xiaoz.org")
+DISGUISE_NAIVE = g("disguise_naive", "proxy:https://soft.xiaoz.org")
+DISGUISE_NAIVE2 = g("disguise_naive2", DISGUISE_NAIVE)
+
+# ---- 读取密钥 ----
+secrets = {}
+if os.path.exists(SECRETS):
+    with open(SECRETS) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            secrets[k.strip()] = v.strip().strip('"')
+
+def sec(k):
+    v = secrets.get(k, "")
+    if not v:
+        print(f"ansgo-genconf: 缺少 {k}（检查 {SECRETS}）", file=sys.stderr)
+        sys.exit(2)
+    return v
+
+SS_KEY = sec("SS_KEY")
+ANYTLS_PASS = sec("ANYTLS_PASS")
+ANYTLS_UUID = sec("ANYTLS_UUID")
+NAIVE_USER = sec("NAIVE_USER")
+NAIVE_PASS = sec("NAIVE_PASS")
+
+# 第2组密钥（启用时必需）
+ANYTLS2_PASS = secrets.get("ANYTLS2_PASS", "")
+ANYTLS2_UUID = secrets.get("ANYTLS2_UUID", "")
+NAIVE2_USER = secrets.get("NAIVE2_USER", "")
+NAIVE2_PASS = secrets.get("NAIVE2_PASS", "")
+if GROUP2_ENABLED:
+    for k in ("ANYTLS2_PASS", "ANYTLS2_UUID", "NAIVE2_USER", "NAIVE2_PASS"):
+        if not secrets.get(k):
+            print(f"ansgo-genconf: 第2组启用但缺少 {k}（执行 ansgo-admin regen2 生成）", file=sys.stderr)
+            sys.exit(2)
+
+# ===================== 生成 sing-box config =====================
+def gen_singbox():
+    inbounds = [
+        {
+            "type": "shadowsocks", "tag": "ss-in",
+            "listen": "::", "listen_port": SS_PORT,
+            "method": SS_METHOD, "password": SS_KEY,
+        },
+        {
+            "type": "anytls", "tag": "anytls-in",
+            "listen": "::", "listen_port": ANYTLS_PORT,
+            "users": [{"name": ANYTLS_UUID, "password": ANYTLS_PASS}],
+            "tls": {
+                "enabled": True, "server_name": DOMAIN,
+                "certificate_path": f"{CERTDIR}/fullchain.pem",
+                "key_path": f"{CERTDIR}/privkey.pem",
+            },
+        },
+    ]
+
+    # 第2组 anytls-2 inbound
+    if GROUP2_ENABLED and ANYTLS2_PORT:
+        inbounds.append({
+            "type": "anytls", "tag": "anytls-in2",
+            "listen": "::", "listen_port": ANYTLS2_PORT,
+            "users": [{"name": ANYTLS2_UUID, "password": ANYTLS2_PASS}],
+            "tls": {
+                "enabled": True, "server_name": DOMAIN,
+                "certificate_path": f"{CERTDIR}/fullchain.pem",
+                "key_path": f"{CERTDIR}/privkey.pem",
+            },
+        })
+
+    outbounds = [{"type": "direct", "tag": "direct"}]
+
+    # 落地 SS outbound（第2组走它）
+    rules = []
+    if LANDING_ENABLED and LANDING_HOST and LANDING_PORT and LANDING_PASS:
+        outbounds.append({
+            "type": "shadowsocks", "tag": "ss-out",
+            "server": LANDING_HOST, "server_port": LANDING_PORT,
+            "method": LANDING_METHOD, "password": LANDING_PASS,
+        })
+        # 第2组流量路由到 ss-out
+        g2_inbounds = []
+        if GROUP2_ENABLED and ANYTLS2_PORT:
+            g2_inbounds.append("anytls-in2")
+        if GROUP2_ENABLED and NAIVE2_PORT:
+            g2_inbounds.append("naive-in2")
+        if g2_inbounds:
+            rules.append({
+                "inbound": g2_inbounds,
+                "action": "route", "outbound": "ss-out",
+            })
+
+    config = {
+        "log": {"level": "warn", "timestamp": True},
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+    }
+    if rules:
+        config["route"] = {"rules": rules}
+
+    with open("/etc/sing-box/config.json", "w") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    note = f"ss={SS_PORT}, anytls={ANYTLS_PORT}"
+    if GROUP2_ENABLED:
+        note += f", anytls2={ANYTLS2_PORT}"
+        if LANDING_ENABLED:
+            note += f"->ss-landing({LANDING_HOST}:{LANDING_PORT})"
+    print(f"已生成 /etc/sing-box/config.json ({note}, sni={DOMAIN})")
+
+# ===================== 生成 Caddyfile =====================
+def disguise_block(val):
+    """返回 caddy site block 内的伪装指令（缩进 2 空格的文本）"""
+    if val.startswith("proxy:"):
+        up = val[len("proxy:"):]
+        import re
+        m = re.match(r'^https?://([^/:]+)', up)
+        host = m.group(1) if m else ""
+        return f"  reverse_proxy {up} {{\n    header_up Host {host}\n  }}\n"
+    else:  # page / file / file_server / 其它
+        return "  file_server {\n    root /var/www/html\n  }\n"
+
+def gen_caddy():
+    blocks = []
+    blocks.append("{\n  order forward_proxy before reverse_proxy\n  order forward_proxy before file_server\n  admin off\n  log {\n    level error\n  }\n}\n")
+
+    # :443 纯反代伪装站
+    blocks.append(f"# :443 纯反代伪装站（浏览器直访命中，不提供代理）\n:443 {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n{disguise_block(DISGUISE_PANEL)}}}\n")
+
+    # :naive_port NaiveProxy + 伪装
+    naive_blk = f"# :{NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）\n:{NAIVE_PORT} {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE_USER} {NAIVE_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE)}}}\n"
+    blocks.append(naive_blk)
+
+    # 第2组 naive-2（caddy 另起一个 site）
+    if GROUP2_ENABLED and NAIVE2_PORT:
+        blocks.append(f"# :{NAIVE2_PORT} NaiveProxy 第2组（走 ss 落地）\n:{NAIVE2_PORT} {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE2_USER} {NAIVE2_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE2)}}}\n")
+
+    # :80 重定向
+    blocks.append(f":80 {{\n  redir https://{DOMAIN}{{uri}} permanent\n}}\n")
+
+    with open("/etc/caddy/Caddyfile", "w") as f:
+        f.write("\n".join(blocks))
+    note = f":443 纯伪装={DISGUISE_PANEL}, :{NAIVE_PORT} naive伪装={DISGUISE_NAIVE}"
+    if GROUP2_ENABLED and NAIVE2_PORT:
+        note += f", :{NAIVE2_PORT} naive2伪装={DISGUISE_NAIVE2}"
+    print(f"已生成 /etc/caddy/Caddyfile ({note}, :80->https 跳转)")
+
+# ===================== 校验 =====================
+def do_validate():
+    import subprocess
+    print("=== sing-box check ===")
+    r = subprocess.run(["/usr/local/bin/sing-box", "check", "-c", "/etc/sing-box/config.json"])
+    if r.returncode == 0:
+        print("sing-box config OK")
+    print("=== caddy validate ===")
+    subprocess.run(["/usr/local/bin/caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"])
+
+if mode in ("sing-box", "all"):
+    gen_singbox()
+if mode in ("caddy", "all"):
+    gen_caddy()
+if mode == "validate":
+    do_validate()
+PYEOF

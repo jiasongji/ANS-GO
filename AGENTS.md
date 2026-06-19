@@ -145,7 +145,21 @@
 - 同一 sing-box 进程的 `type: shadowsocks` inbound
 - 加密：`2022-blake3-aes-128-gcm`，密钥 base64(16 bytes)
 
-### 5.4 客户端连接参数（部署完成后填充）
+### 5.4 第二组服务（可选，走 SS 落地）
+- **默认关闭**，面板「第二组服务」页勾选启用才部署。启动后额外起：
+  - `anytls-in2`（sing-box，独立端口，默认 21112）
+  - `naive-2`（caddy forward_proxy，独立端口，默认 44334）+ 独立 basic_auth 凭证
+- **链式出站**：第二组的出口流量经 `ss-out`（sing-box shadowsocks outbound）转发到另一台落地服务器的 ss-server（中转→落地架构）。第一组仍走 direct。
+- 生成路由规则：`{ inbound: [anytls-in2, naive-in2], outbound: ss-out }`
+- 密钥：`ansgo-admin regen2` 生成（ANYTLS2_* / NAIVE2_*，存 secrets.env）；面板「密钥管理」或「第二组服务」页可触发
+
+### 5.5 落地服务器 Shadowsocks
+- 独立部署在中转机之外的另一台服务器，仅跑一个 ss-server（direct 出口）
+- 一键部署：`bash install.sh --landing [--port 8388]`
+- 配置信息（host/port/method/password）在中转机面板「出口落地」页填写，保存后中转 sing-box 自动重载
+- 密钥校验：面板会对 `2022-blake3-aes-128-gcm` 校验密钥长度（base64(16字节)），错误密钥会被拒
+
+### 5.6 客户端连接参数（部署完成后填充）
 > 占位，部署脚本会自动生成并写入 §10 和 `/etc/ansgo/secrets.env`
 
 ---
@@ -178,13 +192,15 @@ https://your-domain.com:15608/<随机URL路径>/
 ### 6.4 功能模块（中文 UI）
 1. **登录页**（含「忘记密码？」命令提示）
 2. **仪表盘**：三协议 + 面板状态灯 / 各端口 / 内存占用 / 当前 TCP 连接数 / 系统负载 / 运行时长 / 证书到期倒计时
-3. **节点信息**：三协议连接参数 + URI 一键复制 + 客户端二维码
+3. **节点信息**：三协议连接参数 + URI 一键复制 + 客户端二维码（启用第二组时额外显示 anytls-2/naive-2）
 4. **服务控制**：start / stop / restart（二次确认）
 5. **端口管理**：三协议端口 + 面板自身端口均可改
-6. **密钥管理**：重新生成某协议密钥（二次确认 + 提示断开现有连接）
-7. **证书管理**：到期时间 / 手动续期按钮 / 上次续期结果
-8. **面板设置**：URL 路径 / 会话时长 / 管理员用户名 / 管理员密码 / 面板端口 / 登录锁定阈值
-9. **日志查看**：tail 最近 N 行
+6. **密钥管理**：重新生成某协议密钥（二次确认 + 提示断开现有连接）+ 生成第二组密钥
+7. **第二组服务**：开关 / 端口 / Naive-2 伪装（启用后额外 anytls-2 + naive-2，走 SS 落地）
+8. **出口落地**：落地服务器 SS 配置（host/port/method/password + 开关），保存后 sing-box 自动重载
+9. **证书管理**：到期时间 / 手动续期按钮 / 上次续期结果
+10. **面板设置**：URL 路径 / 会话时长 / 管理员用户名 / 管理员密码 / 面板端口 / 登录锁定阈值 / 两个伪装站点
+11. **日志查看**：tail 最近 N 行
 
 ### 6.5 面板端口"可改"的技术机制（重要，必须诚实告知用户）
 面板端口写在 `config.json`，Go 二进制启动时读取。Web 改端口的流程：
@@ -386,7 +402,9 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --email you@example.com \
              --non-interactive
 ```
-常用参数：`--domain` `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port` `--anytls-port` `--naive-port` `--panel-port` `--panel-user` `--disguise-panel proxy:https://soft.xiaoz.org` `--disguise-naive proxy:https://soft.xiaoz.org` `--non-interactive` `--docker`（用 ghcr.io 镜像跑面板）。
+常用参数：`--domain` `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port` `--anytls-port` `--naive-port` `--panel-port` `--panel-user` `--disguise-panel` `--disguise-naive` `--non-interactive` `--docker`（用 ghcr.io 镜像跑面板）。
+
+落地服务器专用：`bash install.sh --landing [--port 8388]`（在该机部署独立 ss-server，供中转机第二组接入）。
 
 ### 资源来源
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`

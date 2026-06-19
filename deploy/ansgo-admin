@@ -150,6 +150,51 @@ cmd_regen(){
   esac
 }
 
+cmd_regen2(){
+  # 生成第二组密钥（不自动启用，需面板/ansgo-admin 开启 group2_enabled）
+  do_backup >/dev/null
+  local u1 p1 u2 pw2
+  p1="$(gen_anytls_pass)"; u1="$(cat /proc/sys/kernel/random/uuid)"
+  u2="$(gen_naive_user)"; pw2="$(gen_naive_pass)"
+  _setsecret ANYTLS2_PASS "$p1"; _setsecret ANYTLS2_UUID "$u1"
+  _setsecret NAIVE2_USER "$u2"; _setsecret NAIVE2_PASS "$pw2"
+  ok "已生成第2组密钥（ANYTLS2_* / NAIVE2_*）"
+  echo "  ANYTLS2: user=$u1 pass=$p1"
+  echo "  NAIVE2:  user=$u2 pass=$pw2"
+  warn "如需启用：ansgo-admin group2 enable（或面板「第二组服务」页开启）"
+}
+
+cmd_group2(){
+  # ansgo-admin group2 [enable|disable] [anytls2_port] [naive2_port]
+  local act="${1:-status}"
+  _loadsecrets
+  if [ "$act" = "status" ]; then
+    echo "group2_enabled=$(_conf group2_enabled)"
+    echo "anytls2_port=$(_conf anytls2_port)  naive2_port=$(_conf naive2_port)"
+    echo "ANYTLS2_PASS=${ANYTLS2_PASS:-未生成}"
+    return
+  fi
+  do_backup >/dev/null
+  local a2="${2:-}" n2="${3:-}"
+  case "$act" in
+    enable)
+      # 校验密钥
+      [ -n "${ANYTLS2_PASS:-}" ] || { err "第2组密钥未生成，先执行 ansgo-admin regen2"; return 1; }
+      [ -n "$a2" ] || a2=21112
+      [ -n "$n2" ] || n2=44334
+      _setconf group2_enabled true
+      _setconf anytls2_port "$a2"
+      _setconf naive2_port "$n2"
+      ansgo-genconf all && restart_svc sing-box && restart_svc caddy
+      ok "第2组已启用 (anytls2=$a2, naive2=$n2)";;
+    disable)
+      _setconf group2_enabled false
+      ansgo-genconf all && restart_svc sing-box && restart_svc caddy
+      ok "第2组已关闭";;
+    *) err "用法: ansgo-admin group2 [enable|disable|status] [anytls2_port] [naive2_port]";;
+  esac
+}
+
 cmd_cert_status(){
   local cf="${CERTDIR}/fullchain.pem"
   [ -f "$cf" ] || { err "证书文件不存在: $cf"; return 1; }
@@ -264,6 +309,8 @@ case "$cmd" in
   stop) cmd_stop "${1:-}";;
   logs) cmd_logs "${1:-all}";;
   regen) cmd_regen "${1:-}";;
+  regen2) cmd_regen2;;
+  group2) cmd_group2 "${1:-}";;
   cert) case "${1:-status}" in status) cmd_cert_status;; renew) cmd_cert_renew;; *) err "用法: ansgo-admin cert [status|renew]";; esac;;
   panel-pass) cmd_panel_pass;;
   panel-path) cmd_panel_path;;

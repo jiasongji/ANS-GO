@@ -44,6 +44,17 @@ type Config struct {
 	NaivePort          int    `json:"naive_port"`
 	DisguisePanel      string `json:"disguise_panel"`
 	DisguiseNaive      string `json:"disguise_naive"`
+	DisguiseNaive2     string `json:"disguise_naive2"`
+	// 第2组额外服务（用字符串 "true"/"false" 以兼容 genconf 的宽松判断）
+	Group2Enabled      string `json:"group2_enabled"`
+	AnyTLS2Port        int    `json:"anytls2_port"`
+	Naive2Port         int    `json:"naive2_port"`
+	// 落地 SS 出口（第2组流量走这里）
+	SSLandingEnabled   string `json:"ss_landing_enabled"`
+	SSLandingHost      string `json:"ss_landing_host"`
+	SSLandingPort      int    `json:"ss_landing_port"`
+	SSLandingMethod    string `json:"ss_landing_method"`
+	SSLandingPassword  string `json:"ss_landing_password"`
 	CertDir            string `json:"cert_dir"`
 	DBPath             string `json:"db_path"`
 }
