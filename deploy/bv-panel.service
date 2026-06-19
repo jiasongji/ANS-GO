@@ -1,0 +1,19 @@
+[Unit]
+Description=ANS-GO Web 管理面板 (bv-panel)
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bv-panel
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+# 确保 bv-admin / bv-genconf / systemctl / journalctl / acme.sh 可被 exec 调用
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.acme.sh
+WorkingDirectory=/etc/bv-panel
+
+[Install]
+WantedBy=multi-user.target

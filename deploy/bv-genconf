@@ -1,0 +1,125 @@
+#!/bin/bash
+# =============================================================================
+# bv-genconf —— 从 config.json(端口) + proxy-secrets.env(密钥) 重新生成服务配置
+#
+# 单一事实来源：
+#   /etc/bv-panel/config.json   -> 端口 + 面板设置 + 域名 (JSON, 由面板/管理员维护)
+#   /etc/proxy-secrets.env      -> SS_KEY / ANYTLS_* / NAIVE_* (shell 可 source)
+#   /etc/ssl/bv-la/*.pem        -> 共享真实证书
+#
+# 用法:
+#   bv-genconf sing-box          # 重新生成 /etc/sing-box/config.json
+#   bv-genconf caddy             # 重新生成 /etc/caddy/Caddyfile
+#   bv-genconf all               # 两者都生成
+#   bv-genconf validate          # 仅校验语法（sing-box check + caddy validate）
+#
+# 被 bv-admin(regen) 和 bv-panel(端口/密钥变更) 通过 exec 调用。
+# =============================================================================
+set -euo pipefail
+CONF="/etc/bv-panel/config.json"
+SECRETS="/etc/proxy-secrets.env"
+CERTDIR="${BV_CERTDIR:-/etc/ssl/bv-la}"
+
+# --- 加载密钥 ---
+if [ -f "$SECRETS" ]; then
+  # shellcheck disable=SC1090
+  set -a; source "$SECRETS"; set +a
+fi
+
+# --- 读端口（JSON，python3 解析；缺省回退）---
+get_conf() { python3 -c "import json,sys; d=json.load(open('$CONF')); print(d.get('$1',''))" 2>/dev/null || true; }
+DOMAIN=$(get_conf domain);        DOMAIN="${DOMAIN:-your-domain.com}"
+SS_PORT=$(get_conf ss_port);      SS_PORT="${SS_PORT:-23456}"
+ANYTLS_PORT=$(get_conf anytls_port); ANYTLS_PORT="${ANYTLS_PORT:-8443}"
+NAIVE_PORT=$(get_conf naive_port); NAIVE_PORT="${NAIVE_PORT:-443}"
+SS_METHOD="${SS_METHOD:-2022-blake3-aes-128-gcm}"
+
+# 校验必备密钥
+need() { [ -n "${!1:-}" ] || { echo "bv-genconf: 缺少 $1（检查 $SECRETS）" >&2; exit 2; }; }
+need SS_KEY; need ANYTLS_PASS; need ANYTLS_UUID; need NAIVE_USER; need NAIVE_PASS
+
+gen_singbox() {
+  cat > /etc/sing-box/config.json <<EOF
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "ss-in",
+      "listen": "::",
+      "listen_port": ${SS_PORT},
+      "method": "${SS_METHOD}",
+      "password": "${SS_KEY}"
+    },
+    {
+      "type": "anytls",
+      "tag": "anytls-in",
+      "listen": "::",
+      "listen_port": ${ANYTLS_PORT},
+      "users": [
+        { "name": "${ANYTLS_UUID}", "password": "${ANYTLS_PASS}" }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "${DOMAIN}",
+        "certificate_path": "${CERTDIR}/fullchain.pem",
+        "key_path": "${CERTDIR}/privkey.pem"
+      }
+    }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ]
+}
+EOF
+  echo "已生成 /etc/sing-box/config.json (ss=${SS_PORT}, anytls=${ANYTLS_PORT}, sni=${DOMAIN})"
+}
+
+gen_caddy() {
+  cat > /etc/caddy/Caddyfile <<EOF
+{
+  order forward_proxy before file_server
+  admin off
+  log {
+    level error
+  }
+}
+
+:${NAIVE_PORT} {
+  tls ${CERTDIR}/fullchain.pem ${CERTDIR}/privkey.pem
+  encode zstd gzip
+  forward_proxy {
+    basic_auth ${NAIVE_USER} ${NAIVE_PASS}
+    hide_ip
+    hide_via
+    probe_resistance
+  }
+  file_server {
+    root /var/www/html
+  }
+}
+
+:80 {
+  redir https://${DOMAIN}{uri} permanent
+}
+EOF
+  echo "已生成 /etc/caddy/Caddyfile (naive=${NAIVE_PORT}, tls=真实证书, :80->https 跳转)"
+}
+
+do_validate() {
+  echo "=== sing-box check ==="
+  /usr/local/bin/sing-box check -c /etc/sing-box/config.json && echo "sing-box config OK"
+  echo "=== caddy validate ==="
+  /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+}
+
+case "${1:-all}" in
+  sing-box) gen_singbox ;;
+  caddy)    gen_caddy ;;
+  all)      gen_singbox; gen_caddy ;;
+  validate) do_validate ;;
+  *) echo "用法: bv-genconf {sing-box|caddy|all|validate}" >&2; exit 1 ;;
+esac
