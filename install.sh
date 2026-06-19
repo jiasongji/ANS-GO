@@ -243,7 +243,11 @@ hr "8/8 部署 Web 管理面板"
 if [ "$DOCKER" = 1 ]; then
   if ! command -v docker >/dev/null; then curl -fsSL https://get.docker.com | sh; fi
   # 面板需访问宿主 systemd/配置，故 host 网络 + 挂载关键目录
-  docker pull ghcr.io/${REPO%/*}/ansgo-panel:latest
+  # 镜像默认 public 可匿名拉取；若为 private 需先 docker login ghcr.io
+  if ! docker pull ghcr.io/${REPO%/*}/ansgo-panel:latest 2>/dev/null; then
+    warn "ghcr 镜像拉取失败（可能为 private）。请先执行 docker login ghcr.io 后重试，或在 GitHub 将该 package 设为 public。"
+    exit 5
+  fi
   dl_or_exit "$RAW/ansgo-panel.service.docker" /etc/systemd/system/ansgo-panel.service
 else
   log "下载 ansgo-panel 二进制 (from release)"
