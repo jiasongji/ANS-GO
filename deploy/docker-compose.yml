@@ -1,0 +1,18 @@
+# ANS-GO 面板 Docker 部署（高级/可选）
+# 注意：面板需管理宿主服务，完整能力需挂载宿主目录 + 特权；低配 LXC 推荐裸金属。
+# 此 compose 仅作可复现运行示例；服务控制类功能在容器内可能受限。
+services:
+  ansgo-panel:
+    image: ghcr.io/jiasongji/ansgo-panel:latest
+    container_name: ansgo-panel
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /etc/ansgo:/etc/ansgo
+      - /etc/ssl/ansgo:/etc/ssl/ansgo:ro
+      - /etc/sing-box:/etc/sing-box:ro
+      - /etc/caddy:/etc/caddy:ro
+      - /usr/local/bin/ansgo-admin:/usr/local/bin/ansgo-admin:ro
+      - /usr/local/bin/ansgo-genconf:/usr/local/bin/ansgo-genconf:ro
+    environment:
+      - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

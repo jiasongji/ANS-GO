@@ -1,0 +1,400 @@
+# ANS-GO 代理服务器方案 (AGENTS.md)
+
+> 本文件是项目的**唯一事实来源**。新窗口执行、GitHub 教程撰写、服务器部署均以本文件为准。
+> 敏感凭证见 `.secrets.local`（已 gitignore，不入库）。
+>
+> **部署状态：✅ 已部署并端到端验证（2026-06-19）。** 可复现产物在 `deploy/`，按 §9 顺序执行。
+
+---
+
+## 0. 项目目标
+
+在一台美国 ISP 原生 IP 的低配 LXC VPS 上，部署三协议代理服务 + Web 管理面板，要求：
+
+- **三协议**：NaiveProxy + AnyTLS + Shadowsocks（2022）
+- **真实域名证书**：`your-domain.com`（Let's Encrypt），三服务共享
+- **Web 管理面板**：中文、可管全部协议参数 + 证书 + 自身配置
+- **性能最大化**：网络内核调优、清理垃圾软件、内存占用最小
+- **可审计、可回滚、可离线管理**（SSH 兜底脚本）
+
+---
+
+## 1. 服务器与域名信息
+
+| 项 | 值 |
+|----|----|
+| IPv4 | `<服务器IP>` |
+| IPv6 | `<服务器IPv6>`（注：宿主防火墙拦截入站，仅 IPv4 可用）|
+| 系统 | Debian 12 (bookworm) / Proxmox LXC 容器 |
+| 规格 | 1 vCPU / 256MB RAM + 256MB swap / 3.86GB disk |
+| 域名 | `your-domain.com`（已 A + AAAA 解析到本机）|
+| DNS 服务商 | Dynu Systems（NS = ns0~6.dynu.com，zone id = <Dynu_zone_id>）|
+| SSH | `root@<服务器IP>`（密码见 `.secrets.local`）|
+
+### 已完成的基础优化（第一阶段，无需重复）
+- 移除 postfix / mailcap / reportbug / tasksel 等垃圾包
+- `apt update && upgrade`，0 待升级包
+- 内核网络调优写入 `/etc/sysctl.d/99-proxy-tune.conf`（BBR / TFO=3 / MTU 探测 / 快速 TIME_WAIT 回收等）
+- 文件描述符上限 1048576（`/etc/security/limits.d/99-proxy.conf`）
+- journald 限 50M（`/etc/systemd/journald.conf.d/size.conf`）
+- 注：LXC 内 `rmem_max`/`wmem_max`/`file-max`/`default_qdisc` 为宿主控制只读，已是最优
+
+---
+
+## 2. 最终架构（三服务完全解耦 + 一张证书共享）
+
+```
+            Let's Encrypt (acme.sh + Dynu DNS-01)
+                        │ 签发 / 60天自动续期 + reload
+                        ▼
+          /etc/ssl/ansgo/{fullchain,privkey}.pem
+                        │ 三服务共享引用
+      ┌─────────────────┼─────────────────────┐
+      ▼                 ▼                     ▼
+ caddy :443       sing-box :8443        面板(Go) :15608
+ NaiveProxy       AnyTLS + Shadowsocks   Web 管理面板
+ （forwardproxy   （同一进程两个         （端口/路径/管理员/
+   naive 分支）     inbound）             密码均可面板内改）
+      ▲                 ▲                     ▲
+      └─────── ansgo-admin (bash 脚本) ──────────┘
+                       ↑ 调用 / 配置生成
+                 面板通过本地 exec 调用
+```
+
+### 核心设计原则
+1. **解耦**：caddy / sing-box / 面板是三个独立进程、独立端口、独立 systemd unit。改任一个不影响另两个，**改协议端口永远不会断面板**。
+2. **共享证书**：一张 `your-domain.com` 证书同时喂三个服务（TLS 证书按域名签发，不限端口，8443/15608 自动覆盖）。续期一次，三服务一起 reload。
+3. **离线兜底**：`ansgo-admin` bash 脚本不依赖面板，面板全挂也能 SSH 管理一切。
+4. **自指安全**：面板端口可改，但改的是"自己的端口"，机制见 §6.5。
+
+---
+
+## 3. 端口分配
+
+| 服务 | 默认端口 | 协议 | 面板可改 |
+|------|---------|------|---------|
+| NaiveProxy (caddy) | `443` TCP+UDP | HTTPS forward proxy | ✅ |
+| AnyTLS (sing-box) | `8443` TCP | TLS | ✅ |
+| Shadowsocks (sing-box) | `23456` TCP | SS2022 | ✅ |
+| Web 面板 (ansgo-panel) | `15608` TCP | HTTPS | ✅（改后面板重启）|
+| caddy HTTP（ACME 备用/重定向）| `80` TCP | HTTP | ❌ 固定 |
+| SSH | `22` TCP | SSH | ❌ 固定 |
+
+防火墙（nftables）当前 policy=accept 全放行；部署时仅确保新端口可达，不加 drop 规则（避免锁死 SSH，LXC 安全由宿主负责）。
+
+---
+
+## 4. 证书方案（双保险）
+
+### 签发工具
+**acme.sh**（curl 安装，~200KB，不走 apt）。不用 caddy 自带 ACME——因为 caddy 内部证书存储路径深、版本化命名，sing-box 引用困难且续期后需手动 reload。acme.sh 可签发到固定路径并通过 `--reloadcmd` 续期后自动重启三服务。
+
+### 验证方式
+**DNS-01**（绕开 80 端口依赖，可签泛域名）。
+
+### Dynu 凭证双保险（A 默认，A 失败降级 B）
+两套都已实测可用（HTTP 200，能读写 zone <Dynu_zone_id>）：
+
+| 路径 | 凭证 | 机制 | 用法 |
+|------|------|------|------|
+| **A（默认）** | API Key | `Api-Key` 请求头 | 自定义钩子 `dns_dynukey.sh`（~60行，直接调 Dynu REST API 加删 TXT 记录）|
+| **B（降级）** | Client ID + Secret | OAuth2 `client_credentials` 换 bearer token | acme.sh 官方 `dns_dynu` 插件 |
+
+**降级逻辑**：部署时先尝试 A 签发；若 A 返回非 0 退出码，自动切换到 B 重试。两套凭证均存 `/root/.acme.sh/` 下，root 独占可读。
+
+> acme.sh 官方插件用 OAuth2（要 `Dynu_ClientId` + `Dynu_Secret`），而 API Key 是另一套凭证。这是 Dynu 平台同时提供的两种鉴权，互不冲突。
+
+### 证书落点与续期
+```
+/etc/ssl/ansgo/fullchain.pem   # 证书链
+/etc/ssl/ansgo/privkey.pem     # 私钥
+```
+- 续期周期：acme.sh 默认 60 天（实际由 ARI 窗口驱动，约 60 天）
+- 续期 reload：统一走 `ansgo-cert-reload` 脚本（`--install-cert --reloadcmd "/usr/local/bin/ansgo-cert-reload"`）。该脚本按需重载——只有**当前配置引用了 `/etc/ssl/ansgo/` 证书**的服务才重载，签名发阶段是 no-op，切换证书后才会生效
+- ⚠️ **caddy 用 restart 不用 reload**：Caddyfile 设了 `admin off`，无 admin API 通道，`systemctl reload caddy` 会失败。续期/改配置统一 `systemctl restart caddy`（naive 闪断 1-2s 可接受）。sing-box（ss+anytls）和 ansgo-panel 用 restart
+- `--keylength ec-256`（ECDSA，体积小、握手快）
+
+---
+
+## 5. 三协议配置
+
+### 5.1 NaiveProxy（caddy forwardproxy-naive 分支）
+- 二进制：`/usr/local/bin/caddy`（klzgrad/forwardproxy release v2.11.2-naive，含 naive padding 层）
+- 配置：`/etc/caddy/Caddyfile`（设 `admin off`，故 reload 不可用，改配置用 restart）
+- 关键特性：`probe_resistance`（探测伪装）+ `hide_ip` + `hide_via` + naive padding
+- **域名直访伪装**：浏览器直访 `https://your-domain.com` 时，由 caddy 反代到伪装站（默认 `https://soft.xiaoz.org`），比静态页更像真实站点；naive 认证客户端走 forward_proxy 隐蔽隧道。伪装方式由 `panel.json` 的 `disguise` 字段控制：
+  - `proxy:https://soft.xiaoz.org`（默认）→ 反代指定站点
+  - `page` → 用 `/var/www/html` 默认页（传统静态伪装）
+- 证书换真实证书后，浏览器直访 `https://your-domain.com` 显示绿色锁
+
+### 5.2 AnyTLS（sing-box inbound）
+- sing-box v1.13.13，`/etc/sing-box/config.json` 内的 `type: anytls` inbound
+- TLS 用共享真实证书，SNI = `your-domain.com`，客户端**去掉 `insecure=1`**
+- `padding_scheme` 用 sing-box 内置默认
+
+### 5.3 Shadowsocks（sing-box inbound）
+- 同一 sing-box 进程的 `type: shadowsocks` inbound
+- 加密：`2022-blake3-aes-128-gcm`，密钥 base64(16 bytes)
+
+### 5.4 客户端连接参数（部署完成后填充）
+> 占位，部署脚本会自动生成并写入 §10 和 `/etc/ansgo/secrets.env`
+
+---
+
+## 6. Web 管理面板（ansgo-panel）
+
+### 6.1 技术栈
+- **Go 单二进制**（mac 本地交叉编译 linux/amd64，scp 上传），运行内存 ~15-20MB
+- **vanilla JS + 单 HTML 文件**（不引前端框架，离线 qrcode.min.js 生成客户端二维码）
+- 配置：`/etc/ansgo/panel.json`；会话+锁定：SQLite `/etc/ansgo/sessions.db`（CGO-free，纯 Go 驱动 modernc.org/sqlite 避免 libc 依赖）
+- systemd unit：`/etc/systemd/system/ansgo-panel.service`
+
+### 6.2 访问方式
+```
+https://your-domain.com:15608/<随机URL路径>/
+```
+- 随机 URL 路径：部署时自动生成（如 `/x7k2m9q3/`），面板内可改
+- 全程 TLS（共享 Let's Encrypt 证书）
+
+### 6.3 认证（安全机制）
+| 项 | 默认 | 可改 |
+|----|------|------|
+| 管理员用户名 | `ad_admin` | ✅ 面板内改 |
+| 管理员密码 | 部署时随机生成强密码，**只显示一次** | ✅ 面板内改 |
+| 密码存储 | bcrypt hash | — |
+| 登录失败锁定 | 连续错 5 次 → 该 IP 锁 10 分钟（**按 IP，非全局**）| 锁定阈值/时长可改 |
+| 会话有效期 | 8 小时 | ✅ 面板内改 |
+| 忘记密码 | Web「忘记密码？」页显示 `SSH 执行: ansgo-admin panel-pass` 提示；命令打印新密码 | — |
+
+### 6.4 功能模块（中文 UI）
+1. **登录页**（含「忘记密码？」命令提示）
+2. **仪表盘**：三协议 + 面板状态灯 / 各端口 / 内存占用 / 当前 TCP 连接数 / 系统负载 / 运行时长 / 证书到期倒计时
+3. **节点信息**：三协议连接参数 + URI 一键复制 + 客户端二维码
+4. **服务控制**：start / stop / restart（二次确认）
+5. **端口管理**：三协议端口 + 面板自身端口均可改
+6. **密钥管理**：重新生成某协议密钥（二次确认 + 提示断开现有连接）
+7. **证书管理**：到期时间 / 手动续期按钮 / 上次续期结果
+8. **面板设置**：URL 路径 / 会话时长 / 管理员用户名 / 管理员密码 / 面板端口 / 登录锁定阈值
+9. **日志查看**：tail 最近 N 行
+
+### 6.5 面板端口"可改"的技术机制（重要，必须诚实告知用户）
+面板端口写在 `config.json`，Go 二进制启动时读取。Web 改端口的流程：
+1. 面板写新端口到 `config.json`
+2. 同步放行防火墙新端口
+3. 弹明确提示：「面板将在 3 秒后重启到新端口 XXXX，请用 `https://your-domain.com:XXXX/路径` 重新访问」
+4. `systemctl restart ansgo-panel`（当前会话断开是必然的，因为端口换了）
+5. 用户用新端口重新登录（会话因重启清空，需重新登录）
+
+这不是"自指灾难"——是一次性受控重启换端口，有清晰提示。**部署文档和 Web 界面都要写明这一点。**
+
+---
+
+## 7. ansgo-admin 离线管理脚本
+
+位置：`/usr/local/bin/ansgo-admin`（bash，零依赖，面板全挂也能用）
+
+```bash
+ansgo-admin status              # 三协议+面板状态一览
+ansgo-admin info                # 打印连接参数 + URI
+ansgo-admin restart [ss|anytls|naive|panel|all]
+ansgo-admin stop [服务]
+ansgo-admin logs [服务]          # tail journalctl
+ansgo-admin regen [ss|anytls|naive]   # 重置密钥（提示确认）
+ansgo-admin cert status         # 证书到期
+ansgo-admin cert renew          # 手动续期
+ansgo-admin panel-pass          # 重置面板密码（打印新密码）
+ansgo-admin panel-path          # 重置面板 URL 路径（兜底）
+ansgo-admin panel-port          # 重置面板端口（兜底）
+ansgo-admin firewall [list|open PORT|close PORT]
+ansgo-admin update [sing-box|caddy|panel]   # 升级二进制
+ansgo-admin backup              # 备份所有配置到 /etc/ansgo-backup-{ts}/
+ansgo-admin restore [备份目录]   # 回滚
+ansgo-admin uninstall           # 卸载（保留配置备份）
+```
+
+---
+
+## 8. 服务器文件清单（部署后产物）
+
+```
+/usr/local/bin/
+  ├── sing-box              # 已装 v1.13.13
+  ├── caddy                 # 已装 v2.11.2-naive
+  ├── ansgo-admin              # 新增 bash 脚本
+  └── ansgo-panel              # 新增 Go 二进制
+
+/etc/ansgo/
+  ├── config.json           # 端口/URL路径/用户名/密码hash/会话/锁定
+  └── sessions.db           # 会话 + 锁定计数 (sqlite)
+
+/etc/ssl/ansgo/
+  ├── fullchain.pem         # Let's Encrypt 真实证书（续期自动覆盖）
+  └── privkey.pem
+
+/root/.acme.sh/
+  ├── dns_dynukey.sh        # 路径 A 钩子（含 API Key）
+  ├── account.conf          # 含路径 B 的 Dynu_ClientId/Secret（降级用）
+  └── your-domain.com_ecc/  # acme.sh 证书存储
+
+/etc/sing-box/config.json   # ss + anytls（改：真实证书）
+/etc/caddy/Caddyfile        # 改：真实证书 + 域名
+/var/www/html/index.html    # 伪装站
+
+/etc/systemd/system/
+  ├── sing-box.service      # 已存在
+  ├── caddy.service         # 已存在
+  └── ansgo-panel.service      # 新增
+
+/etc/ansgo/secrets.env      # 所有协议密钥（root 独占 600）
+/etc/sysctl.d/99-proxy-tune.conf   # 已存在（网络调优）
+/etc/security/limits.d/99-proxy.conf  # 已存在（fd 上限）
+```
+
+---
+
+## 9. 部署执行顺序（10 步）
+
+| 步骤 | 动作 | 风险 | 中断 |
+|------|------|------|------|
+| 1 | 装 acme.sh（curl）| 低 | 无 |
+| 2 | 写 `dns_dynukey.sh`（路径 A）+ 配置路径 B 凭证 | 低 | 无 |
+| 3 | 签发 `your-domain.com` ECDSA 证书到 `/etc/ssl/ansgo/`，配 60 天自动续期 + reloadcmd | 中（DNS 传播 30-90s）| 无 |
+| 4 | 改 Caddyfile：自签→真实证书，`systemctl reload caddy` | 低 | naive 闪断 1-2s |
+| 5 | 改 sing-box config：anytls 用真实证书、SNI=`your-domain.com`，restart | 低 | anytls 重启 |
+| 6 | 装 `ansgo-admin` 脚本 | 低 | 无 |
+| 7 | mac 本地交叉编译 `ansgo-panel`（GOOS=linux GOARCH=amd64），scp 上传 | 低 | 无 |
+| 8 | 生成面板配置（随机密码+随机URL路径，显示一次）+ systemd unit + 放行 15608 | 低 | 无 |
+| 9 | 端到端验证：证书真实性、三协议连通、面板登录、IP 锁定、二维码、端口改 | — | — |
+| 10 | 输出最终连接参数 + 面板访问地址 + 凭证，写入 §10 | — | — |
+
+**关键提醒**：第 5 步后，AnyTLS 客户端连接参数会变（SNI 从 `www.bing.com` → `your-domain.com`，去掉 `insecure=1`）。部署完给新参数。
+
+### 实战备注（2026-06-19 部署沉淀）
+- **scp 覆盖运行中二进制会失败**（sftp 报 `dest open Failure`），且后续 restart 只是重启了旧文件。正确流程：`systemctl stop` → `rm` 旧文件 → `scp` 上传 → `md5sum` 对比本地与服务器确认一致 → `systemctl start`。文件大小可能恰好相同，**md5 是判断"是否真更新"的唯一可靠手段**。
+- **caddy reload 必失败**（见 §5.1），改配置后直接 `systemctl restart caddy`。
+- **前端单页应用"点击无反应"**：首要怀疑 `<script>` 块 JS 语法错误（整块不解析→所有函数未定义→静默）。改完前端必须重新编译 Go 二进制（HTML 经 `//go:embed` 编译进去）并按上一条流程更新。诊断：提取 `<script>` 内容 `node --check` 查语法。
+- **长任务用后台守护**：本机在中国大陆，SSH 长连接易超时。证书签发等耗时操作用 `nohup ... > log 2>&1 &`，SSH 立即返回，再轮询日志。
+- **改配置前必备份**：`ansgo-admin backup` 或手工 `cp -a` 到 `/etc/ansgo-backup-{ts}/`，失败可 `ansgo-admin restore`。
+
+---
+
+## 10. 部署后产物（2026-06-19 执行 §9 10 步后回填）
+
+> ⚠️ 密钥与密码等敏感值不写本文件（§13 约束，本文件会进 git）。
+> 完整凭证见服务器 `/etc/ansgo/secrets.env`、`/etc/ansgo/panel.json`，
+> 本地镜像见 `.secrets.local`（已 gitignore）的「部署产出」段。
+
+### 客户端连接 URI（结构，密钥见 `.secrets.local`）
+```
+[1] Shadowsocks : ss://<base64url(method:key)>@your-domain.com:23456#ANS-GO-SS
+                  method = 2022-blake3-aes-128-gcm
+[2] AnyTLS      : anytls://<password>@your-domain.com:8443/?sni=your-domain.com#ANS-GO-AnyTLS
+                  （换真实证书后 SNI=your-domain.com，客户端去掉 insecure=1）
+[3] NaiveProxy  : naive+https://<user>:<pass>@your-domain.com:443#ANS-GO-Naive
+```
+> 一键获取完整 URI：服务器执行 `ansgo-admin info`，或面板「节点信息」页。
+
+### Web 面板访问
+```
+URL:      https://your-domain.com:15608/<随机URL路径>/
+用户名:   ad_admin
+密码:     （部署时一次性显示，存 .secrets.local；遗忘用 `ansgo-admin panel-pass` 重置）
+URL路径:  /<随机URL路径>/  （面板内可改；遗忘用 `ansgo-admin panel-path` 重置）
+```
+
+### 当前端口
+```
+NaiveProxy(caddy):  443
+AnyTLS(sing-box):   8443
+Shadowsocks:        23456
+面板(ansgo-panel):     15608
+caddy HTTP(重定向): 80
+SSH:                22
+```
+
+### 证书
+```
+签发机构: Let's Encrypt (CN=YE1)
+成功路径: A（Dynu API Key，自定义钩子 dns_dynukey.sh）
+有效期:   2026-06-19 ~ 2026-09-17（部署时剩余 89 天）
+自动续期: acme.sh cron 每日 23:58，ARI 窗口 2026-08-19
+续期后:   ansgo-cert-reload 自动 restart caddy/sing-box/ansgo-panel
+```
+
+### 服务器文件清单（与 §8 对照，均已落地）
+```
+/usr/local/bin/{sing-box, caddy, ansgo-admin, ansgo-genconf, ansgo-panel, ansgo-cert-reload}
+/etc/ansgo/{config.json, sessions.db}
+/etc/ssl/ansgo/{fullchain.pem, privkey.pem}
+/root/.acme.sh/{dnsapi/dns_dynukey.sh, account.conf, your-domain.com_ecc/}
+/etc/sing-box/config.json   /etc/caddy/Caddyfile   /var/www/html/index.html
+/etc/systemd/system/{sing-box, caddy, ansgo-panel}.service
+/etc/ansgo/secrets.env  /etc/sysctl.d/99-proxy-tune.conf  /etc/security/limits.d/99-proxy.conf
+```
+
+---
+
+## 11. 风险与回滚
+
+| 风险 | 应对 |
+|------|------|
+| 证书签发失败 | acme.sh 详细日志；失败时保留现有自签证书继续服务，不影响运行；A 失败自动 B |
+| 改配置导致服务起不来 | 每次改动前 `ansgo-admin backup` 到 `/etc/ansgo-backup-{ts}/`，`ansgo-admin restore` 一键回滚 |
+| 面板 Go 二进制崩溃 | systemd `Restart=on-failure` 自动重启；`ansgo-admin` 兜底 |
+| 改面板端口后失联 | SSH 进去 `ansgo-admin panel-port` 重置；或改 config.json 后 restart |
+| API Key 泄露 | 只存服务器 root 独占文件；可 `ansgo-admin` 旋转（重新填 Dynu 凭证）|
+| IPv6 入站不可用 | 宿主防火墙限制，容器侧无解；仅用 IPv4 |
+| 面板二进制更新不生效 | scp 覆盖运行中二进制会静默失败；必须 stop→rm→scp→md5 校验→start（见 §9 实战备注）|
+| 面板点击无反应 | 前端 JS 语法错误致整块脚本失效；改完 HTML 需重新编译上传，清浏览器缓存硬刷新 |
+| 续期 reload 失败 | caddy `admin off` 无法 reload；`ansgo-cert-reload` 已改用 restart，续期闪断 1-2s |
+
+---
+
+## 12. 后续流程
+
+1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 三协议从中国大陆公网连通 + IP 锁定机制 + 证书真实性（Let's Encrypt）均验证通过
+2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
+3. **服务器复现（待验证）**：用 `install.sh` 在干净服务器一键部署并测试
+4. **客户端实测**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测三协议连通与分流
+
+---
+
+## 14. 一键部署（推荐）
+
+仓库根目录提供 `install.sh`，支持**交互式**与**带参数一键**两种模式，所有资源取自本仓库 GitHub（脚本/面板源码走 raw，二进制走 Releases）。
+
+### 交互式
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
+# 依次交互输入：域名、Dynu API Key（或 OAuth Client ID+Secret）、各端口、面板用户名等
+```
+
+### 带参数一键
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --dynu-key <API_KEY> \
+             --email you@example.com \
+             --non-interactive
+```
+常用参数：`--domain` `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port` `--anytls-port` `--naive-port` `--panel-port` `--panel-user` `--disguise proxy:https://soft.xiaoz.org` `--non-interactive` `--docker`（用 ghcr.io 镜像跑面板）。
+
+### 资源来源
+- 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
+- 二进制（sing-box / caddy-naive / ansgo-panel / acme.sh 快照）：`github.com/jiasongji/ANS-GO/releases/download/vX.Y.Z/...`
+- Docker 面板镜像：`ghcr.io/jiasongji/ansgo-panel:latest`（多阶段自构建，见 `deploy/Dockerfile`）
+
+> LXC 低配（256MB）推荐裸金属；资源充裕或需可移植时可加 `--docker`。
+
+---
+
+## 13. 约束与原则（给执行 AI）
+
+- 默认使用简体中文
+- 优先最小修改，完成后自行验证并汇报
+- 敏感凭证绝不写入会进 git 的文件（AGENTS.md / 脚本 / 教程）
+- 每个高风险操作（改配置、重启服务）前自动备份
+- 不擅自加防火墙 drop 规则（避免锁死 SSH）
+- 所有生成密钥用 `openssl rand`，base64 密钥用标准 base64（不是 urlsafe）
+- Go 交叉编译用 `CGO_ENABLED=0`（纯静态，无 libc 依赖）
+- 执行前先读本文件 §1-§14，§14 为推荐入口、§9 为手动参考，每步报告进度

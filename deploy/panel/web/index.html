@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ANS-GO 管理面板</title>
+<script src="static/qrcode.min.js"></script>
+<style>
+  :root{--bg:#0f1419;--card:#1a2029;--card2:#222b36;--txt:#d4dae0;--mut:#8b97a3;--acc:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--bd:#2d3744}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt);font-size:14px;line-height:1.5}
+  a{color:var(--acc);text-decoration:none}
+  button{cursor:pointer;font-family:inherit;font-size:13px;border:none;border-radius:6px;padding:7px 14px;background:var(--card2);color:var(--txt);transition:.15s}
+  button:hover{background:#2f3a47}
+  button.primary{background:var(--acc);color:#fff}
+  button.primary:hover{background:#2563eb}
+  button.danger{background:var(--err);color:#fff}
+  button.danger:hover{background:#dc2626}
+  button.ok{background:var(--ok);color:#fff}
+  input,select{font-family:inherit;font-size:13px;background:var(--card2);border:1px solid var(--bd);color:var(--txt);border-radius:6px;padding:7px 10px;width:100%}
+  input:focus{outline:none;border-color:var(--acc)}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:14px}
+  .card h3{font-size:14px;color:#fff;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+  .mut{color:var(--mut)}
+  /* login */
+  #login{display:flex;align-items:center;justify-content:center;min-height:100vh}
+  .login-box{width:340px;max-width:90vw}
+  .login-box h1{font-size:20px;text-align:center;margin-bottom:6px}
+  .login-box .sub{text-align:center;color:var(--mut);margin-bottom:20px;font-size:12px}
+  .login-box button{width:100%;margin-top:8px;padding:9px}
+  .login-err{color:var(--err);font-size:12px;margin-top:8px;min-height:16px;text-align:center}
+  .forgot{margin-top:14px;font-size:12px;color:var(--mut);text-align:center}
+  .forgot code{background:var(--card2);padding:2px 6px;border-radius:4px;color:var(--warn)}
+  /* app layout */
+  #app{display:none;min-height:100vh}
+  .topbar{background:var(--card);border-bottom:1px solid var(--bd);padding:10px 18px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+  .topbar .brand{font-weight:600;font-size:15px}
+  .nav{display:flex;gap:4px;flex-wrap:wrap;padding:10px 18px 0;background:var(--card);border-bottom:1px solid var(--bd)}
+  .nav button{background:transparent;border-radius:6px 6px 0 0;padding:8px 14px;color:var(--mut)}
+  .nav button.active{background:var(--bg);color:#fff;border:1px solid var(--bd);border-bottom:1px solid var(--bg)}
+  .content{padding:18px;max-width:1100px;margin:0 auto}
+  .grid{display:grid;gap:12px}
+  .grid.g4{grid-template-columns:repeat(4,1fr)}
+  .grid.g3{grid-template-columns:repeat(3,1fr)}
+  .grid.g2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:760px){.grid.g4,.grid.g3,.grid.g2{grid-template-columns:1fr}}
+  .stat{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px}
+  .stat .lbl{color:var(--mut);font-size:12px;margin-bottom:6px}
+  .stat .val{font-size:18px;font-weight:600;color:#fff}
+  .stat .sub{font-size:11px;color:var(--mut);margin-top:2px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td,th{padding:8px 10px;border-bottom:1px solid var(--bd);text-align:left}
+  th{color:var(--mut);font-weight:500;font-size:12px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .dot.on{background:var(--ok)} .dot.off{background:var(--err)} .dot.unk{background:var(--mut)}
+  .uri-box{background:var(--card2);border:1px solid var(--bd);border-radius:6px;padding:10px;font-family:monospace;font-size:12px;word-break:break-all;margin:8px 0}
+  .row{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+  .row label{width:120px;color:var(--mut);font-size:12px;flex-shrink:0}
+  .row .f{flex:1}
+  .node-card{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+  .node-card .info{flex:1;min-width:240px}
+  .node-card .qr{width:150px;text-align:center}
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--bd);padding:10px 18px;border-radius:8px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,.4);display:none}
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:200}
+  .overlay .box{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:30px;text-align:center;max-width:420px}
+  .overlay .box h2{margin-bottom:10px}
+  .overlay .count{font-size:48px;font-weight:700;color:var(--acc);margin:14px 0}
+  .help{font-size:11px;color:var(--mut);margin-top:6px}
+  .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--card2);color:var(--mut)}
+  .logs{background:#0a0e12;border:1px solid var(--bd);border-radius:6px;padding:10px;font-family:monospace;font-size:11px;max-height:480px;overflow:auto;white-space:pre-wrap;color:#9fb3c8}
+</style>
+</head>
+<body>
+
+<!-- 登录页 -->
+<div id="login">
+  <div class="login-box card">
+    <h1>🔒 ANS-GO 管理面板</h1>
+    <div class="sub">请输入管理员账号</div>
+    <div class="row" style="margin-bottom:8px"><input id="lu" placeholder="用户名" autocomplete="username"></div>
+    <div class="row" style="margin-bottom:8px"><input id="lp" type="password" placeholder="密码" autocomplete="current-password"></div>
+    <button class="primary" onclick="doLogin()">登 录</button>
+    <div class="login-err" id="lerr"></div>
+    <div class="forgot">忘记密码？SSH 执行 <code>ansgo-admin panel-pass</code> 重置</div>
+  </div>
+</div>
+
+<!-- 应用 -->
+<div id="app">
+  <div class="topbar">
+    <div class="brand">⚡ ANS-GO 管理面板</div>
+    <div><span class="mut" id="topuser"></span> <button onclick="doLogout()">退出</button></div>
+  </div>
+  <div class="nav" id="nav">
+    <button data-t="dash" class="active" onclick="showTab('dash')">仪表盘</button>
+    <button data-t="node" onclick="showTab('node')">节点信息</button>
+    <button data-t="svc" onclick="showTab('svc')">服务控制</button>
+    <button data-t="port" onclick="showTab('port')">端口管理</button>
+    <button data-t="key" onclick="showTab('key')">密钥管理</button>
+    <button data-t="cert" onclick="showTab('cert')">证书管理</button>
+    <button data-t="set" onclick="showTab('set')">面板设置</button>
+    <button data-t="log" onclick="showTab('log')">日志</button>
+  </div>
+  <div class="content" id="content"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="overlay" id="overlay"><div class="box" id="obox"></div></div>
+
+<script>
+const $=s=>document.querySelector(s);
+// fetch 封装：网络异常时也返回 {error} 而非抛出，避免调用处未 catch 导致「静默无反应」
+const api=async(p,o={})=>{try{const r=await fetch(p,Object.assign({credentials:'same-origin',headers:{'Content-Type':'application/json'}},o));const t=await r.text();let j;try{j=JSON.parse(t)}catch(e){j={error:t||('HTTP '+r.status)}}if(!r.ok&&!j.error)j.error='HTTP '+r.status;return j}catch(e){return {error:'请求失败: '+e.message}}};
+// 简易日志：任何未捕获异常都打到控制台 + toast，绝不静默
+window.addEventListener('error',e=>{console.error('[BV]',e.message,e);toast('脚本错误: '+e.message)});
+function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',2600)}
+function copy(t){navigator.clipboard.writeText(t).then(()=>toast('已复制到剪贴板'),()=>toast('复制失败'))}
+function dot(s){const c=s==='active'?'on':(s==='inactive'||s==='failed')?'off':'unk';return `<span class="dot ${c}"></span>${s}`}
+async function checkAuth(){
+  const j=await api('api/auth');
+  if(j.authed){$('#topuser').textContent='👤 '+j.user;showApp();showTab('dash')}
+  else{$('#login').style.display='flex';$('#app').style.display='none';$('#lu').focus()}
+}
+async function doLogin(){
+  const u=$('#lu').value.trim(),p=$('#lp').value;
+  $('#lerr').textContent='登录中…';
+  $('#lerr').style.color='var(--mut)';
+  try{
+    const j=await api('api/login',{method:'POST',body:JSON.stringify({user:u,pass:p})});
+    $('#lerr').style.color='var(--err)';
+    if(j.ok){$('#topuser').textContent='👤 '+(u||'admin');showApp();showTab('dash')}
+    else $('#lerr').textContent=j.error||'登录失败';
+  }catch(e){$('#lerr').style.color='var(--err)';$('#lerr').textContent='登录异常: '+e.message;console.error(e)}
+}
+async function doLogout(){await api('api/logout',{method:'POST'});location.reload()}
+function showApp(){$('#login').style.display='none';$('#app').style.display='block'}
+function showTab(t){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.t===t));
+  ({dash:loadDash,node:loadNode,svc:loadSvc,port:loadPort,key:loadKey,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)()}
+
+// 仪表盘
+async function loadDash(){
+  $('#content').innerHTML='<div class="mut">加载中…</div>';
+  const j=await api('api/dashboard');
+  if(j.error)return $('#content').innerHTML='<div class="card">'+j.error+'</div>';
+  const cert=j.cert||{};
+  const memPct=j.mem.total?Math.round(j.mem.used/j.mem.total*100):0;
+  $('#content').innerHTML=`
+   <div class="grid g4">
+     <div class="stat"><div class="lbl">NaiveProxy</div><div class="val" style="font-size:14px">${dot(j.services.naive)}</div><div class="sub">:${j.ports.naive}</div></div>
+     <div class="stat"><div class="lbl">AnyTLS</div><div class="val" style="font-size:14px">${dot(j.services.anytls)}</div><div class="sub">:${j.ports.anytls}</div></div>
+     <div class="stat"><div class="lbl">Shadowsocks</div><div class="val" style="font-size:14px">${dot(j.services.ss)}</div><div class="sub">:${j.ports.ss}</div></div>
+     <div class="stat"><div class="lbl">管理面板</div><div class="val" style="font-size:14px">${dot(j.services.panel)}</div><div class="sub">:${j.ports.panel}</div></div>
+   </div>
+   <div class="grid g4">
+     <div class="stat"><div class="lbl">内存占用</div><div class="val">${memPct}%</div><div class="sub">${Math.round(j.mem.used/1024)} / ${Math.round(j.mem.total/1024)} MB</div></div>
+     <div class="stat"><div class="lbl">系统负载</div><div class="val">${(j.load||[]).map(x=>x.toFixed(2)).join(' ')}</div></div>
+     <div class="stat"><div class="lbl">运行时长</div><div class="val">${Math.round(j.uptime)}h</div></div>
+     <div class="stat"><div class="lbl">TCP 连接</div><div class="val">${j.tcp}</div></div>
+   </div>
+   <div class="card"><h3>📜 证书状态</h3>
+     <table><tr><th>域名</th><td>${cert.subject||'-'}</td></tr>
+     <tr><th>签发机构</th><td>${cert.issuer_org||cert.issuer||'-'}</td></tr>
+     <tr><th>有效期</th><td>${cert.not_before||'-'} ~ ${cert.not_after||'-'}</td></tr>
+     <tr><th>剩余天数</th><td><b style="color:${cert.days_left<14?'var(--err)':'var(--ok)'}">${cert.days_left??'-'}</b> 天</td></tr></table>
+   </div>`;
+}
+
+// 节点信息
+async function loadNode(){
+  $('#content').innerHTML='<div class="mut">加载中…</div>';
+  const j=await api('api/node');
+  if(j.error)return $('#content').innerHTML=j.error;
+  const card=(title,n)=>`<div class="card"><h3>${title}</h3><div class="node-card">
+     <div class="info"><div class="row"><label>URI</label><div class="f"><div class="uri-box">${n.uri}</div></div></div>
+     ${n.password?'<div class="row"><label>密钥/密码</label><div class="f"><code>'+n.password+'</code></div></div>':''}
+     ${n.user?'<div class="row"><label>用户名</label><div class="f"><code>'+n.user+'</code></div></div>':''}
+     ${n.method?'<div class="row"><label>加密</label><div class="f"><code>'+n.method+'</code></div></div>':''}
+     <div class="row" style="margin-top:10px"><button class="primary" onclick="copy(\`${n.uri}\`)">复制 URI</button></div></div>
+     <div class="qr"><div id="qr-${title}"></div><div class="help mt">扫码导入</div></div></div></div>`;
+  $('#content').innerHTML=card('Shadowsocks',j.ss)+card('AnyTLS',j.anytls)+card('NaiveProxy',j.naive);
+  [['Shadowsocks',j.ss.uri],['AnyTLS',j.anytls.uri],['NaiveProxy',j.naive.uri]].forEach(([k,u])=>{
+    const el=document.getElementById('qr-'+k);if(el){el.innerHTML='';try{new QRCode(el,{text:u,width:140,height:140})}catch(e){}}
+  });
+}
+
+// 服务控制
+async function loadSvc(){
+  const j=await api('api/dashboard');
+  const items=[['NaiveProxy','naive',j.services.naive],['AnyTLS','anytls',j.services.anytls],['Shadowsocks','ss',j.services.ss],['管理面板','panel',j.services.panel]];
+  $('#content').innerHTML=`<div class="card"><h3>🎛️ 服务控制</h3>
+   <table><tr><th>服务</th><th>状态</th><th>操作</th></tr>${items.map(x=>`<tr><td>${x[0]}</td><td>${dot(x[2])}</td>
+     <td><button class="ok" onclick="svc('${x[1]}','restart')">重启</button>
+     ${x[1]==='panel'?'<button onclick="svc(\''+x[1]+'\',\'stop\')" style="opacity:.6">停止</button>':'<button onclick="svc(\''+x[1]+'\',\'stop\')">停止</button><button onclick="svc(\''+x[1]+'\',\'start\')">启动</button>'}</td></tr>`).join('')}</table>
+   <div class="help" style="margin-top:10px">⚠️ 停止"管理面板"后需 SSH 执行 <code>ansgo-admin restart panel</code> 恢复。重启会断开现有代理连接。</div></div>`;
+}
+async function svc(t,a){
+  const verb={restart:'重启',stop:'停止',start:'启动'}[a];
+  if(!confirm(`确认${verb} ${t}？${a==='restart'||a==='stop'?'现有连接会断开。':''}`))return;
+  toast('正在'+verb+'…');
+  const j=await api('api/service',{method:'POST',body:JSON.stringify({target:t,action:a})});
+  if(j.ok){toast(verb+'完成');setTimeout(loadSvc,800)}
+  else toast(j.error||'操作失败');
+}
+
+// 端口管理
+function loadPort(){
+  $('#content').innerHTML=`<div class="card"><h3>🔧 端口管理</h3>
+   <div class="help" style="margin-bottom:12px">修改后对应服务会自动重新生成配置并重启。改面板端口会重启面板（需用新端口重新登录）。</div>
+   <div class="row"><label>Shadowsocks</label><div class="f"><input id="p_ss" type="number" placeholder="23456"></div><button class="primary" onclick="setPort('ss')">应用</button></div>
+   <div class="row"><label>AnyTLS</label><div class="f"><input id="p_anytls" type="number" placeholder="8443"></div><button class="primary" onclick="setPort('anytls')">应用</button></div>
+   <div class="row"><label>NaiveProxy</label><div class="f"><input id="p_naive" type="number" placeholder="443"></div><button class="primary" onclick="setPort('naive')">应用</button></div>
+   <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
+   <div class="row"><label>管理面板</label><div class="f"><input id="p_panel" type="number" placeholder="15608"></div><button class="danger" onclick="setPort('panel')">应用并重启</button></div></div>`;
+  api('api/settings').then(j=>{if(!j.error){['ss','anytls','naive','panel'].forEach(k=>{const e=$('#p_'+k);if(e)e.placeholder=j[k+'_port']})}});
+}
+async function setPort(t){
+  const v=parseInt($('#p_'+t).value);if(!v||v<1||v>65535)return toast('请输入有效端口');
+  if(!confirm(`确认把 ${t} 端口改为 ${v}？${t==='panel'?'面板将重启，需用新端口重新登录。':'该协议会重启，现有连接断开。'}`))return;
+  const j=await api('api/port',{method:'POST',body:JSON.stringify({target:t,port:v})});
+  if(t==='panel'&&j.new_url){showRestartOverlay(j.msg||'面板即将重启',j.new_url,3);return}
+  if(j.ok)toast('端口已更新');else toast(j.error||'失败');
+}
+
+// 密钥管理
+function loadKey(){
+  $('#content').innerHTML=`<div class="card"><h3>🔑 密钥管理</h3>
+   <div class="help" style="margin-bottom:12px">重新生成密钥后，旧密钥立即失效，所有使用旧密钥的客户端需更新。操作前会自动备份。</div>
+   <table><tr><th>协议</th><th>操作</th></tr>
+   <tr><td>Shadowsocks</td><td><button class="danger" onclick="regen('ss')">重新生成密钥</button></td></tr>
+   <tr><td>AnyTLS</td><td><button class="danger" onclick="regen('anytls')">重新生成密码</button></td></tr>
+   <tr><td>NaiveProxy</td><td><button class="danger" onclick="regen('naive')">重新生成账号</button></td></tr></table></div>`;
+}
+async function regen(t){
+  if(!confirm(`⚠️ 确认重新生成 ${t} 的密钥？\n\n此操作会：\n• 备份当前配置\n• 生成新密钥\n• 重启该服务（断开现有连接）\n• 旧密钥立即失效`))return;
+  toast('正在生成新密钥…');
+  const j=await api('api/regen',{method:'POST',body:JSON.stringify({target:t})});
+  if(j.ok){toast('密钥已更新');setTimeout(()=>{showTab('node')},600)}
+  else toast(j.error||'失败');
+}
+
+// 证书
+async function loadCert(){
+  const c=await api('api/cert');
+  $('#content').innerHTML=`<div class="card"><h3>📜 证书管理</h3>
+   <table>${Object.entries(c).filter(([k])=>k!=='error').map(([k,v])=>`<tr><th>${{subject:'域名',issuer:'签发者',issuer_org:'签发机构',not_before:'生效',not_after:'到期',days_left:'剩余天数'}[k]||k}</th><td>${k==='days_left'?`<b style="color:${v<14?'var(--err)':'var(--ok)'}">${v} 天</b>`:v}</td></tr>`).join('')}</table>
+   <div style="margin-top:14px"><button class="primary" onclick="certRenew()">🔄 手动续期</button>
+   <span class="mut" style="margin-left:10px;font-size:12px">acme.sh 已配置 60 天自动续期，通常无需手动操作。</span></div></div>`;
+}
+async function certRenew(){
+  if(!confirm('手动触发证书续期？续期后三服务会自动 reload。'))return;
+  toast('正在续期…（可能需要 1-2 分钟）');
+  const j=await api('api/cert/renew',{method:'POST'});
+  if(j.ok){toast('续期完成');loadCert()}else toast(j.error||'续期失败，查看日志');
+}
+
+// 设置
+async function loadSet(){
+  const j=await api('api/settings');
+  if(j.error)return $('#content').innerHTML=j.error;
+  const f=(id,lbl,val,ph='',type='text')=>`<div class="row"><label>${lbl}</label><div class="f"><input id="s_${id}" type="${type}" value="${val??''}" placeholder="${ph}"></div></div>`;
+  $('#content').innerHTML=`<div class="card"><h3>⚙️ 面板设置</h3>
+   ${f('url_path','URL 路径',j.url_path,'/xxxx/')}
+   ${f('admin_user','管理员用户名',j.admin_user,'')}
+   ${f('admin_pass','新密码(留空不改)','','留空表示不修改','password')}
+   ${f('session_hours','会话时长(小时)',j.session_hours,'','number')}
+   ${f('panel_port','面板端口',j.panel_port,'','number')}
+   ${f('login_lock_threshold','锁定阈值(次)',j.login_lock_threshold,'','number')}
+   ${f('login_lock_minutes','锁定时长(分钟)',j.login_lock_minutes,'','number')}
+   <div style="margin-top:6px"><button class="primary" onclick="saveSet()">💾 保存设置</button>
+   <span class="mut" style="font-size:12px;margin-left:8px">改 URL 路径或面板端口会重启面板。</span></div>
+   <div class="help" style="margin-top:12px">当前协议端口 — SS: ${j.ss_port} / AnyTLS: ${j.anytls_port} / Naive: ${j.naive_port}（在"端口管理"修改）</div></div>`;
+}
+async function saveSet(){
+  const g=id=>$('#s_'+id).value;
+  const body={url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes'))};
+  if(g('admin_pass'))body.admin_pass=g('admin_pass');
+  // 只传发生变化的字段由后端处理；这里全传，后端按指针判断（空串/0 会触发改动）
+  const j=await api('api/settings',{method:'POST',body:JSON.stringify(body)});
+  if(j.ok){
+    if(j.new_url){showRestartOverlay(j.msg||'面板即将重启',j.new_url,3);return}
+    toast('设置已保存');
+  }else toast(j.error||'保存失败');
+}
+
+// 日志
+function loadLog(){
+  $('#content').innerHTML=`<div class="card"><h3>📃 日志查看</h3>
+   <div class="row"><label>服务</label><div class="f"><select id="log_svc"><option value="naive">NaiveProxy(caddy)</option><option value="ss">SS/AnyTLS(sing-box)</option><option value="panel">面板(ansgo-panel)</option></select></div>
+   <button class="primary" onclick="loadLogData()">刷新</button></div>
+   <div class="logs" id="logbox">请选择服务并刷新</div></div>`;
+}
+async function loadLogData(){
+  const s=$('#log_svc').value;$('#logbox').textContent='加载中…';
+  const j=await api('api/logs?target='+s+'&n=200');
+  $('#logbox').textContent=j.logs||j.error||'(空)';
+}
+
+// 自重启覆盖层（倒计时）
+function showRestartOverlay(msg,url,sec){
+  let n=sec;
+  $('#obox').innerHTML=`<h2>🔄 即将重启面板</h2><div style="color:var(--mut);font-size:13px">${msg}</div><div class="count" id="cnt">${n}</div><a href="${url}" style="display:inline-block;margin-top:8px"><button class="primary">立即前往新地址</button></a>`;
+  $('#overlay').style.display='flex';
+  const t=setInterval(()=>{n--;const e=$('#cnt');if(e)e.textContent=n;if(n<=0){clearInterval(t);location.href=url}},1000);
+}
+
+document.getElementById('lp').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+document.getElementById('lu').addEventListener('keydown',e=>{if(e.key==='Enter')$('#lp').focus()});
+checkAuth();
+</script>
+</body>
+</html>
