@@ -16,7 +16,7 @@ set -uo pipefail
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.1.0"
+VER="v1.2.0"
 ARCH_MAP=( [x86_64]=amd64 [aarch64]=arm64 [arm64]=arm64 )
 AARCH="${ARCH_MAP[$(uname -m)]:-amd64}"
 
@@ -78,6 +78,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ---- landing 子命令：在落地机一键部署 ss-server ----
+if [ "${1:-}" = "--landing" ]; then
+  . /etc/ansgo-deploy/ansgo-landing.sh 2>/dev/null || true
+  exit 0
+fi
+
 # ---- 交互收集 ----
 ask(){ # prompt default -> 读入到 ASK_VAL
   local p="$1" d="${2:-}" v
@@ -99,6 +105,40 @@ if ! grep -qiE 'debian|ubuntu' /etc/os-release 2>/dev/null; then warn "未检测
 command -v curl >/dev/null || apt-get update && apt-get install -y curl ca-certificates
 command -v python3 >/dev/null || apt-get install -y python3
 command -v openssl >/dev/null || apt-get install -y openssl
+
+# ---- stage1: 系统调优（任意服务器都做，幂等）----
+hr "0/8 系统调优（stage1，幂等）"
+mkdir -p /etc/sysctl.d /etc/security/limits.d /etc/systemd/journald.conf.d
+# 网络内核调优（BBR/TFO/MTU/TIME_WAIT），LXC 内只读项会被自动忽略
+cat > /etc/sysctl.d/99-ansgo-tune.conf <<'SYS'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_max_tw_buckets = 1048576
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.ip_local_port_range = 10000 65535
+SYS
+sysctl --system >/dev/null 2>&1 || warn "部分 sysctl 在 LXC 内为宿主只读，已忽略"
+# 文件描述符上限
+cat > /etc/security/limits.d/99-ansgo.conf <<'LIM'
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+LIM
+# journald 限 50M
+cat > /etc/systemd/journald.conf.d/size.conf <<'JOU'
+[Journal]
+SystemMaxUse=50M
+JOU
+systemctl restart systemd-journald 2>/dev/null || true
+log "系统调优完成"
 
 # ---- 交互式收集缺失项 ----
 if [ -z "$DOMAIN" ]; then ask_req "域名（已解析到本机，DNS 托管在 Dynu）"; DOMAIN="$ASK_VAL"; fi

@@ -77,6 +77,10 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		requireAuth(certRenewHandler)(w, r)
 	case rel == "api/settings":
 		requireAuth(settingsHandler)(w, r)
+	case rel == "api/landing":
+		requireAuth(landingHandler)(w, r)
+	case rel == "api/group2":
+		requireAuth(group2Handler)(w, r)
 	case rel == "api/logs":
 		requireAuth(logsHandler)(w, r)
 	default:
@@ -185,12 +189,18 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	s := readSecrets()
 	uris := buildURIs(c, s)
-	jwrite(w, 200, map[string]any{
+	resp := map[string]any{
 		"domain":  c.Domain,
 		"ss":      map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": s.SSKey},
 		"anytls":  map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": s.AnyTLSPass, "sni": c.Domain},
 		"naive":   map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": s.NaiveUser, "pass": s.NaivePass},
-	})
+		"group2_enabled": c.Group2Enabled == "true",
+	}
+	if c.Group2Enabled == "true" {
+		resp["anytls2"] = map[string]any{"uri": uris["anytls2"], "port": c.AnyTLS2Port, "password": s.AnyTLS2Pass, "sni": c.Domain, "via": "ss-landing"}
+		resp["naive2"] = map[string]any{"uri": uris["naive2"], "port": c.Naive2Port, "user": s.Naive2User, "pass": s.Naive2Pass, "via": "ss-landing"}
+	}
+	jwrite(w, 200, resp)
 }
 
 // ===================== 服务控制 =====================
@@ -323,11 +333,15 @@ func regenHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var b struct{ Target string `json:"target"` }
 	json.NewDecoder(r.Body).Decode(&b)
-	if b.Target != "ss" && b.Target != "anytls" && b.Target != "naive" {
-		jerr(w, 400, "target 必须为 ss/anytls/naive")
+	if b.Target != "ss" && b.Target != "anytls" && b.Target != "naive" && b.Target != "g2" {
+		jerr(w, 400, "target 必须为 ss/anytls/naive/g2")
 		return
 	}
-	out, err := exec.Command(binAdmin, "regen", b.Target).CombinedOutput()
+	adminArgs := []string{"regen", b.Target}
+	if b.Target == "g2" {
+		adminArgs = []string{"regen2"}
+	}
+	out, err := exec.Command(binAdmin, adminArgs...).CombinedOutput()
 	if err != nil {
 		jerr(w, 500, "regen 失败: "+string(out))
 		return
@@ -549,6 +563,7 @@ func bcryptOK(hash, plain string) bool {
 // ---- 密钥读取 ----
 type secretData struct {
 	SSMethod, SSKey, AnyTLSPass, AnyTLSUUID, NaiveUser, NaivePass string
+	AnyTLS2Pass, AnyTLS2UUID, Naive2User, Naive2Pass string
 }
 
 func readSecrets() secretData {
@@ -581,6 +596,14 @@ func readSecrets() secretData {
 			s.NaiveUser = v
 		case "NAIVE_PASS":
 			s.NaivePass = v
+		case "ANYTLS2_PASS":
+			s.AnyTLS2Pass = v
+		case "ANYTLS2_UUID":
+			s.AnyTLS2UUID = v
+		case "NAIVE2_USER":
+			s.Naive2User = v
+		case "NAIVE2_PASS":
+			s.Naive2Pass = v
 		}
 	}
 	if s.SSMethod == "" {
@@ -602,6 +625,17 @@ func buildURIs(c Config, s secretData) map[string]string {
 	if s.NaiveUser != "" {
 		u["naive"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#ANS-GO-Naive",
 			url.QueryEscape(s.NaiveUser), url.QueryEscape(s.NaivePass), c.Domain, c.NaivePort)
+	}
+	// 第2组（启用时）
+	if c.Group2Enabled == "true" {
+		if s.AnyTLS2Pass != "" && c.AnyTLS2Port != 0 {
+			u["anytls2"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#ANS-GO-AnyTLS2",
+				s.AnyTLS2Pass, c.Domain, c.AnyTLS2Port, c.Domain)
+		}
+		if s.Naive2User != "" && c.Naive2Port != 0 {
+			u["naive2"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#ANS-GO-Naive2",
+				url.QueryEscape(s.Naive2User), url.QueryEscape(s.Naive2Pass), c.Domain, c.Naive2Port)
+		}
 	}
 	return u
 }
@@ -718,4 +752,151 @@ func certInfo(certDir string) map[string]any {
 	info["not_after"] = cert0.NotAfter.Format("2006-01-02")
 	info["days_left"] = days
 	return info
+}
+
+// ===================== 落地 SS 出口设置 =====================
+
+func landingHandler(w http.ResponseWriter, r *http.Request) {
+	c := configGet()
+	if r.Method == "GET" {
+		jwrite(w, 200, map[string]any{
+			"enabled":  c.SSLandingEnabled == "true",
+			"host":     c.SSLandingHost,
+			"port":     c.SSLandingPort,
+			"method":   c.SSLandingMethod,
+			"password": c.SSLandingPassword,
+		})
+		return
+	}
+	// POST
+	var b struct {
+		Enabled  *bool   `json:"enabled"`
+		Host     *string `json:"host"`
+		Port     *int    `json:"port"`
+		Method   *string `json:"method"`
+		Password *string `json:"password"`
+	}
+	json.NewDecoder(r.Body).Decode(&b)
+	if b.Enabled != nil {
+		if *b.Enabled {
+			c.SSLandingEnabled = "true"
+		} else {
+			c.SSLandingEnabled = "false"
+		}
+	}
+	if b.Host != nil {
+		c.SSLandingHost = strings.TrimSpace(*b.Host)
+	}
+	if b.Port != nil {
+		c.SSLandingPort = clamp(*b.Port, 1, 65535)
+	}
+	if b.Method != nil && *b.Method != "" {
+		c.SSLandingMethod = *b.Method
+	}
+	if b.Password != nil {
+		c.SSLandingPassword = *b.Password
+	}
+	// 启用时校验完整性 + 密钥长度（2022-blake3-aes-128-gcm 需 16 字节密钥）
+	if c.SSLandingEnabled == "true" {
+		if c.SSLandingHost == "" || c.SSLandingPort == 0 || c.SSLandingPassword == "" {
+			jerr(w, 400, "启用落地需填写 host/port/password")
+			return
+		}
+		// 校验密钥：2022-blake3 方法要求原始字节长度 = 算法要求的字节数
+		if strings.HasPrefix(c.SSLandingMethod, "2022-blake3-aes-128") {
+			if !validSS2022Key(c.SSLandingPassword, 16) {
+				jerr(w, 400, "密钥长度错误：2022-blake3-aes-128-gcm 需 base64(16字节)=24字符的密钥")
+				return
+			}
+		} else if strings.HasPrefix(c.SSLandingMethod, "2022-blake3-aes-256") {
+			if !validSS2022Key(c.SSLandingPassword, 32) {
+				jerr(w, 400, "密钥长度错误：2022-blake3-aes-256-gcm 需 base64(32字节)=44字符的密钥")
+				return
+			}
+		}
+	}
+	if err := configSet(c); err != nil {
+		jerr(w, 500, "保存失败: "+err.Error())
+		return
+	}
+	// 重新生成 sing-box（ss outbound 变更）并重启
+	go func() {
+		_ = exec.Command(binGenConf, "sing-box").Run()
+		_ = exec.Command("systemctl", "restart", "sing-box").Run()
+	}()
+	jwrite(w, 200, map[string]bool{"ok": true})
+}
+
+// ===================== 第2组服务设置 =====================
+
+func group2Handler(w http.ResponseWriter, r *http.Request) {
+	c := configGet()
+	if r.Method == "GET" {
+		// 读取第2组密钥是否存在
+		s := readSecrets()
+		jwrite(w, 200, map[string]any{
+			"enabled":       c.Group2Enabled == "true",
+			"anytls2_port":  c.AnyTLS2Port,
+			"naive2_port":   c.Naive2Port,
+			"has_keys":      s.AnyTLS2Pass != "" && s.Naive2User != "",
+			"landing_on":    c.SSLandingEnabled == "true",
+			"disguise_naive2": c.DisguiseNaive2,
+		})
+		return
+	}
+	// POST
+	var b struct {
+		Enabled       *bool   `json:"enabled"`
+		AnyTLS2Port   *int    `json:"anytls2_port"`
+		Naive2Port    *int    `json:"naive2_port"`
+		DisguiseNaive2 *string `json:"disguise_naive2"`
+	}
+	json.NewDecoder(r.Body).Decode(&b)
+	previouslyEnabled := c.Group2Enabled == "true"
+	if b.Enabled != nil {
+		if *b.Enabled {
+			c.Group2Enabled = "true"
+		} else {
+			c.Group2Enabled = "false"
+		}
+	}
+	if b.AnyTLS2Port != nil {
+		c.AnyTLS2Port = clamp(*b.AnyTLS2Port, 1, 65535)
+	}
+	if b.Naive2Port != nil {
+		c.Naive2Port = clamp(*b.Naive2Port, 1, 65535)
+	}
+	if b.DisguiseNaive2 != nil && *b.DisguiseNaive2 != "" {
+		c.DisguiseNaive2 = *b.DisguiseNaive2
+	}
+	// 启用时校验：密钥需已生成 + 端口必填
+	if c.Group2Enabled == "true" {
+		s := readSecrets()
+		if s.AnyTLS2Pass == "" || s.Naive2User == "" {
+			jerr(w, 400, "第2组密钥未生成，请先点击「生成第2组密钥」")
+			return
+		}
+		if c.AnyTLS2Port == 0 || c.Naive2Port == 0 {
+			jerr(w, 400, "启用第2组需填写 anytls2_port / naive2_port")
+			return
+		}
+	}
+	if err := configSet(c); err != nil {
+		jerr(w, 500, "保存失败: "+err.Error())
+		return
+	}
+	// 状态变化需重新生成两个服务配置并重启
+	if previouslyEnabled != (c.Group2Enabled == "true") || c.Group2Enabled == "true" {
+		go func() {
+			_ = exec.Command(binGenConf, "all").Run()
+			_ = exec.Command("systemctl", "restart", "sing-box").Run()
+			_ = exec.Command("systemctl", "restart", "caddy").Run()
+		}()
+	}
+	jwrite(w, 200, map[string]bool{"ok": true})
+}
+
+// generateGroup2Keys 生成第2组密钥到 secrets.env（委托 ansgo-admin regen2）
+func generateGroup2Keys() error {
+	return exec.Command(binAdmin, "regen2").Run()
 }
