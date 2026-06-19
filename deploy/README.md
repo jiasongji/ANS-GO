@@ -46,11 +46,11 @@ DOMAIN=your-domain.com EMAIL=you@example.com \
 
 ### 步骤 4-5 切换真实证书 + 域名伪装
 ```bash
-# 建 /etc/ansgo/panel.json（含 disguise 字段）+ /etc/ansgo/secrets.env
+# 建 /etc/ansgo/panel.json（含 disguise_panel/disguise_naive 字段）+ /etc/ansgo/secrets.env
 ansgo-genconf all && ansgo-genconf validate
 systemctl restart sing-box && systemctl restart caddy
 ```
-`disguise` 字段：`proxy:https://soft.xiaoz.org`（默认，反代伪装站）或 `page`（静态默认页）。
+`disguise_panel` / `disguise_naive` 字段：`:443` 直访伪装站 与 naive 端口伪装站，各自可设 `proxy:<URL>`（反代，默认 `soft.xiaoz.org`）或 `page`（静态默认页）。两者均可在 Web 后台「面板设置」页独立配置，修改后 caddy 自动重载。
 
 ### 步骤 6-8 脚本 + 面板
 ```bash

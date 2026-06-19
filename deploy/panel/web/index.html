@@ -266,13 +266,17 @@ async function loadSet(){
    ${f('panel_port','面板端口',j.panel_port,'','number')}
    ${f('login_lock_threshold','锁定阈值(次)',j.login_lock_threshold,'','number')}
    ${f('login_lock_minutes','锁定时长(分钟)',j.login_lock_minutes,'','number')}
+   <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
+   <div class="help" style="margin:0 0 10px 0">域名伪装站点（格式 <code>proxy:https://站点</code> 反代，或 <code>page</code> 用默认页）。保存后 caddy 自动重载。</div>
+   ${f('disguise_panel','直访伪装(:443)',j.disguise_panel,'proxy:https://soft.xiaoz.org')}
+   ${f('disguise_naive','Naive伪装(代理端口)',j.disguise_naive,'proxy:https://soft.xiaoz.org')}
    <div style="margin-top:6px"><button class="primary" onclick="saveSet()">💾 保存设置</button>
-   <span class="mut" style="font-size:12px;margin-left:8px">改 URL 路径或面板端口会重启面板。</span></div>
+   <span class="mut" style="font-size:12px;margin-left:8px">改 URL 路径或面板端口会重启面板；改伪装站点会重载 caddy。</span></div>
    <div class="help" style="margin-top:12px">当前协议端口 — SS: ${j.ss_port} / AnyTLS: ${j.anytls_port} / Naive: ${j.naive_port}（在"端口管理"修改）</div></div>`;
 }
 async function saveSet(){
   const g=id=>$('#s_'+id).value;
-  const body={url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes'))};
+  const body={url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive')};
   if(g('admin_pass'))body.admin_pass=g('admin_pass');
   // 只传发生变化的字段由后端处理；这里全传，后端按指针判断（空串/0 会触发改动）
   const j=await api('api/settings',{method:'POST',body:JSON.stringify(body)});

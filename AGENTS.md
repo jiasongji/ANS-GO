@@ -122,9 +122,18 @@
 - 二进制：`/usr/local/bin/caddy`（klzgrad/forwardproxy release v2.11.2-naive，含 naive padding 层）
 - 配置：`/etc/caddy/Caddyfile`（设 `admin off`，故 reload 不可用，改配置用 restart）
 - 关键特性：`probe_resistance`（探测伪装）+ `hide_ip` + `hide_via` + naive padding
-- **域名直访伪装**：浏览器直访 `https://your-domain.com` 时，由 caddy 反代到伪装站（默认 `https://soft.xiaoz.org`），比静态页更像真实站点；naive 认证客户端走 forward_proxy 隐蔽隧道。伪装方式由 `panel.json` 的 `disguise` 字段控制：
-  - `proxy:https://soft.xiaoz.org`（默认）→ 反代指定站点
-  - `page` → 用 `/var/www/html` 默认页（传统静态伪装）
+- **双伪装架构**（caddy 在三个端口上各起一个 site）：
+  - `:443` 纯反代伪装站（浏览器直访命中，**不提供代理**）→ 反代到 `disguise_panel` 指定站点
+  - `:44333`（naive 端口）NaiveProxy：认证流量走 forward_proxy 隐蔽隧道，未认证流量反代到 `disguise_naive` 指定站点
+  - `:80` → 301 重定向到 `https://域名`（443）
+- **两个伪装站点均可在 Web 后台「面板设置」页独立配置**（`panel.json` 字段）：
+  - `disguise_panel` — `:443` 直访伪装（默认 `proxy:https://soft.xiaoz.org`）
+  - `disguise_naive` — naive 端口伪装（默认 `proxy:https://soft.xiaoz.org`）
+  - 值格式：`proxy:<URL>` 反代指定站点；或 `page` 用 `/var/www/html` 默认页
+  - 后台修改后 caddy 自动重载（无需 SSH）
+- 证书换真实证书后，浏览器直访 `https://your-domain.com` 显示绿色锁 + 伪装站内容
+
+> ⚠️ **NaiveProxy 端口不要用 443**：443 留给纯反代伪装站（保证域名直访有效）。naive 用非标准端口（默认 44333），客户端带端口连接。
 - 证书换真实证书后，浏览器直访 `https://your-domain.com` 显示绿色锁
 
 ### 5.2 AnyTLS（sing-box inbound）
@@ -377,7 +386,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --email you@example.com \
              --non-interactive
 ```
-常用参数：`--domain` `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port` `--anytls-port` `--naive-port` `--panel-port` `--panel-user` `--disguise proxy:https://soft.xiaoz.org` `--non-interactive` `--docker`（用 ghcr.io 镜像跑面板）。
+常用参数：`--domain` `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port` `--anytls-port` `--naive-port` `--panel-port` `--panel-user` `--disguise-panel proxy:https://soft.xiaoz.org` `--disguise-naive proxy:https://soft.xiaoz.org` `--non-interactive` `--docker`（用 ghcr.io 镜像跑面板）。
 
 ### 资源来源
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`

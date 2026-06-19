@@ -33,8 +33,14 @@ SS_PORT=$(get_conf ss_port);      SS_PORT="${SS_PORT:-23456}"
 ANYTLS_PORT=$(get_conf anytls_port); ANYTLS_PORT="${ANYTLS_PORT:-8443}"
 NAIVE_PORT=$(get_conf naive_port); NAIVE_PORT="${NAIVE_PORT:-443}"
 SS_METHOD="${SS_METHOD:-2022-blake3-aes-128-gcm}"
-# 伪装方式：proxy:<URL> 反向代理(默认 soft.xiaoz.org) / page 用 /var/www/html 默认页
-DISGUISE=$(get_conf disguise);    DISGUISE="${DISGUISE:-proxy:https://soft.xiaoz.org}"
+# 伪装站点（两个独立）：
+#   disguise_panel -> :443 纯反代伪装站（浏览器直访命中，无代理），默认 soft.xiaoz.org
+#   disguise_naive -> :NAIVE_PORT NaiveProxy inbound 的伪装站（未认证命中），默认 soft.xiaoz.org
+# 格式：proxy:<URL>（反代）或 page（/var/www/html 默认页）
+DISGUISE_PANEL=$(get_conf disguise_panel); DISGUISE_PANEL="${DISGUISE_PANEL:-proxy:https://soft.xiaoz.org}"
+DISGUISE_NAIVE=$(get_conf disguise_naive); DISGUISE_NAIVE="${DISGUISE_NAIVE:-proxy:https://soft.xiaoz.org}"
+# 向后兼容：旧 disguise 字段存在时回填 disguise_naive
+DISGUISE_LEGACY=$(get_conf disguise); [ -n "$DISGUISE_LEGACY" ] && [ "$DISGUISE_NAIVE" = "proxy:https://soft.xiaoz.org" ] && DISGUISE_NAIVE="$DISGUISE_LEGACY"
 
 # 校验必备密钥
 need() { [ -n "${!1:-}" ] || { echo "ansgo-genconf: 缺少 $1（检查 $SECRETS）" >&2; exit 2; }; }
@@ -80,12 +86,12 @@ EOF
   echo "已生成 /etc/sing-box/config.json (ss=${SS_PORT}, anytls=${ANYTLS_PORT}, sni=${DOMAIN})"
 }
 
-# 根据 DISGUISE 生成伪装块（反代 or 默认页）
+# 根据伪装配置生成 caddy 块（反代 or 默认页）
+# 参数 $1 = DISGUISE 值（proxy:<URL> 或 page）
 disguise_block() {
-  case "$DISGUISE" in
+  case "$1" in
     proxy:*)
-      local up; up="${DISGUISE#proxy:}"
-      # 提取 host（去掉 scheme 与路径）
+      local up; up="${1#proxy:}"
       local host; host="$(echo "$up" | sed -E 's#^https?://([^/:]+).*#\1#')"
       cat <<BLK
   reverse_proxy ${up} {
@@ -101,7 +107,6 @@ BLK
 BLK
       ;;
     *)
-      # 兜底：默认页
       cat <<BLK
   file_server {
     root /var/www/html
@@ -112,8 +117,9 @@ BLK
 }
 
 gen_caddy() {
-  # order 同时声明 reverse_proxy 与 file_server，兼容两种伪装
-  local DISGUISE_BLOCK; DISGUISE_BLOCK="$(disguise_block)"
+  local PANEL_BLK NAIVE_BLK
+  PANEL_BLK="$(disguise_block "$DISGUISE_PANEL")"
+  NAIVE_BLK="$(disguise_block "$DISGUISE_NAIVE")"
   cat > /etc/caddy/Caddyfile <<EOF
 {
   order forward_proxy before reverse_proxy
@@ -124,6 +130,14 @@ gen_caddy() {
   }
 }
 
+# :443 纯反代伪装站（浏览器直访命中，不提供代理）
+:443 {
+  tls ${CERTDIR}/fullchain.pem ${CERTDIR}/privkey.pem
+  encode zstd gzip
+${PANEL_BLK}
+}
+
+# :${NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）
 :${NAIVE_PORT} {
   tls ${CERTDIR}/fullchain.pem ${CERTDIR}/privkey.pem
   encode zstd gzip
@@ -133,14 +147,14 @@ gen_caddy() {
     hide_via
     probe_resistance
   }
-${DISGUISE_BLOCK}
+${NAIVE_BLK}
 }
 
 :80 {
   redir https://${DOMAIN}{uri} permanent
 }
 EOF
-  echo "已生成 /etc/caddy/Caddyfile (naive=${NAIVE_PORT}, tls=真实证书, 伪装=${DISGUISE}, :80->https 跳转)"
+  echo "已生成 /etc/caddy/Caddyfile (:443 纯伪装=${DISGUISE_PANEL}, :${NAIVE_PORT} naive伪装=${DISGUISE_NAIVE}, :80->https 跳转)"
 }
 
 do_validate() {
