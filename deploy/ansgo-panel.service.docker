@@ -1,0 +1,20 @@
+[Unit]
+Description=ANS-GO 面板 (Docker 模式, 实验性)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f ansgo-panel
+ExecStart=/usr/bin/docker run --name ansgo-panel --network host \
+  -v /etc/ansgo:/etc/ansgo -v /etc/ssl/ansgo:/etc/ssl/ansgo:ro \
+  -v /etc/sing-box:/etc/sing-box:ro -v /etc/caddy:/etc/caddy:ro \
+  -v /usr/local/bin/ansgo-admin:/usr/local/bin/ansgo-admin:ro \
+  -v /usr/local/bin/ansgo-genconf:/usr/local/bin/ansgo-genconf:ro \
+  ghcr.io/jiasongji/ansgo-panel:latest
+ExecStop=/usr/bin/docker stop ansgo-panel
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
