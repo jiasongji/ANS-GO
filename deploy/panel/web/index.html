@@ -6,16 +6,19 @@
 <title>ANS-GO 管理面板</title>
 <script src="static/qrcode.min.js"></script>
 <style>
-  :root{--bg:#0f1419;--card:#1a2029;--card2:#222b36;--txt:#d4dae0;--mut:#8b97a3;--acc:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--bd:#2d3744}
+  /* 暗黑（默认）*/
+  :root,[data-theme="dark"]{--bg:#0f1419;--card:#1a2029;--card2:#222b36;--txt:#d4dae0;--mut:#8b97a3;--acc:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--bd:#2d3744;--hover:#2f3a47}
+  /* 白天 */
+  [data-theme="light"]{--bg:#f5f7fa;--card:#ffffff;--card2:#eef2f7;--txt:#1a2029;--mut:#6b7785;--acc:#2563eb;--ok:#16a34a;--warn:#d97706;--err:#dc2626;--bd:#d8dee8;--hover:#e2e8f0}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt);font-size:14px;line-height:1.5}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt);font-size:14px;line-height:1.5;transition:background .2s,color .2s}
   a{color:var(--acc);text-decoration:none}
   button{cursor:pointer;font-family:inherit;font-size:13px;border:none;border-radius:6px;padding:7px 14px;background:var(--card2);color:var(--txt);transition:.15s}
-  button:hover{background:#2f3a47}
+  button:hover{background:var(--hover)}
   button.primary{background:var(--acc);color:#fff}
-  button.primary:hover{background:#2563eb}
+  button.primary:hover{background:var(--acc);opacity:.9}
   button.danger{background:var(--err);color:#fff}
-  button.danger:hover{background:#dc2626}
+  button.danger:hover{background:var(--err);opacity:.9}
   button.ok{background:var(--ok);color:#fff}
   input,select{font-family:inherit;font-size:13px;background:var(--card2);border:1px solid var(--bd);color:var(--txt);border-radius:6px;padding:7px 10px;width:100%}
   input:focus{outline:none;border-color:var(--acc)}
@@ -89,12 +92,13 @@
 <div id="app">
   <div class="topbar">
     <div class="brand">⚡ ANS-GO 管理面板</div>
-    <div><span class="mut" id="topuser"></span> <button onclick="doLogout()">退出</button></div>
+    <div><span class="mut" id="topuser"></span> <button id="themeBtn" onclick="toggleTheme()" title="切换主题">🌙</button> <button onclick="doLogout()">退出</button></div>
   </div>
   <div class="nav" id="nav">
     <button data-t="dash" class="active" onclick="showTab('dash')">仪表盘</button>
     <button data-t="node" onclick="showTab('node')">节点信息</button>
     <button data-t="svc" onclick="showTab('svc')">服务控制</button>
+    <button data-t="install" onclick="showTab('install')">服务安装</button>
     <button data-t="port" onclick="showTab('port')">端口管理</button>
     <button data-t="key" onclick="showTab('key')">密钥管理</button>
     <button data-t="g2" onclick="showTab('g2')">第二组服务</button>
@@ -137,7 +141,7 @@ async function doLogin(){
 async function doLogout(){await api('api/logout',{method:'POST'});location.reload()}
 function showApp(){$('#login').style.display='none';$('#app').style.display='block'}
 function showTab(t){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.t===t));
-  ({dash:loadDash,node:loadNode,svc:loadSvc,port:loadPort,key:loadKey,g2:loadG2,landing:loadLanding,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)()}
+  ({dash:loadDash,node:loadNode,svc:loadSvc,install:loadInstall,port:loadPort,key:loadKey,g2:loadG2,landing:loadLanding,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)()}
 
 // 仪表盘
 async function loadDash(){
@@ -191,6 +195,33 @@ async function loadNode(){
   qrs.forEach(([k,u])=>{
     const el=document.getElementById('qr-'+k);if(el){el.innerHTML='';try{new QRCode(el,{text:u,width:140,height:140})}catch(e){}}
   });
+}
+
+// 服务安装（面板内按需启用/停用代理服务）
+async function loadInstall(){
+  const j=await api('api/dashboard');
+  if(j.error)return $('#content').innerHTML=j.error;
+  const en=j.svc_enabled||{};
+  const card=(name,label,desc,enabled,port)=>{
+    const st=enabled?'<span class="tag" style="background:var(--ok);color:#fff">已安装</span>':'<span class="tag">未安装</span>';
+    return `<div class="card"><h3>${label} ${st}</h3><div class="mut" style="margin-bottom:10px;font-size:12px">${desc}</div>
+      <div class="row"><label>端口</label><div class="f"><code>${port}</code> <span class="mut">（在「端口管理」修改）</span></div></div>
+      <div style="margin-top:8px">${enabled?'<button class="danger" onclick="svcInstall(\''+name+'\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\''+name+'\',\'install\')">安装</button>'}</div>
+      <div class="help" style="margin-top:8px">${enabled?'卸载将停止该服务并移除其配置（密钥保留，可重装）。':'安装将生成配置并启动该服务。'}</div></div>`;
+  };
+  $('#content').innerHTML=`<div class="card"><h3>📦 代理服务安装</h3>
+     <div class="help" style="margin-bottom:6px">面板已就绪。以下三个代理服务可独立安装/卸载。安装后即对外提供代理，卸载则停止。第二组服务在「第二组服务」页。</div></div>`
+    +card('ss','Shadowsocks','sing-box shadowsocks-2022 inbound，加密 2022-blake3-aes-128-gcm。',en.ss,j.ports.ss)
+    +card('anytls','AnyTLS','sing-box anytls inbound，TLS 用共享证书。',en.anytls,j.ports.anytls)
+    +card('naive','NaiveProxy','caddy forwardproxy-naive，含域名伪装反代。',en.naive,j.ports.naive);
+}
+async function svcInstall(name,act){
+  const verb=act==='install'?'安装':'卸载';
+  if(!confirm(`确认${verb} ${name} 服务？${act==='uninstall'?'该服务将停止，现有连接断开。':''}`))return;
+  toast(`正在${verb}…`);
+  const j=await api('api/svc-install',{method:'POST',body:JSON.stringify({service:name,action:act})});
+  if(j.ok){toast(`${verb}完成`);setTimeout(loadInstall,500)}
+  else toast(j.error||'操作失败');
 }
 
 // 服务控制
@@ -380,6 +411,10 @@ function showRestartOverlay(msg,url,sec){
 document.getElementById('lp').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
 document.getElementById('lu').addEventListener('keydown',e=>{if(e.key==='Enter')$('#lp').focus()});
 checkAuth();
+// 主题切换（localStorage 记忆）
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);const b=$('#themeBtn');if(b)b.textContent=t==='light'?'☀️':'🌙'}
+function toggleTheme(){const cur=document.documentElement.getAttribute('data-theme')||'dark';const nw=cur==='dark'?'light':'dark';localStorage.setItem('ansgo_theme',nw);applyTheme(nw)}
+applyTheme(localStorage.getItem('ansgo_theme')||'dark');
 </script>
 </body>
 </html>

@@ -81,6 +81,8 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		requireAuth(landingHandler)(w, r)
 	case rel == "api/group2":
 		requireAuth(group2Handler)(w, r)
+	case rel == "api/svc-install":
+		requireAuth(svcInstallHandler)(w, r)
 	case rel == "api/logs":
 		requireAuth(logsHandler)(w, r)
 	default:
@@ -167,6 +169,11 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 			"panel":    svcActive("ansgo-panel"),
 			"caddy":    svcActive("caddy"),
 			"sing-box": svcActive("sing-box"),
+		},
+		"svc_enabled": map[string]bool{
+			"ss":     c.SvcSSEnabled == "true",
+			"anytls": c.SvcAnyTLSEnabled == "true",
+			"naive":  c.SvcNaiveEnabled == "true",
 		},
 		"ports": map[string]int{
 			"naive": c.NaivePort, "anytls": c.AnyTLSPort,
@@ -899,4 +906,83 @@ func group2Handler(w http.ResponseWriter, r *http.Request) {
 // generateGroup2Keys 生成第2组密钥到 secrets.env（委托 ansgo-admin regen2）
 func generateGroup2Keys() error {
 	return exec.Command(binAdmin, "regen2").Run()
+}
+
+// ===================== 服务安装/卸载（面板内按需）=====================
+
+// svcInstallHandler 处理单个代理服务的安装/卸载
+// POST {service: ss|anytls|naive, action: install|uninstall}
+// 安装：写开关=true + genconf + 若 sing-box/caddy 未运行则 enable+start
+// 卸载：写开关=false + genconf + 若对应进程无其他启用服务则 stop+disable
+func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	var b struct {
+		Service string `json:"service"`
+		Action  string `json:"action"`
+	}
+	json.NewDecoder(r.Body).Decode(&b)
+	if b.Action != "install" && b.Action != "uninstall" {
+		jerr(w, 400, "action 必须为 install/uninstall")
+		return
+	}
+	c := configGet()
+	var confTarget, procName string
+	switch b.Service {
+	case "ss":
+		c.SvcSSEnabled = boolStr(b.Action == "install")
+		confTarget, procName = "sing-box", "sing-box"
+	case "anytls":
+		c.SvcAnyTLSEnabled = boolStr(b.Action == "install")
+		confTarget, procName = "sing-box", "sing-box"
+	case "naive":
+		c.SvcNaiveEnabled = boolStr(b.Action == "install")
+		confTarget, procName = "caddy", "caddy"
+	default:
+		jerr(w, 400, "service 必须为 ss/anytls/naive")
+		return
+	}
+	if err := configSet(c); err != nil {
+		jerr(w, 500, "保存配置失败: "+err.Error())
+		return
+	}
+	// 重新生成配置
+	if out, err := exec.Command(binGenConf, confTarget).CombinedOutput(); err != nil {
+		jerr(w, 500, "生成配置失败: "+string(out))
+		return
+	}
+	// 判断该进程是否还需要运行
+	// sing-box：无任何启用 inbound 时可停
+	// caddy：始终需要（:443 伪装站 + :80 跳转是面板/域名基础设施，与代理服务无关）
+	needProc := false
+	if procName == "sing-box" {
+		needProc = c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.Group2Enabled == "true"
+	} else { // caddy 始终运行
+		needProc = true
+	}
+	if b.Action == "install" || needProc {
+		// 启动/重启进程
+		_ = exec.Command("systemctl", "enable", procName).Run()
+		_ = exec.Command("systemctl", "restart", procName).Run()
+	} else {
+		// 无其他启用服务，停止并 disable
+		_ = exec.Command("systemctl", "stop", procName).Run()
+		_ = exec.Command("systemctl", "disable", procName).Run()
+	}
+	jwrite(w, 200, map[string]any{
+		"ok":        true,
+		"service":   b.Service,
+		"installed": b.Action == "install",
+		"proc":      procName,
+		"proc_on":   needProc || b.Action == "install",
+	})
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }

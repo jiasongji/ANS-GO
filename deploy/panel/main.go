@@ -45,6 +45,10 @@ type Config struct {
 	DisguisePanel      string `json:"disguise_panel"`
 	DisguiseNaive      string `json:"disguise_naive"`
 	DisguiseNaive2     string `json:"disguise_naive2"`
+	// 服务开关（面板内按需安装；"true"/"false" 字符串兼容 genconf）
+	SvcSSEnabled       string `json:"svc_ss_enabled"`
+	SvcAnyTLSEnabled   string `json:"svc_anytls_enabled"`
+	SvcNaiveEnabled    string `json:"svc_naive_enabled"`
 	// 第2组额外服务（用字符串 "true"/"false" 以兼容 genconf 的宽松判断）
 	Group2Enabled      string `json:"group2_enabled"`
 	AnyTLS2Port        int    `json:"anytls2_port"`
@@ -90,6 +94,16 @@ func loadConfig() (Config, error) {
 	}
 	if c.DisguiseNaive == "" {
 		c.DisguiseNaive = "proxy:https://example.com"
+	}
+	// 服务开关默认：旧配置无字段时视为已启用（向后兼容现有部署）
+	if c.SvcSSEnabled == "" {
+		c.SvcSSEnabled = "true"
+	}
+	if c.SvcAnyTLSEnabled == "" {
+		c.SvcAnyTLSEnabled = "true"
+	}
+	if c.SvcNaiveEnabled == "" {
+		c.SvcNaiveEnabled = "true"
 	}
 	if c.CertDir == "" {
 		c.CertDir = defCertDir

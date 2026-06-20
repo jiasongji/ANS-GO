@@ -16,7 +16,7 @@ set -uo pipefail
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.2.0"
+VER="v1.3.0"
 ARCH_MAP=( [x86_64]=amd64 [aarch64]=arm64 [arm64]=arm64 )
 AARCH="${ARCH_MAP[$(uname -m)]:-amd64}"
 
@@ -235,6 +235,10 @@ if [ ! -f /etc/ansgo/panel.json ]; then
   "naive_port": ${NAIVE_PORT},
   "disguise_panel": "${DISGUISE_PANEL}",
   "disguise_naive": "${DISGUISE_NAIVE}",
+  "disguise_naive2": "${DISGUISE_NAIVE}",
+  "svc_ss_enabled": "false",
+  "svc_anytls_enabled": "false",
+  "svc_naive_enabled": "false",
   "cert_dir": "/etc/ssl/ansgo",
   "db_path": "/etc/ansgo/sessions.db"
 }
@@ -266,25 +270,24 @@ else
   warn "可稍后手动重试：DOMAIN=$DOMAIN bash /etc/ansgo-deploy/ansgo-cert-issue.sh"
 fi
 
-hr "5/8 生成服务配置并校验"
-ansgo-genconf all
-ansgo-genconf validate || { err "配置校验失败，请检查 /etc/ansgo/ 与 /etc/ansgo/secrets.env"; exit 4; }
+hr "5/7 生成配置（代理服务默认关闭，面板内按需安装）"
+# 初始化密钥（面板安装服务时需要）
+ansgo-genconf all 2>&1 | tail -3
 
-hr "6/8 部署 systemd unit（sing-box / caddy）"
-# sing-box / caddy 的 unit 由本仓库提供（若不存在）
+hr "6/7 部署 systemd unit + 启动面板与伪装站"
+# sing-box / caddy 的 unit（面板安装服务时会 enable）
 for s in sing-box caddy; do
   if [ ! -f /etc/systemd/system/$s.service ]; then
     dl "$RAW/systemd/$s.service" /etc/systemd/system/$s.service 2>/dev/null && log "已安装 $s.service"
   fi
 done
-
-hr "7/8 启动 / 重启代理服务"
 systemctl daemon-reload
-systemctl enable sing-box caddy >/dev/null 2>&1 || true
-systemctl restart sing-box && log "sing-box 已启动"
-systemctl restart caddy 2>/dev/null || systemctl start caddy && log "caddy 已启动"
+# caddy 启动（:443 伪装站 + :80 跳转 是域名直访体验的一部分，随面板一起起来）
+systemctl enable caddy >/dev/null 2>&1 || true
+systemctl restart caddy && log "caddy 已启动（:443 伪装站）"
+# sing-box 暂不启动（无代理服务安装前不需要）
 
-hr "8/8 部署 Web 管理面板"
+hr "7/7 部署 Web 管理面板"
 if [ "$DOCKER" = 1 ]; then
   if ! command -v docker >/dev/null; then curl -fsSL https://get.docker.com | sh; fi
   # 面板需访问宿主 systemd/配置，故 host 网络 + 挂载关键目录
@@ -310,18 +313,19 @@ sleep 2
 
 # ---- 输出最终信息 ----
 hr "部署完成"
-ansgo-admin info 2>/dev/null || true
 URL_PATH=$(python3 -c "import json;print(json.load(open('/etc/ansgo/panel.json'))['url_path'])" 2>/dev/null)
 cat <<EOF
 
 ═══════════════════════════════════════════════════
+  ✅ ANS-GO 管理面板部署完成
+═══════════════════════════════════════════════════
   Web 面板:   https://${DOMAIN}:${PANEL_PORT}${URL_PATH:-/}
   用户名:     ${PANEL_USER}
   密码(仅此一次): ${PANEL_PW}
-═══════════════════════════════════════════════════
-  离线管理:   ansgo-admin status | info | regen <协议>
-  忘记密码:   ansgo-admin panel-pass
-  忘记路径:   ansgo-admin panel-path
+───────────────────────────────────────────────────
+  下一步：登录面板 →「服务安装」页，按需安装代理服务
+           （Shadowsocks / AnyTLS / NaiveProxy）
+           第二组服务（走 SS 落地）在「第二组服务」页
 ═══════════════════════════════════════════════════
 EOF
-log "完成。请记录上面的面板地址与密码。"
+log "完成。代理服务未启动，请在面板「服务安装」页按需开启。"
