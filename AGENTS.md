@@ -189,18 +189,19 @@ https://your-domain.com:15608/<随机URL路径>/
 | 会话有效期 | 8 小时 | ✅ 面板内改 |
 | 忘记密码 | Web「忘记密码？」页显示 `SSH 执行: ansgo-admin panel-pass` 提示；命令打印新密码 | — |
 
-### 6.4 功能模块（中文 UI）
+### 6.4 功能模块（中文 UI，支持暗黑/白天双主题切换，localStorage 记忆）
 1. **登录页**（含「忘记密码？」命令提示）
-2. **仪表盘**：三协议 + 面板状态灯 / 各端口 / 内存占用 / 当前 TCP 连接数 / 系统负载 / 运行时长 / 证书到期倒计时
-3. **节点信息**：三协议连接参数 + URI 一键复制 + 客户端二维码（启用第二组时额外显示 anytls-2/naive-2）
+2. **仪表盘**：各服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时
+3. **节点信息**：各启用服务连接参数 + URI 一键复制 + 客户端二维码（启用第二组时额外显示 anytls-2/naive-2）
 4. **服务控制**：start / stop / restart（二次确认）
-5. **端口管理**：三协议端口 + 面板自身端口均可改
-6. **密钥管理**：重新生成某协议密钥（二次确认 + 提示断开现有连接）+ 生成第二组密钥
-7. **第二组服务**：开关 / 端口 / Naive-2 伪装（启用后额外 anytls-2 + naive-2，走 SS 落地）
-8. **出口落地**：落地服务器 SS 配置（host/port/method/password + 开关），保存后 sing-box 自动重载
-9. **证书管理**：到期时间 / 手动续期按钮 / 上次续期结果
-10. **面板设置**：URL 路径 / 会话时长 / 管理员用户名 / 管理员密码 / 面板端口 / 登录锁定阈值 / 两个伪装站点
-11. **日志查看**：tail 最近 N 行
+5. **服务安装**：⭐ Shadowsocks / AnyTLS / NaiveProxy 独立安装/卸载（代理服务面板内按需启用）
+6. **端口管理**：各服务端口 + 面板自身端口均可改
+7. **密钥管理**：重新生成某协议密钥（二次确认）+ 生成第二组密钥
+8. **第二组服务**：开关 / 端口 / Naive-2 伪装（启用后额外 anytls-2 + naive-2，走 SS 落地）
+9. **出口落地**：落地服务器 SS 配置（host/port/method/password + 开关），含密钥长度校验
+10. **证书管理**：到期时间 / 手动续期按钮 / 上次续期结果
+11. **面板设置**：URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 两个伪装站点
+12. **日志查看**：tail 最近 N 行
 
 ### 6.5 面板端口"可改"的技术机制（重要，必须诚实告知用户）
 面板端口写在 `config.json`，Go 二进制启动时读取。Web 改端口的流程：
@@ -277,29 +278,44 @@ ansgo-admin uninstall           # 卸载（保留配置备份）
 
 ---
 
-## 9. 部署执行顺序（10 步）
+## 9. 部署架构：面板优先 + 代理服务面板内按需安装
 
-| 步骤 | 动作 | 风险 | 中断 |
-|------|------|------|------|
-| 1 | 装 acme.sh（curl）| 低 | 无 |
-| 2 | 写 `dns_dynukey.sh`（路径 A）+ 配置路径 B 凭证 | 低 | 无 |
-| 3 | 签发 `your-domain.com` ECDSA 证书到 `/etc/ssl/ansgo/`，配 60 天自动续期 + reloadcmd | 中（DNS 传播 30-90s）| 无 |
-| 4 | 改 Caddyfile：自签→真实证书，`systemctl reload caddy` | 低 | naive 闪断 1-2s |
-| 5 | 改 sing-box config：anytls 用真实证书、SNI=`your-domain.com`，restart | 低 | anytls 重启 |
-| 6 | 装 `ansgo-admin` 脚本 | 低 | 无 |
-| 7 | mac 本地交叉编译 `ansgo-panel`（GOOS=linux GOARCH=amd64），scp 上传 | 低 | 无 |
-| 8 | 生成面板配置（随机密码+随机URL路径，显示一次）+ systemd unit + 放行 15608 | 低 | 无 |
-| 9 | 端到端验证：证书真实性、三协议连通、面板登录、IP 锁定、二维码、端口改 | — | — |
-| 10 | 输出最终连接参数 + 面板访问地址 + 凭证，写入 §10 | — | — |
+> v3.0 架构变更：install.sh **只装面板 + 证书**，代理服务（NaiveProxy/AnyTLS/Shadowsocks）改为**登录面板后在「服务安装」页按需启用**。
 
-**关键提醒**：第 5 步后，AnyTLS 客户端连接参数会变（SNI 从 `www.bing.com` → `your-domain.com`，去掉 `insecure=1`）。部署完给新参数。
+### install.sh 阶段（装面板 + 证书）
 
-### 实战备注（2026-06-19 部署沉淀）
-- **scp 覆盖运行中二进制会失败**（sftp 报 `dest open Failure`），且后续 restart 只是重启了旧文件。正确流程：`systemctl stop` → `rm` 旧文件 → `scp` 上传 → `md5sum` 对比本地与服务器确认一致 → `systemctl start`。文件大小可能恰好相同，**md5 是判断"是否真更新"的唯一可靠手段**。
-- **caddy reload 必失败**（见 §5.1），改配置后直接 `systemctl restart caddy`。
-- **前端单页应用"点击无反应"**：首要怀疑 `<script>` 块 JS 语法错误（整块不解析→所有函数未定义→静默）。改完前端必须重新编译 Go 二进制（HTML 经 `//go:embed` 编译进去）并按上一条流程更新。诊断：提取 `<script>` 内容 `node --check` 查语法。
-- **长任务用后台守护**：本机在中国大陆，SSH 长连接易超时。证书签发等耗时操作用 `nohup ... > log 2>&1 &`，SSH 立即返回，再轮询日志。
-- **改配置前必备份**：`ansgo-admin backup` 或手工 `cp -a` 到 `/etc/ansgo-backup-{ts}/`，失败可 `ansgo-admin restore`。
+| 步骤 | 动作 |
+|------|------|
+| 0 | stage1 系统调优（BBR/TFO/fd/journald，幂等）|
+| 1 | 下载脚本 + 装 ansgo-admin/genconf/cert-reload |
+| 2 | 下载 sing-box / caddy-naive 二进制（就位，不启动）|
+| 3 | 生成面板配置（panel.json，**代理服务默认 svc_*_enabled=false**）+ 密钥 |
+| 4 | 签发证书（acme.sh DNS-01，A 默认 B 降级）|
+| 5 | 生成配置（代理服务关闭，仅占位）|
+| 6 | 部署 systemd unit + **启动 caddy（:443 伪装站）**|
+| 7 | 部署 + 启动 ansgo-panel |
+
+### 面板内阶段（按需装服务）
+
+用户登录 `https://域名:15608/路径/` 后：
+
+1. **「服务安装」页**：逐个安装 Shadowsocks / AnyTLS / NaiveProxy（点「安装」即生成配置 + 启动；「卸载」则停止 + 移配置，密钥保留可重装）
+2. **「端口管理」页**：调整各服务端口
+3. **「面板设置」页**：配置 :443 直访伪装站 / naive 伪装站（默认反代 soft.xiaoz.org）
+4. **「第二组服务」页**：可选启用额外 anytls-2 + naive-2（走 SS 落地）
+5. **「出口落地」页**：配置落地服务器 SS（第二组出口）
+
+### 为什么这样设计
+- **面板与代理解耦**：面板和 :443 伪装站随安装立即可用；代理服务按需开启，不装不占端口
+- **caddy 始终运行**：:443 伪装站 + :80 跳转是域名基础设施，不随代理服务卸载而停（sing-box 无 inbound 时才会停）
+- **服务开关持久化**：`panel.json` 的 `svc_ss_enabled` / `svc_anytls_enabled` / `svc_naive_enabled` 字段控制 genconf 生成对应配置
+
+### 实战备注（历次部署沉淀）
+- **scp 覆盖运行中二进制会失败**（sftp报 `dest open Failure`），且后续 restart 只重启旧文件。正确流程：`systemctl stop` → `rm` → `scp` → `md5sum` 对比 → `systemctl start`。md5 是判断"是否真更新"的唯一手段。
+- **caddy reload 必失败**（Caddyfile 设 `admin off`），改配置用 restart。
+- **前端 SPA"点击无反应"=JS 语法错误**：整块 `<script>` 不解析→所有函数未定义→静默。诊断：`node --check` 查语法。
+- **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
+- **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`。
 
 ---
 

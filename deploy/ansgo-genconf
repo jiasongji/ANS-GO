@@ -66,6 +66,13 @@ DISGUISE_PANEL = g("disguise_panel", "proxy:https://soft.xiaoz.org")
 DISGUISE_NAIVE = g("disguise_naive", "proxy:https://soft.xiaoz.org")
 DISGUISE_NAIVE2 = g("disguise_naive2", DISGUISE_NAIVE)
 
+# 服务开关（面板内按需安装；无字段时默认 true 兼容旧部署）
+def is_on(k):
+    return str(g(k, "true")).lower() == "true"
+SVC_SS = is_on("svc_ss_enabled")
+SVC_ANYTLS = is_on("svc_anytls_enabled")
+SVC_NAIVE = is_on("svc_naive_enabled")
+
 # ---- 读取密钥 ----
 secrets = {}
 if os.path.exists(SECRETS):
@@ -103,13 +110,17 @@ if GROUP2_ENABLED:
 
 # ===================== 生成 sing-box config =====================
 def gen_singbox():
-    inbounds = [
-        {
+    inbounds = []
+    # SS inbound（按开关）
+    if SVC_SS:
+        inbounds.append({
             "type": "shadowsocks", "tag": "ss-in",
             "listen": "::", "listen_port": SS_PORT,
             "method": SS_METHOD, "password": SS_KEY,
-        },
-        {
+        })
+    # AnyTLS inbound（按开关）
+    if SVC_ANYTLS:
+        inbounds.append({
             "type": "anytls", "tag": "anytls-in",
             "listen": "::", "listen_port": ANYTLS_PORT,
             "users": [{"name": ANYTLS_UUID, "password": ANYTLS_PASS}],
@@ -118,10 +129,9 @@ def gen_singbox():
                 "certificate_path": f"{CERTDIR}/fullchain.pem",
                 "key_path": f"{CERTDIR}/privkey.pem",
             },
-        },
-    ]
+        })
 
-    # 第2组 anytls-2 inbound
+    # 第2组 anytls-2 inbound（需第2组启用）
     if GROUP2_ENABLED and ANYTLS2_PORT:
         inbounds.append({
             "type": "anytls", "tag": "anytls-in2",
@@ -164,6 +174,14 @@ def gen_singbox():
     if rules:
         config["route"] = {"rules": rules}
 
+    # 无任何 inbound 时写一个占位配置（避免 sing-box 启动失败），
+    # 但调用方应判断是否需要启动 sing-box
+    if not inbounds:
+        with open("/etc/sing-box/config.json", "w") as f:
+            json.dump({"log": {"level": "warn"}, "inbounds": [], "outbounds": outbounds}, f, indent=2)
+        print("已生成 /etc/sing-box/config.json (无启用 inbound，占位；sing-box 可不启动)")
+        return
+
     with open("/etc/sing-box/config.json", "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
     note = f"ss={SS_PORT}, anytls={ANYTLS_PORT}"
@@ -192,9 +210,9 @@ def gen_caddy():
     # :443 纯反代伪装站
     blocks.append(f"# :443 纯反代伪装站（浏览器直访命中，不提供代理）\n:443 {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n{disguise_block(DISGUISE_PANEL)}}}\n")
 
-    # :naive_port NaiveProxy + 伪装
-    naive_blk = f"# :{NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）\n:{NAIVE_PORT} {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE_USER} {NAIVE_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE)}}}\n"
-    blocks.append(naive_blk)
+    # :naive_port NaiveProxy + 伪装（按开关）
+    if SVC_NAIVE:
+        blocks.append(f"# :{NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）\n:{NAIVE_PORT} {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE_USER} {NAIVE_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE)}}}\n")
 
     # 第2组 naive-2（caddy 另起一个 site）
     if GROUP2_ENABLED and NAIVE2_PORT:
@@ -205,7 +223,9 @@ def gen_caddy():
 
     with open("/etc/caddy/Caddyfile", "w") as f:
         f.write("\n".join(blocks))
-    note = f":443 纯伪装={DISGUISE_PANEL}, :{NAIVE_PORT} naive伪装={DISGUISE_NAIVE}"
+    note = f":443 纯伪装={DISGUISE_PANEL}"
+    if SVC_NAIVE:
+        note += f", :{NAIVE_PORT} naive伪装={DISGUISE_NAIVE}"
     if GROUP2_ENABLED and NAIVE2_PORT:
         note += f", :{NAIVE2_PORT} naive2伪装={DISGUISE_NAIVE2}"
     print(f"已生成 /etc/caddy/Caddyfile ({note}, :80->https 跳转)")

@@ -26,16 +26,21 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 参数全集：`--domain` · `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）· `--email` · `--ss-port` · `--anytls-port` · `--naive-port` · `--panel-port` · `--panel-user` · `--disguise-panel` · `--disguise-naive` · `--non-interactive` · `--docker`
 
-部署完成后脚本会打印：三协议客户端 URI、面板访问地址 + 随机 URL 路径、一次性管理员密码。
+部署完成后脚本会打印：面板访问地址 + 随机 URL 路径 + 一次性管理员密码。**代理服务默认不启动**，登录面板后到「服务安装」页按需开启 Shadowsocks / AnyTLS / NaiveProxy。
+
+> 架构说明：install.sh 只装**面板 + 证书 + :443 伪装站**；三个代理服务改为面板内按需安装/卸载，所有操作在 Web 后台完成。
 
 ---
 
 ## ✨ 特性
 
+- **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用（不装不占端口）
 - **三协议**：NaiveProxy（caddy forwardproxy-naive 分支）/ AnyTLS / Shadowsocks-2022（sing-box 双 inbound）
+- **Web 管理面板**：Go 单二进制（运行内存 ~12MB），中文 UI，管全部协议参数 / 端口 / 证书 / 自身配置 + 服务安装卸载，含客户端二维码
 - **一张证书共享**：acme.sh + Dynu DNS-01 签发 ECDSA 证书，caddy / sing-box / 面板三服务共享，续期一次三服务一起重载
 - **域名双伪装**：`:443` 纯反代伪装站（域名直访命中，不提供代理）+ naive 端口独立伪装；两个伪装站点均可在 Web 后台独立配置（默认反代 `soft.xiaoz.org`）
-- **Web 管理面板**：Go 单二进制（运行内存 ~12MB），中文 UI，管全部协议参数 / 端口 / 证书 / 自身配置，含客户端二维码
+- **第二组服务 + 链式出站**：可选启用额外的 anytls-2 + naive-2，出口经 Shadowsocks 走另一台落地服务器（中转→落地）
+- **暗黑/白天双主题**：顶栏一键切换，localStorage 记忆
 - **完全解耦**：caddy / sing-box / 面板是三个独立进程、端口、systemd unit，**改协议端口永远不会断面板**
 - **离线兜底**：`ansgo-admin` bash 脚本零依赖，面板全挂也能 SSH 管理一切（含密码/路径/端口重置、备份回滚）
 - **安全**：管理员密码 bcrypt、按 IP 登录锁定、8 小时会话、随机 URL 路径、全程 TLS
