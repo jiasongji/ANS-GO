@@ -431,7 +431,7 @@ SSH:                22
 
 ## 12. 一键部署（推荐入口）
 
-仓库根目录提供 `install.sh`，支持**交互式**与**带参数一键**两种模式，所有资源取自本仓库 GitHub（脚本/面板源码走 raw，二进制走 Releases）。
+仓库根目录提供 `install.sh`，支持**交互式**与**带参数一键**两种模式，所有资源取自本仓库 GitHub。
 
 > v1.3.0 起 install.sh **只装面板 + 证书 + :443 伪装站**，代理服务登录面板后到「服务安装」页按需启用。
 
@@ -441,21 +441,50 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/instal
 # 依次交互输入：域名、Dynu API Key（或 OAuth Client ID+Secret）、各端口、面板用户名等
 ```
 
-### 带参数一键
+### 带参数一键（全参数示例）
+
+裸金属（LXC / 低配推荐，systemd 直管三服务）：
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com \
              --dynu-key <API_KEY> \
              --email you@example.com \
+             --ss-port 33899 \
+             --anytls-port 21111 \
+             --naive-port 44333 \
+             --panel-port 15608 \
+             --panel-user admin \
+             --disguise-panel proxy:https://example.com \
+             --disguise-naive proxy:https://example.com \
              --non-interactive
 ```
-常用参数：`--domain` `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port` `--anytls-port` `--naive-port` `--panel-port` `--panel-user` `--disguise-panel` `--disguise-naive` `--non-interactive` `--docker`（KVM 用 all-in-one 镜像 `ghcr.io/jiasongji/ansgo` 单容器跑全套，见 §9 / `deploy/Dockerfile.allinone`）。
+
+Docker 一体化（KVM / 资源充裕推荐，仅加 `--docker`，其余参数一致）：
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --dynu-key <API_KEY> \
+             --email you@example.com \
+             --ss-port 33899 \
+             --anytls-port 21111 \
+             --naive-port 44333 \
+             --panel-port 15608 \
+             --panel-user admin \
+             --disguise-panel proxy:https://example.com \
+             --disguise-naive proxy:https://example.com \
+             --docker \
+             --non-interactive
+```
+
+参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--naive-port`(443) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--docker` `--non-interactive` `--force-bin`。
 
 落地服务器专用：`bash install.sh --landing [--port 8388]`（在该机部署独立 ss-server，供中转机第二组接入）。
 
-### 资源来源（全部自有 GitHub）
+### 资源来源（全部自有 GitHub / 官方上游）
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
-- 二进制（sing-box / caddy-naive / ansgo-panel / acme.sh 快照）：`github.com/jiasongji/ANS-GO/releases/download/vX.Y.Z/...`
+- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/vX.Y.Z/ansgo-panel-linux-<arch>`
+- sing-box：从 SagerNet 官方 release 拉取（`github.com/SagerNet/sing-box/releases`，多架构）
+- caddy（naive 分支）：从 klzgrad/forwardproxy 源码用 xcaddy 编译（裸金属由 install.sh 拉本项目预编译产物；Docker 在 `Dockerfile.allinone` 内现场编译）
 - Docker 一体化镜像（all-in-one：sing-box + caddy + 面板 + systemd，单容器跑全套）：`ghcr.io/jiasongji/ansgo:latest`（多阶段构建，见 `deploy/Dockerfile.allinone` + `deploy/docker/entrypoint.sh`）
 - Docker 面板单镜像（仅面板，兼容用）：`ghcr.io/jiasongji/ansgo-panel:latest`（见 `deploy/Dockerfile`）
 
