@@ -4,10 +4,12 @@
 #   交互式：bash install.sh          （逐项提问，带默认值）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #
-# 所有资源取自本仓库 GitHub：
-#   脚本/源码 -> raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/
-#   二进制    -> github.com/jiasongji/ANS-GO/releases/download/v1.0.0/
-#   面板镜像  -> ghcr.io/jiasongji/ansgo-panel（--docker 模式）
+# 所有资源取自本仓库 GitHub / 官方上游：
+#   脚本/源码    -> raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/
+#   面板二进制    -> github.com/jiasongji/ANS-GO/releases/download/$VER/ansgo-panel-linux-<arch>
+#   sing-box      -> SagerNet 官方 release（多架构）
+#   caddy(naive) -> klzgrad/forwardproxy 源码 + xcaddy 编译（Docker 内）或本项目预编译产物
+#   面板镜像      -> ghcr.io/jiasongji/ansgo（all-in-one，--docker 模式）
 #
 # 适用于 Debian 11/12（含 LXC），需 root。
 # =============================================================================
@@ -17,8 +19,13 @@ REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
 VER="v1.3.0"
-ARCH_MAP=( [x86_64]=amd64 [aarch64]=arm64 [arm64]=arm64 )
-AARCH="${ARCH_MAP[$(uname -m)]:-amd64}"
+# 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64)        AARCH=amd64 ;;
+  aarch64|arm64) AARCH=arm64 ;;
+  *)             AARCH=amd64 ;;
+esac
 
 # ---- 默认值 ----
 DOMAIN="" DYNU_KEY="" DYNU_CID="" DYNU_SECRET="" EMAIL=""

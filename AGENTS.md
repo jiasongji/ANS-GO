@@ -5,7 +5,7 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.4.0**（移动端自适应 + 白天主题文字可见性修复 + Docker all-in-one 一体化镜像）。版本历史见 GitHub Releases。
+> **当前版本：v1.4.1**（v1.4.0：移动端自适应 + 白天主题修复 + Docker all-in-one；v1.4.1：修复 install.sh 架构判断在 `set -u` 下的 `x86_64: unbound variable`）。版本历史见 GitHub Releases。
 
 ---
 
@@ -426,6 +426,7 @@ SSH:                22
 | Docker 容器 systemd 起不来 | 必须 `privileged: true` + `cgroup: host` + tmpfs `/run`；host 网络下端口与宿主冲突需先释放 |
 | 容器改前端/二进制不生效 | 改 `web/index.html` 需重 build 镜像（`docker build -f deploy/Dockerfile.allinone .`）后 `docker compose up -d --build` |
 | 移动端/白天主题显示异常 | v1.4.0 已全面适配（导航横向滚动 / label 上置 / 网格单列 / 白天文字 `var(--txt)`）；若仍异常，硬刷新清浏览器缓存 |
+| install.sh 首行报 `x86_64: unbound variable` | 旧版 `ARCH_MAP=( [x86_64]=amd64 )` 缺 `declare -A`，bash 把它当索引数组，`x86_64` 在算术上下文求值 + `set -u` 触发报错；v1.4.1 改用 `case` 写法（零关联数组）。⚠️ `bash -n` 只查语法不执行，查不出此类运行时变量错误，改完务必**实际执行**开头几行验证 |
 
 ---
 
