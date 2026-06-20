@@ -3,17 +3,21 @@
 > 本文件是项目的**唯一事实来源**。新窗口执行、GitHub 教程撰写、服务器部署均以本文件为准。
 > 敏感凭证见 `.secrets.local`（已 gitignore，不入库）。
 >
-> **部署状态：✅ 已部署并端到端验证（2026-06-19）。** 可复现产物在 `deploy/`，按 §9 顺序执行。
+> **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
+>
+> **当前版本：v1.3.0**（面板优先架构 + 服务按需安装 + 双主题）。版本历史见 GitHub Releases。
 
 ---
 
 ## 0. 项目目标
 
-在一台美国 ISP 原生 IP 的低配 LXC VPS 上，部署三协议代理服务 + Web 管理面板，要求：
+在一台低配 LXC VPS 上，部署 **Web 管理面板** + 可选的代理服务，要求：
 
-- **三协议**：NaiveProxy + AnyTLS + Shadowsocks（2022）
-- **真实域名证书**：`your-domain.com`（Let's Encrypt），三服务共享
-- **Web 管理面板**：中文、可管全部协议参数 + 证书 + 自身配置
+- **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用
+- **三协议代理**（按需）：NaiveProxy + AnyTLS + Shadowsocks（2022）
+- **第二组服务 + 链式出站**：可选额外 anytls-2 + naive-2，出口经 SS 走另一台落地服务器
+- **真实域名证书**：`your-domain.com`（Let's Encrypt），面板与各服务共享
+- **Web 管理面板**：中文、暗黑/白天双主题、可管全部协议参数 + 证书 + 服务安装/卸载 + 自身配置
 - **性能最大化**：网络内核调优、清理垃圾软件、内存占用最小
 - **可审计、可回滚、可离线管理**（SSH 兜底脚本）
 
@@ -41,24 +45,29 @@
 
 ---
 
-## 2. 最终架构（三服务完全解耦 + 一张证书共享）
+## 2. 架构（面板优先 + 一张证书共享 + 按需装服务）
 
 ```
-            Let's Encrypt (acme.sh + Dynu DNS-01)
-                        │ 签发 / 60天自动续期 + reload
-                        ▼
-          /etc/ssl/ansgo/{fullchain,privkey}.pem
-                        │ 三服务共享引用
-      ┌─────────────────┼─────────────────────┐
-      ▼                 ▼                     ▼
- caddy :443       sing-box :8443        面板(Go) :15608
- NaiveProxy       AnyTLS + Shadowsocks   Web 管理面板
- （forwardproxy   （同一进程两个         （端口/路径/管理员/
-   naive 分支）     inbound）             密码均可面板内改）
-      ▲                 ▲                     ▲
-      └─────── ansgo-admin (bash 脚本) ──────────┘
-                       ↑ 调用 / 配置生成
-                 面板通过本地 exec 调用
+  ┌─ install.sh 阶段（装面板+证书）─────────────────────────┐
+  │  acme.sh + Dynu DNS-01 → /etc/ssl/ansgo/*.pem            │
+  │  一张 ECDSA 证书 → 面板 / caddy伪装 / 各代理服务共享      │
+  │                                                          │
+  │  caddy :443  ← 始终运行（域名直访伪装站，反代 example.com）│
+  │  ansgo-panel :15608  ← Web 管理面板                      │
+  └──────────────────────────────────────────────────────────┘
+                         │
+           用户登录面板 →「服务安装」页按需启用
+                         ▼
+  ┌─ 面板内按需安装（svc_*_enabled 开关）─────────────────────┐
+  │  Shadowsocks ──┐                                         │
+  │  AnyTLS     ──┼─ sing-box（无启用 inbound 时不启动）        │
+  │  NaiveProxy ──┘── caddy（forward_proxy，与 :443伪装同进程）  │
+  │                                                          │
+  │  第二组（可选）: anytls-2 + naive-2                        │
+  │      └─ outbound: ss-out ──▶ 落地服务器 ss-server ──▶ 目标  │
+  └──────────────────────────────────────────────────────────┘
+                         ▲
+  ┌─ ansgo-admin (bash) ──── 零依赖离线兜底（面板全挂也能管理）┘
 ```
 
 ### 核心设计原则
@@ -71,16 +80,20 @@
 
 ## 3. 端口分配
 
-| 服务 | 默认端口 | 协议 | 面板可改 |
-|------|---------|------|---------|
-| NaiveProxy (caddy) | `443` TCP+UDP | HTTPS forward proxy | ✅ |
-| AnyTLS (sing-box) | `8443` TCP | TLS | ✅ |
-| Shadowsocks (sing-box) | `23456` TCP | SS2022 | ✅ |
-| Web 面板 (ansgo-panel) | `15608` TCP | HTTPS | ✅（改后面板重启）|
-| caddy HTTP（ACME 备用/重定向）| `80` TCP | HTTP | ❌ 固定 |
-| SSH | `22` TCP | SSH | ❌ 固定 |
+| 服务 | 默认端口 | 协议 | 类别 | 面板可改 |
+|------|---------|------|------|---------|
+| caddy :443 伪装站 | `443` TCP | HTTPS（反代伪装）| **面板必需**（域名直访）| ❌ 固定（伪装站）|
+| Web 面板 (ansgo-panel) | `15608` TCP | HTTPS | **面板必需** | ✅（改后重启）|
+| NaiveProxy (caddy) | `44333` TCP | HTTPS forward proxy | 按需安装 | ✅ |
+| AnyTLS (sing-box) | `21111` TCP | TLS | 按需安装 | ✅ |
+| Shadowsocks (sing-box) | `33899` TCP | SS2022 | 按需安装 | ✅ |
+| 第二组 anytls-2 / naive-2 | `21112` / `44334` | TLS / HTTPS | 按需（走 SS 落地）| ✅ |
+| caddy HTTP（重定向）| `80` TCP | HTTP | 固定 | ❌ |
+| SSH | `22` TCP | SSH | 固定 | ❌ |
 
-防火墙（nftables）当前 policy=accept 全放行；部署时仅确保新端口可达，不加 drop 规则（避免锁死 SSH，LXC 安全由宿主负责）。
+> :443 是**域名直访伪装站**（纯反代，不提供代理），随面板一起启动。NaiveProxy 用独立端口（默认 44333），不要用 443。
+
+防火墙（nftables）policy=accept 全放行；部署时仅确保新端口可达，不加 drop 规则（避免锁死 SSH，LXC 安全由宿主负责）。
 
 ---
 
@@ -220,12 +233,14 @@ https://your-domain.com:15608/<随机URL路径>/
 位置：`/usr/local/bin/ansgo-admin`（bash，零依赖，面板全挂也能用）
 
 ```bash
-ansgo-admin status              # 三协议+面板状态一览
+ansgo-admin status              # 各服务+面板状态一览
 ansgo-admin info                # 打印连接参数 + URI
 ansgo-admin restart [ss|anytls|naive|panel|all]
 ansgo-admin stop [服务]
 ansgo-admin logs [服务]          # tail journalctl
 ansgo-admin regen [ss|anytls|naive]   # 重置密钥（提示确认）
+ansgo-admin regen2              # 生成第二组密钥（ANYTLS2_*/NAIVE2_*）
+ansgo-admin group2 [enable|disable|status] [anytls2_port] [naive2_port]
 ansgo-admin cert status         # 证书到期
 ansgo-admin cert renew          # 手动续期
 ansgo-admin panel-pass          # 重置面板密码（打印新密码）
@@ -244,13 +259,17 @@ ansgo-admin uninstall           # 卸载（保留配置备份）
 
 ```
 /usr/local/bin/
-  ├── sing-box              # 已装 v1.13.13
-  ├── caddy                 # 已装 v2.11.2-naive
-  ├── ansgo-admin              # 新增 bash 脚本
-  └── ansgo-panel              # 新增 Go 二进制
+  ├── sing-box              # 代理服务载体（ss + anytls + 第二组 anytls-2，按需启用）
+  ├── caddy                 # naive 分支（:443 伪装站始终跑 + naive 按需 + naive-2 按需）
+  ├── ansgo-admin           # bash 离线管理脚本
+  ├── ansgo-genconf         # python3 配置生成器（按服务开关生成）
+  ├── ansgo-cert-reload     # 证书续期重载脚本
+  ├── ansgo-cert-issue.sh   # 证书签发脚本（可重跑）
+  └── ansgo-panel           # Go Web 管理面板二进制
 
 /etc/ansgo/
-  ├── config.json           # 端口/URL路径/用户名/密码hash/会话/锁定
+  ├── panel.json            # 端口/URL路径/账号/会话/锁定/服务开关/伪装/第二组/落地配置
+  ├── secrets.env           # 所有协议密钥（SS/ANYTLS/NAIVE + 第二组 ANYTLS2/NAIVE2）
   └── sessions.db           # 会话 + 锁定计数 (sqlite)
 
 /etc/ssl/ansgo/
@@ -258,29 +277,32 @@ ansgo-admin uninstall           # 卸载（保留配置备份）
   └── privkey.pem
 
 /root/.acme.sh/
-  ├── dns_dynukey.sh        # 路径 A 钩子（含 API Key）
+  ├── dnsapi/dns_dynukey.sh # 路径 A 钩子（API Key）
   ├── account.conf          # 含路径 B 的 Dynu_ClientId/Secret（降级用）
   └── your-domain.com_ecc/  # acme.sh 证书存储
 
-/etc/sing-box/config.json   # ss + anytls（改：真实证书）
-/etc/caddy/Caddyfile        # 改：真实证书 + 域名
-/var/www/html/index.html    # 伪装站
+/etc/sing-box/config.json   # genconf 生成（按 svc_*_enabled 开关）
+/etc/caddy/Caddyfile        # genconf 生成（:443伪装 + naive按需 + naive-2按需）
+/var/www/html/              # page 模式伪装默认页
 
 /etc/systemd/system/
-  ├── sing-box.service      # 已存在
-  ├── caddy.service         # 已存在
-  └── ansgo-panel.service      # 新增
+  ├── sing-box.service      # 代理服务（按需启动）
+  ├── caddy.service         # :443伪装始终启动
+  └── ansgo-panel.service   # 面板
 
-/etc/ansgo/secrets.env      # 所有协议密钥（root 独占 600）
-/etc/sysctl.d/99-proxy-tune.conf   # 已存在（网络调优）
-/etc/security/limits.d/99-proxy.conf  # 已存在（fd 上限）
+/etc/ansgo-deploy/          # install.sh 下载的脚本副本（含 ansgo-landing.sh 等）
+/etc/ansgo-backup-{ts}/     # 每次改配置前的备份
+/etc/sysctl.d/99-ansgo-tune.conf   # stage1 网络调优
+/etc/security/limits.d/99-ansgo.conf  # stage1 fd 上限
 ```
+
+---
 
 ---
 
 ## 9. 部署架构：面板优先 + 代理服务面板内按需安装
 
-> v3.0 架构变更：install.sh **只装面板 + 证书**，代理服务（NaiveProxy/AnyTLS/Shadowsocks）改为**登录面板后在「服务安装」页按需启用**。
+> v1.3.0 架构变更：install.sh **只装面板 + 证书**，代理服务（NaiveProxy/AnyTLS/Shadowsocks）改为**登录面板后在「服务安装」页按需启用**。
 
 ### install.sh 阶段（装面板 + 证书）
 
@@ -319,7 +341,7 @@ ansgo-admin uninstall           # 卸载（保留配置备份）
 
 ---
 
-## 10. 部署后产物（2026-06-19 执行 §9 10 步后回填）
+## 10. 部署后产物（线上现状回填）
 
 > ⚠️ 密钥与密码等敏感值不写本文件（§13 约束，本文件会进 git）。
 > 完整凭证见服务器 `/etc/ansgo/secrets.env`、`/etc/ansgo/panel.json`，
@@ -327,13 +349,14 @@ ansgo-admin uninstall           # 卸载（保留配置备份）
 
 ### 客户端连接 URI（结构，密钥见 `.secrets.local`）
 ```
-[1] Shadowsocks : ss://<base64url(method:key)>@your-domain.com:23456#ANS-GO-SS
+[1] Shadowsocks : ss://<base64url(method:key)>@your-domain.com:33899#ANS-GO-SS
                   method = 2022-blake3-aes-128-gcm
-[2] AnyTLS      : anytls://<password>@your-domain.com:8443/?sni=your-domain.com#ANS-GO-AnyTLS
-                  （换真实证书后 SNI=your-domain.com，客户端去掉 insecure=1）
-[3] NaiveProxy  : naive+https://<user>:<pass>@your-domain.com:443#ANS-GO-Naive
+[2] AnyTLS      : anytls://<password>@your-domain.com:21111/?sni=your-domain.com#ANS-GO-AnyTLS
+[3] NaiveProxy  : naive+https://<user>:<pass>@your-domain.com:44333#ANS-GO-Naive
+[4] 第二组(可选) : anytls2 :21111 / naive2 :44334  → 出口走 SS 落地
 ```
 > 一键获取完整 URI：服务器执行 `ansgo-admin info`，或面板「节点信息」页。
+> 端口均为默认值，可在面板「端口管理」改。
 
 ### Web 面板访问
 ```
@@ -343,12 +366,14 @@ URL:      https://your-domain.com:15608/<随机URL路径>/
 URL路径:  /<随机URL路径>/  （面板内可改；遗忘用 `ansgo-admin panel-path` 重置）
 ```
 
-### 当前端口
+### 当前端口（默认值，可面板内改）
 ```
-NaiveProxy(caddy):  443
-AnyTLS(sing-box):   8443
-Shadowsocks:        23456
-面板(ansgo-panel):     15608
+caddy :443 伪装站:  443（始终运行，域名直访）
+NaiveProxy(caddy):  44333
+AnyTLS(sing-box):   21111
+Shadowsocks:        33899
+第二组(可选):       anytls2=21112 / naive2=44334（走 SS 落地）
+面板(ansgo-panel):  15608
 caddy HTTP(重定向): 80
 SSH:                22
 ```
@@ -370,7 +395,7 @@ SSH:                22
 /root/.acme.sh/{dnsapi/dns_dynukey.sh, account.conf, your-domain.com_ecc/}
 /etc/sing-box/config.json   /etc/caddy/Caddyfile   /var/www/html/index.html
 /etc/systemd/system/{sing-box, caddy, ansgo-panel}.service
-/etc/ansgo/secrets.env  /etc/sysctl.d/99-proxy-tune.conf  /etc/security/limits.d/99-proxy.conf
+/etc/ansgo/secrets.env  /etc/sysctl.d/99-ansgo-tune.conf  /etc/security/limits.d/99-ansgo.conf
 ```
 
 ---
@@ -388,21 +413,17 @@ SSH:                22
 | 面板二进制更新不生效 | scp 覆盖运行中二进制会静默失败；必须 stop→rm→scp→md5 校验→start（见 §9 实战备注）|
 | 面板点击无反应 | 前端 JS 语法错误致整块脚本失效；改完 HTML 需重新编译上传，清浏览器缓存硬刷新 |
 | 续期 reload 失败 | caddy `admin off` 无法 reload；`ansgo-cert-reload` 已改用 restart，续期闪断 1-2s |
+| 第二组落地密钥错误 | sing-box `bad key length` 崩溃；面板对 2022-blake3 密钥做长度校验拒错；SSH 改正确后重启 |
+| 服务卸载后 :443 打不开 | 旧版本会误停 caddy；v1.3.0+ caddy 始终运行（:443 伪装与代理解耦），不受服务卸载影响 |
+| 服务安装后面板显示未生效 | ansgo-panel HTML 经 `//go:embed` 编译，改前端必须重新编译上传（stop→rm→scp→md5→start）+ 硬刷新 |
 
 ---
 
-## 12. 后续流程
-
-1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 三协议从中国大陆公网连通 + IP 锁定机制 + 证书真实性（Let's Encrypt）均验证通过
-2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. **服务器复现（待验证）**：用 `install.sh` 在干净服务器一键部署并测试
-4. **客户端实测**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测三协议连通与分流
-
----
-
-## 14. 一键部署（推荐）
+## 12. 一键部署（推荐入口）
 
 仓库根目录提供 `install.sh`，支持**交互式**与**带参数一键**两种模式，所有资源取自本仓库 GitHub（脚本/面板源码走 raw，二进制走 Releases）。
+
+> v1.3.0 起 install.sh **只装面板 + 证书 + :443 伪装站**，代理服务登录面板后到「服务安装」页按需启用。
 
 ### 交互式
 ```bash
@@ -422,7 +443,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 落地服务器专用：`bash install.sh --landing [--port 8388]`（在该机部署独立 ss-server，供中转机第二组接入）。
 
-### 资源来源
+### 资源来源（全部自有 GitHub）
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
 - 二进制（sing-box / caddy-naive / ansgo-panel / acme.sh 快照）：`github.com/jiasongji/ANS-GO/releases/download/vX.Y.Z/...`
 - Docker 面板镜像：`ghcr.io/jiasongji/ansgo-panel:latest`（多阶段自构建，见 `deploy/Dockerfile`）
@@ -431,7 +452,16 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 ---
 
-## 13. 约束与原则（给执行 AI）
+## 13. 后续流程
+
+1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 三协议从中国大陆公网连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
+2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
+3. **服务器复现（待验证）**：用 `install.sh` 在干净服务器一键部署并测试
+4. **客户端实测**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
+
+---
+
+## 14. 约束与原则（给执行 AI）
 
 - 默认使用简体中文
 - 优先最小修改，完成后自行验证并汇报
@@ -440,4 +470,4 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 - 不擅自加防火墙 drop 规则（避免锁死 SSH）
 - 所有生成密钥用 `openssl rand`，base64 密钥用标准 base64（不是 urlsafe）
 - Go 交叉编译用 `CGO_ENABLED=0`（纯静态，无 libc 依赖）
-- 执行前先读本文件 §1-§14，§14 为推荐入口、§9 为手动参考，每步报告进度
+- 执行前先读本文件 §0-§14：§12（一键部署）为推荐入口，§9（部署架构）说明面板优先设计，每步报告进度
