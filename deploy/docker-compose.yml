@@ -1,18 +1,53 @@
-# ANS-GO 面板 Docker 部署（高级/可选）
-# 注意：面板需管理宿主服务，完整能力需挂载宿主目录 + 特权；低配 LXC 推荐裸金属。
-# 此 compose 仅作可复现运行示例；服务控制类功能在容器内可能受限。
+# =============================================================================
+# ANS-GO 一体化部署（all-in-one 容器，KVM / 资源充足主机推荐）
+#
+# 一个容器内跑全部服务：caddy(:443 伪装) + sing-box(按需) + ansgo-panel
+# 容器内 systemd 作 PID 1，复用裸金属的全部 unit/脚本/面板代码。
+#
+# host 网络 + privileged：systemd 容器需访问 cgroup；代理端口直连宿主。
+# 持久卷：配置/密钥/证书/acme 状态全部在卷里，容器重建不丢失。
+#
+# 凭证与端口经同级 ansgo.env（600 权限，gitignore）传入，不落命令行历史。
+#
+# 用法（推荐经 install.sh --docker 自动生成本文件 + ansgo.env）：
+#   docker compose up -d
+#   docker compose logs -f ansgo
+#   docker exec ansgo ansgo-admin status
+#
+# 手动首次部署需先准备 ansgo.env，至少包含：
+#   DOMAIN=your-domain.com
+#   DYNU_API_KEY=...                 # 路径 A（或用 DYNU_CLIENT_ID+DYNU_SECRET 路径 B）
+#   PANEL_PASS=...                   # 管理员密码（仅首次生效）
+#   URL_PATH=/xxxx/                  # 面板随机 URL 路径（仅首次生效）
+# =============================================================================
 services:
-  ansgo-panel:
-    image: ghcr.io/jiasongji/ansgo-panel:latest
-    container_name: ansgo-panel
+  ansgo:
+    image: ghcr.io/jiasongji/ansgo:latest
+    # 本地构建（无 ghcr 镜像时取消注释，并把 image 改为 build）：
+    # build:
+    #   context: ..
+    #   dockerfile: deploy/Dockerfile.allinone
+    container_name: ansgo
     restart: unless-stopped
-    network_mode: host
+    privileged: true          # systemd 容器需完整 cgroup 访问
+    network_mode: host        # 端口直连宿主，无需端口映射
+    cgroup: host
+    stop_signal: SIGRTMIN+3   # systemd 优雅停机信号
+    tmpfs:
+      - /run:exec
+      - /run/lock
+    env_file:
+      - ansgo.env
     volumes:
-      - /etc/ansgo:/etc/ansgo
-      - /etc/ssl/ansgo:/etc/ssl/ansgo:ro
-      - /etc/sing-box:/etc/sing-box:ro
-      - /etc/caddy:/etc/caddy:ro
-      - /usr/local/bin/ansgo-admin:/usr/local/bin/ansgo-admin:ro
-      - /usr/local/bin/ansgo-genconf:/usr/local/bin/ansgo-genconf:ro
-    environment:
-      - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - ansgo_etc:/etc/ansgo
+      - ansgo_ssl:/etc/ssl/ansgo
+      - ansgo_caddy:/etc/caddy
+      - ansgo_sb:/etc/sing-box
+      - ansgo_acme:/root/.acme.sh
+
+volumes:
+  ansgo_etc:
+  ansgo_ssl:
+  ansgo_caddy:
+  ansgo_sb:
+  ansgo_acme:
