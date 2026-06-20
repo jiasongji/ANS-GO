@@ -1,0 +1,126 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# ANS-GO 一体化镜像（all-in-one）
+#   sing-box + caddy(naive 分支) + ansgo-panel + acme.sh + 管理脚本
+#
+# 设计：容器内跑 systemd（PID 1），复用裸金属的 unit / 脚本 / 面板代码，
+#       面板对 systemctl / journalctl / ansgo-admin / ansgo-genconf 的调用
+#       在容器内原生可用 —— 因此面板 Go 代码与 bash 脚本 0 改动。
+#
+# 适用：KVM / 资源充足主机（需 privileged + cgroup）。
+#       LXC / 低配（256MB）仍推荐裸金属（install.sh，无 --docker）。
+#
+# 构建上下文 = 仓库根目录：
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t ghcr.io/jiasongji/ansgo:latest -f deploy/Dockerfile.allinone . --push
+#
+# 国内本地构建（需代理下载二进制）：
+#   HTTPS_PROXY=http://127.0.0.1:1666 docker build \
+#     -t ghcr.io/jiasongji/ansgo:latest -f deploy/Dockerfile.allinone .
+# =============================================================================
+
+# ---- Stage 1: 编译 ansgo-panel（CGO-free 纯静态）----
+FROM golang:1.26-alpine AS panel
+WORKDIR /src
+COPY deploy/panel/go.mod deploy/panel/go.sum ./
+RUN go mod download
+COPY deploy/panel/ .
+RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux \
+    go build -trimpath -ldflags "-s -w" -o /out/ansgo-panel .
+
+# ---- Stage 2: xcaddy 编译 caddy-naive（forwardproxy naive 分支）----
+# klzgrad/forwardproxy 只发源码，且 naive 分支 go.mod 的 module path 仍为
+# github.com/caddyserver/forwardproxy（fork 未改 path），故先 git clone 到本地，
+# 再用 xcaddy --with <module>=<本地目录> 注入，绕过下载与 module path 冲突。
+FROM golang:1.26-alpine AS caddy
+RUN apk add --no-cache git
+RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+RUN export https_proxy=${HTTPS_PROXY:-} http_proxy=${HTTP_PROXY:-} && \
+    git clone -b naive --depth 1 https://github.com/klzgrad/forwardproxy.git /fp
+RUN mkdir -p /out && CGO_ENABLED=0 \
+    xcaddy build --with github.com/caddyserver/forwardproxy=/fp --output /out/caddy
+
+# ---- Stage 3: 下载 sing-box（SagerNet 官方 release，按 dpkg 架构）----
+FROM debian:bookworm-slim AS singbox
+ARG SINGBOX_VER=1.13.13
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tar \
+    && rm -rf /var/lib/apt/lists/*
+# 构建平台原生架构（dpkg 输出 amd64/arm64，匹配 SagerNet 命名）
+RUN mkdir -p /out && SB=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${SB}.tar.gz" \
+      -o /tmp/sb.tgz \
+    && tar xzf /tmp/sb.tgz -C /tmp \
+    && install -m 0755 /tmp/sing-box-*/sing-box /out/sing-box
+
+# ---- Stage 3: 运行镜像（debian + systemd）----
+FROM debian:bookworm-slim
+ARG DEBIAN_FRONTEND=noninteractive
+
+# systemd + 运行依赖（curl/openssl/jq/python3 供 acme.sh / ansgo-genconf / ansgo-cert-issue 用）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus udev \
+      curl ca-certificates openssl socat jq python3 procps iproute2 cron \
+    && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/docker-clean \
+    && rm -f /etc/systemd/system/*.wants/* /etc/systemd/system/multi-user.target.wants/* \
+    && rm -f /lib/systemd/system/multi-user.target.wants/getty.target
+
+# 清理容器内无关的 systemd unit（避免启动卡顿/报错噪音）
+RUN find /lib/systemd/system /usr/lib/systemd/system \
+      \( -name 'systemd-resolved*' -o -name 'systemd-networkd*' -o -name 'systemd-timesyncd*' \
+         -o -name 'systemd-user-sessions*' -o -name 'getty*' -o -name 'console-getty*' \
+         -o -name 'serial-getty*' -o -name 'apt-daily*' -o -name 'dpkg*' -o -name 'e2scrub*' \
+         -o -name 'fstrim*' -o -name 'rsyslog*' -o -name 'systemd-hostnamed*' \
+         -o -name 'systemd-localed*' -o -name 'systemd-timedated*' -o -name 'ssh*' \) \
+      -exec rm -f {} + || true
+
+# journald：容器内用 volatile（内存）存储 + 限 20M，与裸金属"限 50M"理念一致
+RUN mkdir -p /etc/systemd/journald.conf.d && \
+    printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=20M\nSystemMaxUse=20M\nForwardToConsole=no\n' \
+      > /etc/systemd/journald.conf.d/size.conf
+
+# 默认目标 = multi-user（无图形）
+RUN ln -sf /lib/systemd/system/multi-user.target /etc/systemd/system/default.target
+
+# ---- 拷贝二进制 ----
+COPY --from=singbox /out/sing-box /usr/local/bin/sing-box
+COPY --from=caddy   /out/caddy    /usr/local/bin/caddy
+COPY --from=panel   /out/ansgo-panel /usr/local/bin/ansgo-panel
+
+# ---- 拷贝管理脚本 + 证书工具 ----
+COPY deploy/ansgo-admin deploy/ansgo-genconf deploy/ansgo-cert-reload \
+     deploy/ansgo-cert-issue.sh deploy/dns_dynukey.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/ansgo-admin /usr/local/bin/ansgo-genconf \
+             /usr/local/bin/ansgo-cert-reload /usr/local/bin/ansgo-cert-issue.sh \
+             /usr/local/bin/dns_dynukey.sh
+# ansgo-cert-issue.sh 会从 /etc/ansgo-deploy/ 拷 reload 钩子，预置一份
+RUN mkdir -p /etc/ansgo-deploy && \
+    cp /usr/local/bin/ansgo-cert-reload /etc/ansgo-deploy/ && \
+    cp /usr/local/bin/dns_dynukey.sh /etc/ansgo-deploy/
+
+# ---- systemd unit（与裸金属完全相同）----
+COPY deploy/systemd/sing-box.service deploy/systemd/caddy.service /etc/systemd/system/
+COPY deploy/ansgo-panel.service /etc/systemd/system/
+# 容器内 drop-in：解除 network-online.target 依赖（容器无 networkd，否则该 target 永不 active）
+RUN for s in caddy sing-box ansgo-panel; do \
+      mkdir -p /etc/systemd/system/$s.service.d; \
+      printf '[Unit]\nAfter=\nWants=\n' > /etc/systemd/system/$s.service.d/no-netdep.conf; \
+    done
+# enable caddy(:443伪装) + ansgo-panel；sing-box 不 enable（面板内按需安装）
+RUN ln -sf /etc/systemd/system/caddy.service      /etc/systemd/system/multi-user.target.wants/caddy.service && \
+    ln -sf /etc/systemd/system/ansgo-panel.service /etc/systemd/system/multi-user.target.wants/ansgo-panel.service
+
+# ---- entrypoint ----
+COPY deploy/docker/entrypoint.sh /usr/local/bin/ansgo-entrypoint
+RUN chmod +x /usr/local/bin/ansgo-entrypoint
+
+# 持久化目录占位（实际由 volume 覆盖）
+RUN mkdir -p /etc/ansgo /etc/ssl/ansgo /etc/sing-box /etc/caddy /var/www/html /root/.acme.sh /var/log
+
+# host 网络：端口直连宿主
+EXPOSE 80 443 15608 23456 8443 33899 44333 21111 21112 44334
+
+VOLUME ["/etc/ansgo", "/etc/ssl/ansgo", "/etc/sing-box", "/etc/caddy", "/root/.acme.sh"]
+
+# systemd 容器标准停止信号
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/local/bin/ansgo-entrypoint"]

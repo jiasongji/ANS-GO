@@ -97,6 +97,98 @@ ask_req(){ # prompt ; NONINT 下为空则报错
   ask "$1" "${2:-}"; [ -n "$ASK_VAL" ] || { err "$1 必填（非交互模式请用参数传入）"; exit 2; }
 }
 
+# =============================================================================
+# Docker 一体化部署（all-in-one 容器，KVM / 资源充足主机推荐）
+#   一个容器跑全部服务（caddy :443 伪装 + sing-box 按需 + ansgo-panel），
+#   容器内 systemd 作 PID 1，复用裸金属全部 unit/脚本/面板代码（0 改动）。
+#   配置/密钥/证书在容器内首次生成，持久化到 docker volume。
+# =============================================================================
+do_docker_deploy(){
+  hr "Docker 一体化部署（all-in-one 容器）"
+  command -v docker >/dev/null 2>&1 || { log "安装 docker ..."; curl -fsSL https://get.docker.com | sh; }
+
+  # host 网络端口冲突预警
+  for p in 80 443 "$PANEL_PORT"; do
+    if command -v ss >/dev/null && ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ":$p$"; then
+      warn "端口 $p 已被占用，host 网络下容器可能启动失败，请先停掉占用进程"
+    fi
+  done
+
+  local DIR=/etc/ansgo-docker
+  mkdir -p "$DIR" || { err "无法创建 $DIR"; exit 1; }
+
+  # 随机面板密码 + URL 路径（仅首次部署生效；卷已存在时以容器内实际为准）
+  local PANEL_PW URL_PATH
+  PANEL_PW=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
+  URL_PATH="/$(openssl rand -hex 4)/"
+
+  # ansgo.env：凭证 + 端口（600 权限，敏感不入 git）
+  cat > "$DIR/ansgo.env" <<EOF
+DOMAIN=${DOMAIN}
+EMAIL=${EMAIL}
+PANEL_USER=${PANEL_USER}
+PANEL_PASS=${PANEL_PW}
+URL_PATH=${URL_PATH}
+PANEL_PORT=${PANEL_PORT}
+SS_PORT=${SS_PORT}
+ANYTLS_PORT=${ANYTLS_PORT}
+NAIVE_PORT=${NAIVE_PORT}
+DISGUISE_PANEL=${DISGUISE_PANEL}
+DISGUISE_NAIVE=${DISGUISE_NAIVE}
+DYNU_API_KEY=${DYNU_KEY}
+DYNU_CLIENT_ID=${DYNU_CID}
+DYNU_SECRET=${DYNU_SECRET}
+EOF
+  chmod 600 "$DIR/ansgo.env"
+  log "已生成 $DIR/ansgo.env（含凭证，权限 600）"
+
+  dl_or_exit "$RAW/docker-compose.yml" "$DIR/docker-compose.yml"
+  cd "$DIR" || exit 1
+
+  # 拉镜像；失败则 clone 仓库本地构建
+  if ! docker compose pull 2>/dev/null; then
+    warn "ghcr 镜像拉取失败，尝试本地构建（需下载 sing-box/caddy，国内建议配 docker 代理）"
+    command -v git >/dev/null 2>&1 || apt-get install -y git
+    rm -rf /tmp/ansgo-build
+    if git clone --depth 1 https://github.com/${REPO} /tmp/ansgo-build 2>/dev/null; then
+      docker build -t ghcr.io/${REPO%/*}/ansgo:latest -f deploy/Dockerfile.allinone /tmp/ansgo-build \
+        || { err "本地构建失败，请检查网络/代理后重跑 install.sh --docker"; exit 6; }
+    else
+      err "git clone 失败。请手动：git clone https://github.com/${REPO} && docker build -f deploy/Dockerfile.allinone ."
+      exit 5
+    fi
+  fi
+
+  docker compose up -d && log "容器已启动" || { err "docker compose up 失败"; exit 7; }
+  sleep 5
+
+  # 读取容器内实际 url_path（卷已存在时可能与此处生成的不一致）
+  local ACTUAL_PATH
+  ACTUAL_PATH=$(docker exec ansgo python3 -c 'import json;print(json.load(open("/etc/ansgo/panel.json")).get("url_path","/"))' 2>/dev/null || echo "$URL_PATH")
+
+  hr "部署完成"
+  cat <<EOF
+
+═══════════════════════════════════════════════════
+  ✅ ANS-GO 一体化部署完成（Docker / KVM）
+═══════════════════════════════════════════════════
+  Web 面板:   https://${DOMAIN}:${PANEL_PORT}${ACTUAL_PATH}
+  用户名:     ${PANEL_USER}
+  密码(首次): ${PANEL_PW}
+───────────────────────────────────────────────────
+  ⚠️ 证书: Let's Encrypt 后台签发中（约 1-3 分钟）
+     首次访问若提示“不受信”，稍候几分钟刷新即可
+  管理命令:
+     cd ${DIR} && docker compose logs -f ansgo   # 查日志/签证书进度
+     docker exec ansgo ansgo-admin status         # 服务状态
+     docker exec ansgo ansgo-admin info           # 节点连接参数
+  下一步: 登录面板 →「服务安装」页按需开启代理服务
+═══════════════════════════════════════════════════
+EOF
+  log "代理服务默认未启动，请在面板「服务安装」页按需开启。"
+  exit 0
+}
+
 hr "ANS-GO 一键部署"
 
 # ---- 环境校验 ----
@@ -171,6 +263,11 @@ printf "  面板模式    : %s\n" "$([ "$DOCKER" = 1 ] && echo Docker || echo �
 echo "----------------------------------------"
 if [ "$NONINT" = 0 ]; then
   read -r -p "确认开始部署？[Y/n] " c; [ "${c:-Y}" = "Y" ] || [ "${c:-Y}" = "y" ] || { warn "已取消"; exit 0; }
+fi
+
+# ---- Docker 一体化分流（KVM 主机推荐）：容器内跑全部服务，这里完成后即退出 ----
+if [ "$DOCKER" = 1 ]; then
+  do_docker_deploy
 fi
 
 # ---- 下载助手（优先 curl）----
@@ -288,21 +385,10 @@ systemctl restart caddy && log "caddy 已启动（:443 伪装站）"
 # sing-box 暂不启动（无代理服务安装前不需要）
 
 hr "7/7 部署 Web 管理面板"
-if [ "$DOCKER" = 1 ]; then
-  if ! command -v docker >/dev/null; then curl -fsSL https://get.docker.com | sh; fi
-  # 面板需访问宿主 systemd/配置，故 host 网络 + 挂载关键目录
-  # 镜像默认 public 可匿名拉取；若为 private 需先 docker login ghcr.io
-  if ! docker pull ghcr.io/${REPO%/*}/ansgo-panel:latest 2>/dev/null; then
-    warn "ghcr 镜像拉取失败（可能为 private）。请先执行 docker login ghcr.io 后重试，或在 GitHub 将该 package 设为 public。"
-    exit 5
-  fi
-  dl_or_exit "$RAW/ansgo-panel.service.docker" /etc/systemd/system/ansgo-panel.service
-else
-  log "下载 ansgo-panel 二进制 (from release)"
-  dl_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" /usr/local/bin/ansgo-panel
-  chmod 0755 /usr/local/bin/ansgo-panel
-  dl_or_exit "$RAW/ansgo-panel.service" /etc/systemd/system/ansgo-panel.service
-fi
+log "下载 ansgo-panel 二进制 (from release)"
+dl_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" /usr/local/bin/ansgo-panel
+chmod 0755 /usr/local/bin/ansgo-panel
+dl_or_exit "$RAW/ansgo-panel.service" /etc/systemd/system/ansgo-panel.service
 systemctl daemon-reload
 # 设置管理员密码（bcrypt 写入 panel.json，打印明文仅一次）
 PANEL_PW=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)

@@ -5,19 +5,24 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.3.0**（面板优先架构 + 服务按需安装 + 双主题）。版本历史见 GitHub Releases。
+> **当前版本：v1.4.0**（移动端自适应 + 白天主题文字可见性修复 + Docker all-in-one 一体化镜像）。版本历史见 GitHub Releases。
 
 ---
 
 ## 0. 项目目标
 
-在一台低配 LXC VPS 上，部署 **Web 管理面板** + 可选的代理服务，要求：
+在低配 VPS（LXC 或 KVM）上，部署 **Web 管理面板** + 可选的代理服务，支持两种部署形态：
+
+- **裸金属脚本**（LXC / 低配 256MB 推荐）：`install.sh` 直装，systemd 管理三服务，内存占用最小
+- **Docker 一体化**（KVM / 资源充裕推荐）：`install.sh --docker`，单容器（all-in-one：sing-box + caddy + 面板 + systemd）跑全套
+
+要求：
 
 - **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用
 - **三协议代理**（按需）：NaiveProxy + AnyTLS + Shadowsocks（2022）
 - **第二组服务 + 链式出站**：可选额外 anytls-2 + naive-2，出口经 SS 走另一台落地服务器
 - **真实域名证书**：`your-domain.com`（Let's Encrypt），面板与各服务共享
-- **Web 管理面板**：中文、暗黑/白天双主题、可管全部协议参数 + 证书 + 服务安装/卸载 + 自身配置
+- **Web 管理面板**：中文、暗黑/白天双主题、**移动端自适应**（导航横向滚动 / 表单 label 上置 / 网格单列）、可管全部协议参数 + 证书 + 服务安装/卸载 + 自身配置
 - **性能最大化**：网络内核调优、清理垃圾软件、内存占用最小
 - **可审计、可回滚、可离线管理**（SSH 兜底脚本）
 
@@ -202,7 +207,7 @@ https://your-domain.com:15608/<随机URL路径>/
 | 会话有效期 | 8 小时 | ✅ 面板内改 |
 | 忘记密码 | Web「忘记密码？」页显示 `SSH 执行: ansgo-admin panel-pass` 提示；命令打印新密码 | — |
 
-### 6.4 功能模块（中文 UI，支持暗黑/白天双主题切换，localStorage 记忆）
+### 6.4 功能模块（中文 UI，支持暗黑/白天双主题切换 + 移动端自适应，localStorage 记忆）
 1. **登录页**（含「忘记密码？」命令提示）
 2. **仪表盘**：各服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时
 3. **节点信息**：各启用服务连接参数 + URI 一键复制 + 客户端二维码（启用第二组时额外显示 anytls-2/naive-2）
@@ -303,6 +308,8 @@ ansgo-admin uninstall           # 卸载（保留配置备份）
 ## 9. 部署架构：面板优先 + 代理服务面板内按需安装
 
 > v1.3.0 架构变更：install.sh **只装面板 + 证书**，代理服务（NaiveProxy/AnyTLS/Shadowsocks）改为**登录面板后在「服务安装」页按需启用**。
+>
+> v1.4.0 新增 **Docker 一体化形态**：`install.sh --docker` 在 KVM 主机用单容器（`ghcr.io/jiasongji/ansgo:latest`，all-in-one）跑全套——容器内 systemd 作 PID 1，复用裸金属全部 unit/脚本/面板代码（systemctl/journalctl/ansgo-admin 原生可用，**面板 Go 代码与 bash 脚本 0 改动**），配置/密钥/证书持久化到 docker volume，host 网络 + privileged。LXC/低配仍走裸金属。
 
 ### install.sh 阶段（装面板 + 证书）
 
@@ -416,6 +423,9 @@ SSH:                22
 | 第二组落地密钥错误 | sing-box `bad key length` 崩溃；面板对 2022-blake3 密钥做长度校验拒错；SSH 改正确后重启 |
 | 服务卸载后 :443 打不开 | 旧版本会误停 caddy；v1.3.0+ caddy 始终运行（:443 伪装与代理解耦），不受服务卸载影响 |
 | 服务安装后面板显示未生效 | ansgo-panel HTML 经 `//go:embed` 编译，改前端必须重新编译上传（stop→rm→scp→md5→start）+ 硬刷新 |
+| Docker 容器 systemd 起不来 | 必须 `privileged: true` + `cgroup: host` + tmpfs `/run`；host 网络下端口与宿主冲突需先释放 |
+| 容器改前端/二进制不生效 | 改 `web/index.html` 需重 build 镜像（`docker build -f deploy/Dockerfile.allinone .`）后 `docker compose up -d --build` |
+| 移动端/白天主题显示异常 | v1.4.0 已全面适配（导航横向滚动 / label 上置 / 网格单列 / 白天文字 `var(--txt)`）；若仍异常，硬刷新清浏览器缓存 |
 
 ---
 
@@ -439,16 +449,17 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --email you@example.com \
              --non-interactive
 ```
-常用参数：`--domain` `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port` `--anytls-port` `--naive-port` `--panel-port` `--panel-user` `--disguise-panel` `--disguise-naive` `--non-interactive` `--docker`（用 ghcr.io 镜像跑面板）。
+常用参数：`--domain` `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port` `--anytls-port` `--naive-port` `--panel-port` `--panel-user` `--disguise-panel` `--disguise-naive` `--non-interactive` `--docker`（KVM 用 all-in-one 镜像 `ghcr.io/jiasongji/ansgo` 单容器跑全套，见 §9 / `deploy/Dockerfile.allinone`）。
 
 落地服务器专用：`bash install.sh --landing [--port 8388]`（在该机部署独立 ss-server，供中转机第二组接入）。
 
 ### 资源来源（全部自有 GitHub）
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
 - 二进制（sing-box / caddy-naive / ansgo-panel / acme.sh 快照）：`github.com/jiasongji/ANS-GO/releases/download/vX.Y.Z/...`
-- Docker 面板镜像：`ghcr.io/jiasongji/ansgo-panel:latest`（多阶段自构建，见 `deploy/Dockerfile`）
+- Docker 一体化镜像（all-in-one：sing-box + caddy + 面板 + systemd，单容器跑全套）：`ghcr.io/jiasongji/ansgo:latest`（多阶段构建，见 `deploy/Dockerfile.allinone` + `deploy/docker/entrypoint.sh`）
+- Docker 面板单镜像（仅面板，兼容用）：`ghcr.io/jiasongji/ansgo-panel:latest`（见 `deploy/Dockerfile`）
 
-> LXC 低配（256MB）推荐裸金属；资源充裕或需可移植时可加 `--docker`。
+> **两种部署形态**：LXC / 低配（256MB）用裸金属（`install.sh`，systemd 直管三服务，内存最小）；KVM / 资源充裕用 Docker 一体化（`install.sh --docker`，host 网络 + privileged，单容器内 systemd 复用全部 unit/脚本/面板代码，面板 0 改动）。
 
 ---
 

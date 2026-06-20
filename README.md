@@ -29,6 +29,8 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 部署完成后脚本会打印：面板访问地址 + 随机 URL 路径 + 一次性管理员密码。**代理服务默认不启动**，登录面板后到「服务安装」页按需开启 Shadowsocks / AnyTLS / NaiveProxy。
 
 > 架构说明：install.sh 只装**面板 + 证书 + :443 伪装站**；三个代理服务改为面板内按需安装/卸载，所有操作在 Web 后台完成。
+>
+> **两种部署形态**：LXC / 低配（256MB）用裸金属（默认，systemd 直管三服务）；KVM / 资源充裕加 `--docker` 用 all-in-one 镜像（`ghcr.io/jiasongji/ansgo`，单容器内 systemd 跑全套，面板 0 改动）。
 
 ---
 
@@ -40,7 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 - **一张证书共享**：acme.sh + Dynu DNS-01 签发 ECDSA 证书，caddy / sing-box / 面板三服务共享，续期一次三服务一起重载
 - **域名双伪装**：`:443` 纯反代伪装站（域名直访命中，不提供代理）+ naive 端口独立伪装；两个伪装站点均可在 Web 后台独立配置（默认反代 `soft.xiaoz.org`）
 - **第二组服务 + 链式出站**：可选启用额外的 anytls-2 + naive-2，出口经 Shadowsocks 走另一台落地服务器（中转→落地）
-- **暗黑/白天双主题**：顶栏一键切换，localStorage 记忆
+- **暗黑/白天双主题 + 移动端自适应**：顶栏一键切换主题（localStorage 记忆）；手机端导航横向滚动 / 表单 label 上置 / 网格自适应单列；白天模式文字对比度已修正
 - **完全解耦**：caddy / sing-box / 面板是三个独立进程、端口、systemd unit，**改协议端口永远不会断面板**
 - **离线兜底**：`ansgo-admin` bash 脚本零依赖，面板全挂也能 SSH 管理一切（含密码/路径/端口重置、备份回滚）
 - **安全**：管理员密码 bcrypt、按 IP 登录锁定、8 小时会话、随机 URL 路径、全程 TLS
@@ -70,7 +72,9 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 ├── AGENTS.md            # ⭐ 唯一事实来源（方案 / 架构 / 部署顺序 / 约束）
 ├── deploy/              # 全部部署产物
 │   ├── README.md        #    手动部署 / 复现指南
-│   ├── Dockerfile       #    面板多阶段构建（推 ghcr.io）
+│   ├── Dockerfile.allinone #  ⭐ all-in-one 镜像（sing-box+caddy+面板+systemd，推 ghcr.io/jiasongji/ansgo）
+│   ├── Dockerfile       #    面板单镜像（兼容用，推 ghcr.io/jiasongji/ansgo-panel）
+│   ├── docker/          #    docker-compose.yml + entrypoint.sh（容器初始化 + systemd）
 │   ├── dns_dynukey.sh   #    acme.sh Dynu DNS-01 钩子（API Key）
 │   ├── ansgo-cert-issue.sh  # 步骤 1-3：装 acme.sh + 签发证书（A/B 双保险）
 │   ├── ansgo-cert-reload   #    续期后按需 reload 三服务

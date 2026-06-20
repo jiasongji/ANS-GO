@@ -17,7 +17,8 @@
 | `ansgo-admin` | `/usr/local/bin/` | 离线管理脚本（面板全挂也能 SSH 管理一切） |
 | `ansgo-panel.service` | `/etc/systemd/system/` | 面板 systemd unit |
 | `systemd/{sing-box,caddy}.service` | `/etc/systemd/system/` | 代理服务 unit |
-| `Dockerfile` / `docker-compose.yml` | — | 面板镜像构建（→ ghcr.io） |
+| `Dockerfile.allinone` / `docker-compose.yml` / `docker/entrypoint.sh` | — | ⭐ all-in-one 一体化镜像（sing-box+caddy+面板+systemd，→ `ghcr.io/jiasongji/ansgo`） |
+| `Dockerfile` | — | 面板单镜像构建（仅面板，兼容用 → `ghcr.io/jiasongji/ansgo-panel`） |
 | `panel/` | 本地交叉编译 | Go 面板源码 |
 
 ## 一键部署（推荐）
@@ -30,7 +31,27 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com --dynu-key <KEY> --email you@example.com --non-interactive
 ```
 
-## 手动部署（对应 AGENTS.md §9）
+## Docker 一体化部署（KVM / 资源充裕推荐）
+
+`install.sh --docker` 自动装 docker、生成 `ansgo.env`（凭证，600 权限）+ `docker-compose.yml`、拉 `ghcr.io/jiasongji/ansgo:latest`（失败则 clone 仓库本地构建），`docker compose up -d` 拉起单容器：
+
+- 容器内 **systemd 作 PID 1**，复用裸金属全部 unit / 脚本 / 面板代码（systemctl / journalctl / ansgo-admin 原生可用，**面板 0 改动**）
+- **host 网络 + privileged + cgroup:host**，代理端口 / 面板端口直连宿主
+- 配置 / 密钥 / 证书 / acme 状态持久化到 docker volume，容器重建不丢失
+- 首次启动容器内自动：生成 `panel.json` + `secrets.env` → 设置管理员密码（`PANEL_PASS`）→ 自签占位证书 → 后台 acme.sh DNS-01 签发真实证书（覆盖自签）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com --dynu-key <KEY> --docker --non-interactive
+# 管理命令
+cd /etc/ansgo-docker && docker compose logs -f ansgo   # 查日志 / 签证书进度
+docker exec ansgo ansgo-admin status                   # 服务状态
+docker exec ansgo ansgo-admin info                     # 节点连接参数
+```
+
+> 手动构建镜像：`docker build -t ghcr.io/jiasongji/ansgo:latest -f deploy/Dockerfile.allinone .`（国内需配 `HTTPS_PROXY`）
+
+## 手动部署（裸金属，对应 AGENTS.md §9）
 
 ### 前置（第一阶段优化，详见 AGENTS.md §1）
 清理垃圾包、系统升级、`sysctl` 网络调优、`limits` 文件描述符、journald 限 50M；sing-box 与 caddy(naive) 就位（可由 `install.sh` 自动从 Releases 拉取）。
@@ -78,4 +99,5 @@ systemctl daemon-reload && systemctl enable --now ansgo-panel
 4. **前端 SPA"点击无反应"=JS 语法错误**：提取 `<script>` 用 `node --check` 查语法。
 5. **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
 6. **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`，失败 `ansgo-admin restore` 回滚。
-7. **面板容器化受限**：面板需 exec 宿主 systemctl/ansgo-admin 管理服务，Docker 内服务控制能力受限；LXC 低配推荐裸金属。
+7. **Docker 一体化已完整支持**（v1.4.0+）：`--docker` 用 all-in-one 镜像（`ghcr.io/jiasongji/ansgo`），容器内 systemd 作 PID 1，systemctl/journalctl/ansgo-admin 原生可用，面板 0 改动。需 `privileged` + `cgroup: host`。LXC 低配（256MB）仍推荐裸金属（内存占用最小）。
+8. **移动端 / 白天主题**（v1.4.0+）：面板已全面适配移动端（导航横向滚动 / 表单 label 上置 / 网格单列）并修复白天模式下白字不可见问题。响应式 `@media` 块必须置于 `<style>` 末尾（所有基础规则之后），否则同特异性会被后面的基础规则覆盖。
