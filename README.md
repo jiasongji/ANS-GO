@@ -1,6 +1,6 @@
 # ANS-GO
 
-> 在一台低配 LXC VPS 上部署 **NaiveProxy + AnyTLS + Shadowsocks** 三协议代理 + **Go Web 管理面板**，共享一张 Let's Encrypt 证书。可审计、可回滚、可离线管理（SSH 兜底）。
+> 在低配 VPS（LXC 或 KVM）上部署 **NaiveProxy + AnyTLS + Shadowsocks** 三协议代理 + **Go Web 管理面板**，共享一张 Let's Encrypt 证书。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
 ![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
@@ -8,29 +8,119 @@
 
 ## 🚀 一键部署
 
-> 所有资源取自本仓库 GitHub（脚本/源码走 raw，二进制走 Releases，面板镜像走 ghcr.io），不依赖第三方 CDN。
+> 所有资源取自本仓库 GitHub（脚本/源码走 raw，二进制走 Releases，镜像走 ghcr.io），不依赖第三方 CDN。需 root，支持 Debian 11/12 / Ubuntu（含 LXC、KVM）。
 
-**交互式**（推荐，逐项确认）：
+三个入口：**中转机部署**（裸金属 / Docker）、**落地机部署**（独立 SS）、**交互式**。
+
+### 方式一：交互式（逐项确认，推荐首次使用）
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
+# 依次输入：域名、Dynu 凭证（路径A API Key 或 路径B OAuth）、各端口、面板用户名、伪装站点
 ```
 
-**带参数一键**（CI / 自动化）：
+### 方式二：中转机 — 裸金属一键（LXC / 低配 256MB 推荐）
+
+systemd 直管 caddy + sing-box + 面板三个独立进程，内存占用最小。以下为**全参数示例**（可按需删减，省略项用默认值）：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com \
              --dynu-key <DYNU_API_KEY> \
              --email you@example.com \
+             --ss-port 33899 \
+             --anytls-port 21111 \
+             --naive-port 44333 \
+             --panel-port 15608 \
+             --panel-user admin \
+             --disguise-panel proxy:https://soft.xiaoz.org \
+             --disguise-naive proxy:https://soft.xiaoz.org \
              --non-interactive
 ```
 
-参数全集：`--domain` · `--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）· `--email` · `--ss-port` · `--anytls-port` · `--naive-port` · `--panel-port` · `--panel-user` · `--disguise-panel` · `--disguise-naive` · `--non-interactive` · `--docker`
+### 方式三：中转机 — Docker 一体化一键（KVM / 资源充裕推荐）⭐
 
-部署完成后脚本会打印：面板访问地址 + 随机 URL 路径 + 一次性管理员密码。**代理服务默认不启动**，登录面板后到「服务安装」页按需开启 Shadowsocks / AnyTLS / NaiveProxy。
+单容器（`ghcr.io/jiasongji/ansgo`，all-in-one：sing-box + caddy + 面板 + systemd）内跑全套，面板代码 0 改动。**仅加 `--docker`，其余参数与裸金属完全一致**：
 
-> 架构说明：install.sh 只装**面板 + 证书 + :443 伪装站**；三个代理服务改为面板内按需安装/卸载，所有操作在 Web 后台完成。
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --dynu-key <DYNU_API_KEY> \
+             --email you@example.com \
+             --ss-port 33899 \
+             --anytls-port 21111 \
+             --naive-port 44333 \
+             --panel-port 15608 \
+             --panel-user admin \
+             --disguise-panel proxy:https://soft.xiaoz.org \
+             --disguise-naive proxy:https://soft.xiaoz.org \
+             --docker \
+             --non-interactive
+```
+
+> Docker 模式自动装 docker、生成 `/etc/ansgo-docker/ansgo.env`（凭证，600 权限）+ `docker-compose.yml`、拉取/本地构建镜像并 `docker compose up -d`。需 `privileged` + host 网络（脚本已自动配置）。管理：`cd /etc/ansgo-docker && docker compose logs -f ansgo`、`docker exec ansgo ansgo-admin status`。
+
+### 方式四：落地机 — 独立 Shadowsocks（第二组出口用）
+
+在**另一台服务器**部署独立 ss-server，供中转机第二组服务（anytls-2 / naive-2）经 SS 接入（中转→落地架构）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --landing --port 8388 --non-interactive
+```
+
+落地机 SS 信息（host / port / method / password）随后填入中转机面板「出口落地」页。
+
+### 凭证：Dynu 双保险（路径 A 默认 / B 降级）
+
+DNS 托管在 Dynu，证书走 DNS-01（绕开 80 端口依赖）。两套凭证任选其一：
+
+| 路径 | 参数 | 机制 |
+|------|------|------|
+| **A（推荐）** | `--dynu-key <API_KEY>` | API Key 请求头，自定义钩子 |
+| **B（降级）** | `--dynu-client-id <ID> --dynu-secret <SECRET>` | OAuth2 client_credentials |
+
+路径 B 示例：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --dynu-client-id <CLIENT_ID> \
+             --dynu-secret <SECRET> \
+             --email you@example.com \
+             --non-interactive
+```
+
+部署时自动先尝试 A，A 失败降级 B。
+
+### 参数全集
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--domain` | —（必填） | 你的域名（A/AAAA 已解析到本机，DNS 托管在 Dynu）|
+| `--dynu-key` | — | Dynu API Key（路径 A，推荐）|
+| `--dynu-client-id` | — | Dynu OAuth Client ID（路径 B，需配 `--dynu-secret`）|
+| `--dynu-secret` | — | Dynu OAuth Secret（路径 B）|
+| `--email` | admin@<域名> | ACME 注册邮箱 |
+| `--ss-port` | `23456` | Shadowsocks 端口 |
+| `--anytls-port` | `8443` | AnyTLS 端口 |
+| `--naive-port` | `443` | NaiveProxy 端口 |
+| `--panel-port` | `15608` | 面板端口 |
+| `--panel-user` | `admin` | 面板管理员用户名 |
+| `--disguise-panel` | `proxy:https://soft.xiaoz.org` | `:443` 直访伪装站点（`proxy:<URL>` 反代 / `page` 静态页）|
+| `--disguise-naive` | `proxy:https://soft.xiaoz.org` | Naive 端口伪装站点（同上格式）|
+| `--docker` | 关 | Docker 一体化形态（KVM 用；否则裸金属）|
+| `--non-interactive` | 关 | 非交互模式，缺必填项报错退出（CI / 自动化）|
+| `--force-bin` | 关 | 强制重装 sing-box/caddy 二进制（已装则跳过）|
+| `--landing` | — | 子命令：落地机部署独立 SS（仅 `--port` / `--non-interactive` 有效）|
+
+### 部署完成后
+
+脚本会打印：**面板访问地址 + 随机 URL 路径 + 一次性管理员密码**。
+
+> **代理服务默认不启动**——登录面板后到「服务安装」页按需开启 Shadowsocks / AnyTLS / NaiveProxy。架构上 install.sh 只装**面板 + 证书 + `:443` 伪装站**，三个代理服务改为面板内按需安装/卸载。
 >
-> **两种部署形态**：LXC / 低配（256MB）用裸金属（默认，systemd 直管三服务）；KVM / 资源充裕加 `--docker` 用 all-in-one 镜像（`ghcr.io/jiasongji/ansgo`，单容器内 systemd 跑全套，面板 0 改动）。
+> 忘记密码？SSH 执行 `ansgo-admin panel-pass`（裸金属）或 `docker exec ansgo ansgo-admin panel-pass`（Docker）。
 
 ---
 
