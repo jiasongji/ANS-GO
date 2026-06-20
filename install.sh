@@ -18,7 +18,7 @@ set -uo pipefail
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.3.0"
+VER="v1.4.1"
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -294,14 +294,15 @@ install -m 0755 /etc/ansgo-deploy/ansgo-genconf     /usr/local/bin/ansgo-genconf
 install -m 0755 /etc/ansgo-deploy/ansgo-cert-reload /usr/local/bin/ansgo-cert-reload
 
 hr "2/8 确保 sing-box / caddy(naive) 就位"
-# 已装且未强制则跳过；否则从本仓库 Releases 拉 vendored 二进制
+# 从本项目 Releases 拉 vendored 二进制（sing-box 1.13.13 / caddy-naive v2.11.4）
+# 均为 CGO-free 纯静态；sing-box 官方包含 glibc 依赖，debian/ubuntu 原生支持
 if [ "$FORCE_BIN" = 1 ] || ! command -v sing-box >/dev/null; then
   log "安装 sing-box (from release, arch=$AARCH)"
   dl_or_exit "$REL/$VER/sing-box-linux-${AARCH}.tar.gz" /tmp/sb.tgz
   tar xzf /tmp/sb.tgz -C /tmp && install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
 fi
 if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -q forwardproxy; then
-  log "安装 caddy (naive 分支, from release)"
+  log "安装 caddy (naive 分支, from release, arch=$AARCH)"
   dl_or_exit "$REL/$VER/caddy-naive-linux-${AARCH}" /usr/local/bin/caddy && chmod 0755 /usr/local/bin/caddy
 fi
 
