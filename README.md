@@ -122,6 +122,31 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 >
 > 忘记密码？SSH 执行 `ansgo-admin panel-pass`（裸金属）或 `docker exec ansgo ansgo-admin panel-pass`（Docker）。
 
+### 卸载
+
+一键卸载，自动检测部署模式（Docker / 裸金属）：
+
+```bash
+# 默认：移除服务/容器/二进制，保留配置/卷（可重装不丢参数）
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --uninstall
+
+# 彻底删除一切（配置/密钥/证书/数据卷/镜像/系统调优，不可恢复）
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --uninstall --purge
+```
+
+| 项 | 默认卸载（`--uninstall`）| 彻底卸载（`--uninstall --purge`）|
+|----|------------------------|-------------------------------|
+| 服务/容器 | ✅ 停止并移除 | ✅ 停止并移除 |
+| 二进制 / systemd unit | ✅ 删除 | ✅ 删除 |
+| 配置/密钥/证书（`/etc/ansgo` `/etc/ssl/ansgo`）| ⬜ 保留 | ✅ 删除 |
+| Docker 数据卷 / 镜像 | ⬜ 保留 | ✅ 删除 |
+| acme.sh 状态 / 备份 / 调优 | ⬜ 保留 | ✅ 删除 |
+| docker 本体 | ⬜ 保留（可能被其他服务使用）| ⬜ 保留 |
+
+> 卸载前会有二次确认（输入 `yes`）。`--purge` 不可恢复，请确保已备份所需配置。
+
 ---
 
 ## ✨ 特性

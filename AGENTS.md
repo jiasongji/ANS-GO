@@ -426,6 +426,7 @@ SSH:                22
 | Docker 容器 systemd 起不来 | 必须 `privileged: true` + `cgroup: host` + tmpfs `/run`；host 网络下端口与宿主冲突需先释放 |
 | 容器改前端/二进制不生效 | 改 `web/index.html` 需重 build 镜像（`docker build -f deploy/Dockerfile.allinone .`）后 `docker compose up -d --build` |
 | 移动端/白天主题显示异常 | v1.4.0 已全面适配（导航横向滚动 / label 上置 / 网格单列 / 白天文字 `var(--txt)`）；若仍异常，硬刷新清浏览器缓存 |
+| 卸载不干净（Docker 卷/镜像残留）| v1.4.1 `--uninstall` 用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配(`*_ansgo_(etc\|ssl\|caddy\|sb\|acme)`)兑底删卷；先删容器再删镜像避免 “image is being used” 错误 |
 | install.sh 首行报 `x86_64: unbound variable` | 旧版 `ARCH_MAP=( [x86_64]=amd64 )` 缺 `declare -A`，bash 把它当索引数组，`x86_64` 在算术上下文求值 + `set -u` 触发报错；v1.4.1 改用 `case` 写法（零关联数组）。⚠️ `bash -n` 只查语法不执行，查不出此类运行时变量错误，改完务必**实际执行**开头几行验证 |
 
 ---
@@ -480,6 +481,15 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--naive-port`(443) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--docker` `--non-interactive` `--force-bin`。
 
 落地服务器专用：`bash install.sh --landing [--port 8388]`（在该机部署独立 ss-server，供中转机第二组接入）。
+
+卸载（自动检测 Docker / 裸金属）：
+```bash
+bash install.sh --uninstall            # 移除服务/容器/二进制，保留配置/卷
+bash install.sh --uninstall --purge    # 彻底删除配置/密钥/证书/卷/镜像/调优（不可恢复）
+```
+- **默认**：停服务/删容器/删二进制与 unit，**保留** `/etc/ansgo` `/etc/ssl/ansgo` 及 docker 卷（可重装不丢参数）
+- **`--purge`**：上述全部 + 删配置/密钥/证书/acme 状态/备份/sysctl 调优/docker 卷与镜像（docker 本体保留，可能被其他服务使用）
+- 卸载前二次确认；Docker 分支用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配兑底删卷，避免 compose project 名不一致导致遗漏
 
 ### 资源来源（全部自有 GitHub / 官方上游）
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`

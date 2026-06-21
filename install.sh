@@ -3,6 +3,9 @@
 # ANS-GO 一键部署脚本 (install.sh)
 #   交互式：bash install.sh          （逐项提问，带默认值）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
+#   Docker：bash install.sh --domain ... --docker --non-interactive
+#   卸载  ：bash install.sh --uninstall           # 移除服务/容器，保留配置/卷
+#           bash install.sh --uninstall --purge   # 彻底删除配置/卷/镜像
 #
 # 所有资源取自本仓库 GitHub / 官方上游：
 #   脚本/源码    -> raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/
@@ -31,7 +34,7 @@ esac
 DOMAIN="" DYNU_KEY="" DYNU_CID="" DYNU_SECRET="" EMAIL=""
 SS_PORT=23456 ANYTLS_PORT=8443 NAIVE_PORT=443 PANEL_PORT=15608
 PANEL_USER="admin" DISGUISE_PANEL="proxy:https://soft.xiaoz.org" DISGUISE_NAIVE="proxy:https://soft.xiaoz.org"
-NONINT=0 DOCKER=0 FORCE_BIN=0
+NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0
 
 # ---- 颜色/日志 ----
 if [ -t 1 ]; then C_G='\033[32m';C_Y='\033[33m';C_R='\033[31m';C_B='\033[36m';C_0='\033[0m'; else C_G='';C_Y='';C_R='';C_B='';C_0=''; fi
@@ -56,9 +59,11 @@ usage(){ cat <<EOF
   --panel-user USER        面板管理员用户名（默认 admin）
   --disguise-panel VAL     :443 直访伪装站点（proxy:<URL> 反代 / page 默认页，默认 proxy:https://soft.xiaoz.org）
   --disguise-naive VAL     NaiveProxy 端口的伪装站点（同上格式，默认 proxy:https://soft.xiaoz.org）
-  --docker                 用 ghcr.io 镜像跑面板（否则裸金属）
+  --docker                 用 ghcr.io all-in-one 镜像跑（KVM；否则裸金属）
   --force-bin              强制从 Releases 重装 sing-box/caddy（已装则跳过）
   --non-interactive        不交互，缺项报错退出
+  --uninstall              卸载 ANS-GO（自动检测 Docker/裸金属；保留配置/卷）
+  --purge                  与 --uninstall 同用：彻底删除配置/密钥/证书/卷/镜像
   -h, --help
 EOF
 }
@@ -80,10 +85,116 @@ while [ $# -gt 0 ]; do
     --docker) DOCKER=1; shift;;
     --force-bin) FORCE_BIN=1; shift;;
     --non-interactive) NONINT=1; shift;;
+    --uninstall) UNINSTALL=1; shift;;
+    --purge) PURGE=1; shift;;
     -h|--help) usage; exit 0;;
     *) err "未知参数: $1"; usage; exit 1;;
   esac
 done
+
+# =============================================================================
+# 卸载（apt purge 风格两级：默认保留配置/卷，--purge 彻底删除一切）
+#   自动检测部署模式：Docker（/etc/ansgo-docker/）或裸金属（/etc/ansgo/）
+# =============================================================================
+do_uninstall(){
+  [ "$(id -u)" = 0 ] || { err "需 root 运行"; exit 1; }
+  local PURGE="${PURGE:-0}"
+
+  hr "ANS-GO 卸载（purge=$PURGE）"
+
+  # ---- 检测部署模式 ----
+  local HAS_DOCKER=0 HAS_METAL=0
+  [ -f /etc/ansgo-docker/docker-compose.yml ] && HAS_DOCKER=1
+  { [ -f /etc/ansgo/panel.json ] || systemctl list-unit-files 2>/dev/null | grep -qE 'ansgo-panel|sing-box|caddy' \
+    || [ -x /usr/local/bin/ansgo-panel ]; } && HAS_METAL=1
+
+  if [ "$HAS_DOCKER" = 0 ] && [ "$HAS_METAL" = 0 ]; then
+    warn "未检测到 ANS-GO 部署痕迹（无 /etc/ansgo-docker、无 /etc/ansgo/、无 systemd unit）"
+    warn "可能从未安装，或已卸载。退出。"
+    exit 0
+  fi
+
+  echo "检测到的部署模式：$([ "$HAS_DOCKER" = 1 ] && echo 'Docker ')$([ "$HAS_METAL" = 1 ] && echo '裸金属')"
+  if [ "$PURGE" = 1 ]; then
+    warn "--purge 模式：将彻底删除全部配置/密钥/证书/数据卷/镜像/系统调优，不可恢复"
+  else
+    echo "默认模式：移除服务/容器/二进制，保留配置/卷（可重装不丢参数）"
+    echo "如需彻底删除一切，用: bash install.sh --uninstall --purge"
+  fi
+  read -r -p "确认卸载？输入 yes: " a; [ "$a" = yes ] || { echo "已取消"; exit 0; }
+
+  # ---- Docker 模式卸载 ----
+  if [ "$HAS_DOCKER" = 1 ]; then
+    # 兼手清理：不论 compose 文件在不在，都强制删同名容器（避免 compose down 遗漏残留）
+    docker rm -f ansgo 2>/dev/null || true
+    if command -v docker >/dev/null 2>&1 && [ -f /etc/ansgo-docker/docker-compose.yml ]; then
+      log "[Docker] 停止并删除容器..."
+      ( cd /etc/ansgo-docker && docker compose down --remove-orphans 2>/dev/null \
+        || docker-compose down 2>/dev/null || true )
+      # 再次兑底：compose down 可能因 project 名不一致而遗漏
+      docker rm -f ansgo 2>/dev/null || true
+      if [ "$PURGE" = 1 ]; then
+        log "[Docker] 删除数据卷（配置/密钥/证书/acme）..."
+        ( cd /etc/ansgo-docker && docker compose down -v --remove-orphans 2>/dev/null \
+          || docker-compose down -v 2>/dev/null || true )
+        # 兑底删除可能残留的卷（compose project 名不同时）；按名称模式匹配，
+        # 覆盖 ansgo_* / ansgo-docker_ansgo_* / 自定义 project 名的卷
+        docker volume ls --format '{{.Name}}' 2>/dev/null \
+          | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme)$|_ansgo_(etc|ssl|caddy|sb|acme)$' \
+          | xargs -r docker volume rm 2>/dev/null || true
+        log "[Docker] 删除本地镜像（容器已删，镜像可安全移除）..."
+        docker image rm ghcr.io/jiasongji/ansgo:latest 2>/dev/null || true
+        docker image rm ghcr.io/jiasongji/ansgo-panel:latest 2>/dev/null || true
+      fi
+    else
+      warn "[Docker] docker 命令缺失或 compose 文件不在，已尝试手动清理容器"
+      [ "$PURGE" = 1 ] && docker volume ls --format '{{.Name}}' 2>/dev/null \
+        | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme)$|_ansgo_(etc|ssl|caddy|sb|acme)$' \
+        | xargs -r docker volume rm 2>/dev/null || true
+    fi
+    if [ "$PURGE" = 1 ]; then
+      rm -rf /etc/ansgo-docker
+      ok "[Docker] 已删除 /etc/ansgo-docker/（含 ansgo.env + compose）"
+    else
+      warn "[Docker] 保留 /etc/ansgo-docker/（含凭证，重装可复用）"
+    fi
+  fi
+
+  # ---- 裸金属模式卸载 ----
+  if [ "$HAS_METAL" = 1 ]; then
+    log "[裸金属] 停止并禁用服务..."
+    for s in ansgo-panel caddy sing-box; do
+      systemctl stop "$s" 2>/dev/null || true
+      systemctl disable "$s" 2>/dev/null || true
+      rm -f "/etc/systemd/system/$s.service"
+      rm -f "/etc/systemd/system/multi-user.target.wants/$s.service"
+    done
+    systemctl daemon-reload 2>/dev/null || true
+    log "[裸金属] 移除管理二进制 + 脚本..."
+    rm -f /usr/local/bin/ansgo-panel /usr/local/bin/ansgo-admin \
+          /usr/local/bin/ansgo-genconf /usr/local/bin/ansgo-cert-reload \
+          /usr/local/bin/ansgo-cert-issue.sh /usr/local/bin/dns_dynukey.sh
+    if [ "$PURGE" = 1 ]; then
+      log "[裸金属] --purge：移除代理二进制 + 配置/密钥/证书/备份/调优..."
+      rm -f /usr/local/bin/sing-box /usr/local/bin/caddy
+      rm -rf /etc/ansgo /etc/ssl/ansgo /etc/sing-box /etc/caddy /var/www/html
+      rm -rf /root/.acme.sh /etc/ansgo-deploy
+      rm -rf /etc/ansgo-backup-* /etc/ansgo-uninstall-backup-*
+      rm -f /etc/sysctl.d/99-ansgo-tune.conf /etc/security/limits.d/99-ansgo.conf
+      ok "[裸金属] 配置/密钥/证书/备份/调优已彻底删除"
+    else
+      ok "[裸金属] 配置保留在 /etc/ansgo/ /etc/ssl/ansgo/（--purge 可彻底删）"
+    fi
+  fi
+
+  hr "卸载完成（purge=$PURGE）"
+  [ "$PURGE" = 0 ] && echo "提示：彻底删除一切请重跑  bash install.sh --uninstall --purge"
+  echo "注：未卸载 docker 本体（可能被其他服务使用）；如需卸载 docker 请手动执行。"
+  exit 0
+}
+
+# ---- 卸载子命令（在交互收集前拦截，避免无谓的域名/凭证提问）----
+if [ "${UNINSTALL:-0}" = 1 ]; then do_uninstall; exit 0; fi
 
 # ---- landing 子命令：在落地机一键部署 ss-server ----
 if [ "${1:-}" = "--landing" ]; then
