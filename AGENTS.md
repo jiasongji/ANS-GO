@@ -5,7 +5,11 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.4.1**（v1.4.0：移动端自适应 + 白天主题修复 + Docker all-in-one；v1.4.1：修复 install.sh 架构判断在 `set -u` 下的 `x86_64: unbound variable`）。版本历史见 GitHub Releases。
+> **当前版本：v1.4.2**。版本历史见 GitHub Releases。
+>
+> - **v1.4.2**：新增 `--uninstall` / `--purge` 彻底卸载（自动检测 Docker/裸金属，两级清理：默认保留配置/卷，`--purge` 全删）
+> - **v1.4.1**：修复 install.sh 架构判断 `x86_64: unbound variable` + 补全 release 二进制（sing-box/caddy-naive/panel 双架构）
+> - **v1.4.0**：移动端自适应 + 白天主题文字修复 + Docker all-in-one 一体化镜像
 
 ---
 
@@ -255,7 +259,7 @@ ansgo-admin firewall [list|open PORT|close PORT]
 ansgo-admin update [sing-box|caddy|panel]   # 升级二进制
 ansgo-admin backup              # 备份所有配置到 /etc/ansgo-backup-{ts}/
 ansgo-admin restore [备份目录]   # 回滚
-ansgo-admin uninstall           # 卸载（保留配置备份）
+ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份）；彻底卸载用 install.sh --uninstall --purge
 ```
 
 ---
@@ -426,7 +430,7 @@ SSH:                22
 | Docker 容器 systemd 起不来 | 必须 `privileged: true` + `cgroup: host` + tmpfs `/run`；host 网络下端口与宿主冲突需先释放 |
 | 容器改前端/二进制不生效 | 改 `web/index.html` 需重 build 镜像（`docker build -f deploy/Dockerfile.allinone .`）后 `docker compose up -d --build` |
 | 移动端/白天主题显示异常 | v1.4.0 已全面适配（导航横向滚动 / label 上置 / 网格单列 / 白天文字 `var(--txt)`）；若仍异常，硬刷新清浏览器缓存 |
-| 卸载不干净（Docker 卷/镜像残留）| v1.4.1 `--uninstall` 用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配(`*_ansgo_(etc\|ssl\|caddy\|sb\|acme)`)兑底删卷；先删容器再删镜像避免 “image is being used” 错误 |
+| 卸载不干净（Docker 卷/镜像残留）| v1.4.2 `--uninstall` 用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配(`*_ansgo_(etc\|ssl\|caddy\|sb\|acme)`)兑底删卷；先删容器再删镜像避免 “image is being used” 错误 |
 | install.sh 首行报 `x86_64: unbound variable` | 旧版 `ARCH_MAP=( [x86_64]=amd64 )` 缺 `declare -A`，bash 把它当索引数组，`x86_64` 在算术上下文求值 + `set -u` 触发报错；v1.4.1 改用 `case` 写法（零关联数组）。⚠️ `bash -n` 只查语法不执行，查不出此类运行时变量错误，改完务必**实际执行**开头几行验证 |
 
 ---
