@@ -51,6 +51,21 @@ docker exec ansgo ansgo-admin info                     # 节点连接参数
 
 > 手动构建镜像：`docker build -t ghcr.io/jiasongji/ansgo:latest -f deploy/Dockerfile.allinone .`（国内需配 `HTTPS_PROXY`）
 
+## 卸载（v1.4.2+）
+
+`install.sh --uninstall` 自动检测部署模式（Docker / 裸金属），两级清理：
+
+```bash
+# 默认：移除服务/容器/二进制/unit，保留配置/卷（可重装不丢参数）
+bash install.sh --uninstall
+# 彻底：删除配置/密钥/证书/acme/备份/卷/镜像/调优（不可恢复）
+bash install.sh --uninstall --purge
+```
+
+- **Docker 分支**：`docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配(`*_ansgo_*`)兑底删卷，先删容器再删镜像避免占用错误
+- **裸金属分支**：停 systemd 服务 + 删二进制/unit；`--purge` 额外删 `/etc/ansgo` `/etc/ssl/ansgo` `/root/.acme.sh` + sysctl/limits 调优
+- docker 本体保留（可能被其他服务使用）；卸载前二次确认
+
 ## 手动部署（裸金属，对应 AGENTS.md §9）
 
 ### 前置（第一阶段优化，详见 AGENTS.md §1）
@@ -99,5 +114,6 @@ systemctl daemon-reload && systemctl enable --now ansgo-panel
 4. **前端 SPA"点击无反应"=JS 语法错误**：提取 `<script>` 用 `node --check` 查语法。
 5. **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
 6. **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`，失败 `ansgo-admin restore` 回滚。
-7. **Docker 一体化已完整支持**（v1.4.0+）：`--docker` 用 all-in-one 镜像（`ghcr.io/jiasongji/ansgo`），容器内 systemd 作 PID 1，systemctl/journalctl/ansgo-admin 原生可用，面板 0 改动。需 `privileged` + `cgroup: host`。LXC 低配（256MB）仍推荐裸金属（内存占用最小）。
+7. **Docker 一体化已完整支持**（v1.4.0+）：`--docker` 用 all-in-one 镜像（`ghcr.io/jiasongji/ansgo`），容器内 systemd 作 PID 1，systemctl/journalctl/ansgo-admin 原生可用，面板 0 改动。需 `privileged` + `cgroup: host` + host 网络。LXC 低配（256MB）仍推荐裸金属（内存占用最小）。
 8. **移动端 / 白天主题**（v1.4.0+）：面板已全面适配移动端（导航横向滚动 / 表单 label 上置 / 网格单列）并修复白天模式下白字不可见问题。响应式 `@media` 块必须置于 `<style>` 末尾（所有基础规则之后），否则同特异性会被后面的基础规则覆盖。
+9. **彻底卸载**（v1.4.2+）：`install.sh --uninstall --purge` 自动检测 Docker/裸金属并彻底清理（含 docker 卷/镜像）；Docker 分支必须先删容器再删镜像，否则报 “image is being used”。`bash -n` 只查语法不执行，改完脚本务必实际执行关键路径验证。
