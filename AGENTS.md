@@ -346,10 +346,12 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 
 ### 实战备注（历次部署沉淀）
 - **scp 覆盖运行中二进制会失败**（sftp报 `dest open Failure`），且后续 restart 只重启旧文件。正确流程：`systemctl stop` → `rm` → `scp` → `md5sum` 对比 → `systemctl start`。md5 是判断"是否真更新"的唯一手段。
+  - v1.4.3 升级实战范例（2026-06-22 验证）：旧 md5 `9379fe9a...`（v1.4.0 期），新 md5 `8113f1b2...`，按上述流程上传后远端 md5 精确匹配，服务秒级 active。
 - **caddy reload 必失败**（Caddyfile 设 `admin off`），改配置用 restart。
 - **前端 SPA"点击无反应"=JS 语法错误**：整块 `<script>` 不解析→所有函数未定义→静默。诊断：`node --check` 查语法。
 - **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
-- **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`。
+- **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`。升级二进制前也手动备份：`cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-update-vX.Y.Z-{ts}/ansgo-panel.old`（v1.4.3 升级时即用此方式）。
+- **前端改动后必须重新编译 + 上传**：HTML 经 `//go:embed` 编译进 Go 二进制，改 `deploy/panel/web/index.html` 后须 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 重新出包 + 上面的 stop→rm→scp→md5→start 流程，浏览器硬刷新。改完前端用 headless Chrome 截图多主题 × 多视口 × 多状态交叉验证（v1.4.3 即用此法验证 6 场景）。
 
 ---
 
@@ -377,6 +379,7 @@ URL:      https://your-domain.com:15608/<随机URL路径>/
 密码:     （部署时一次性显示，存 .secrets.local；遗忘用 `ansgo-admin panel-pass` 重置）
 URL路径:  /<随机URL路径>/  （面板内可改；遗忘用 `ansgo-admin panel-path` 重置）
 ```
+> 线上现状（2026-06-22 升级到 v1.4.3）：URL 路径已自定义，凭证见 `.secrets.local`。HTTPS 直访正常（HTTP 200），新版左侧可折叠侧边栏 + 白天模式字体修复已生效。
 
 ### 当前端口（默认值，可面板内改）
 ```
@@ -401,13 +404,14 @@ SSH:                22
 
 ### 服务器文件清单（与 §8 对照，均已落地）
 ```
-/usr/local/bin/{sing-box, caddy, ansgo-admin, ansgo-genconf, ansgo-panel, ansgo-cert-reload}
-/etc/ansgo/{config.json, sessions.db}
+/usr/local/bin/{sing-box, caddy, ansgo-admin, ansgo-genconf, ansgo-panel, ansgo-cert-reload, ansgo-cert-issue.sh}
+/etc/ansgo/{panel.json, sessions.db, secrets.env}
 /etc/ssl/ansgo/{fullchain.pem, privkey.pem}
 /root/.acme.sh/{dnsapi/dns_dynukey.sh, account.conf, your-domain.com_ecc/}
 /etc/sing-box/config.json   /etc/caddy/Caddyfile   /var/www/html/index.html
 /etc/systemd/system/{sing-box, caddy, ansgo-panel}.service
-/etc/ansgo/secrets.env  /etc/sysctl.d/99-ansgo-tune.conf  /etc/security/limits.d/99-ansgo.conf
+/etc/sysctl.d/99-ansgo-tune.conf   /etc/security/limits.d/99-ansgo.conf
+/etc/ansgo-backup-update-v1.4.3-{ts}/   # v1.4.3 升级前的二进制+配置备份
 ```
 
 ---
@@ -419,10 +423,10 @@ SSH:                22
 | 证书签发失败 | acme.sh 详细日志；失败时保留现有自签证书继续服务，不影响运行；A 失败自动 B |
 | 改配置导致服务起不来 | 每次改动前 `ansgo-admin backup` 到 `/etc/ansgo-backup-{ts}/`，`ansgo-admin restore` 一键回滚 |
 | 面板 Go 二进制崩溃 | systemd `Restart=on-failure` 自动重启；`ansgo-admin` 兜底 |
-| 改面板端口后失联 | SSH 进去 `ansgo-admin panel-port` 重置；或改 config.json 后 restart |
+| 改面板端口后失联 | SSH 进去 `ansgo-admin panel-port` 重置；或改 panel.json 后 restart |
 | API Key 泄露 | 只存服务器 root 独占文件；可 `ansgo-admin` 旋转（重新填 Dynu 凭证）|
 | IPv6 入站不可用 | 宿主防火墙限制，容器侧无解；仅用 IPv4 |
-| 面板二进制更新不生效 | scp 覆盖运行中二进制会静默失败；必须 stop→rm→scp→md5 校验→start（见 §9 实战备注）|
+| 面板二进制更新不生效 | scp 覆盖运行中二进制会静默失败；必须 stop→rm→scp→md5 校验→start（见 §9 实战备注，v1.4.3 升级时已用 md5 `8113f1b2...` 校验通过）|
 | 面板点击无反应 | 前端 JS 语法错误致整块脚本失效；改完 HTML 需重新编译上传，清浏览器缓存硬刷新 |
 | 续期 reload 失败 | caddy `admin off` 无法 reload；`ansgo-cert-reload` 已改用 restart，续期闪断 1-2s |
 | 第二组落地密钥错误 | sing-box `bad key length` 崩溃；面板对 2022-blake3 密钥做长度校验拒错；SSH 改正确后重启 |
@@ -512,8 +516,8 @@ bash install.sh --uninstall --purge    # 彻底删除配置/密钥/证书/卷/�
 
 1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 三协议从中国大陆公网连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
 2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. **服务器复现（待验证）**：用 `install.sh` 在干净服务器一键部署并测试
-4. **客户端实测**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
+3. ✅ **服务器部署（已完成 + 持续迭代）**：生产服务器已部署并通过 `https://your-domain.com:15608/<面板URL路径>/` 访问。面板版本迭代走 §9「stop→rm→scp→md5→start」流程，已升级至 v1.4.3（左侧可折叠侧边栏 + 白天模式字体修复）
+4. **客户端实测（可选）**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
 
 ---
 
