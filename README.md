@@ -16,8 +16,9 @@
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
-# 依次输入：域名、Dynu 凭证（路径A API Key 或 路径B OAuth）、各端口、面板用户名、伪装站点
 ```
+
+> 依次输入：域名、Dynu 凭证（路径A API Key 或 路径B OAuth）、各端口、面板用户名、伪装站点。
 
 ### 方式二：中转机 — 裸金属一键（LXC / 低配 256MB 推荐）
 
@@ -129,8 +130,9 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --email you@example.com \
              --docker \
              --non-interactive
-# 部署后编辑 /etc/ansgo-docker/docker-compose.yml 把证书目录挂载进容器，再 docker compose up -d
 ```
+
+部署后编辑 `/etc/ansgo-docker/docker-compose.yml` 把证书目录挂载进容器，再 `docker compose up -d`：
 
 > manual 模式下 caddy / sing-box / 面板三个服务都直接引用你指定的绝对路径（不复制到 `/etc/ssl/ansgo/`）。替换证书后登录面板「证书管理」页点「🔄 重新加载证书」即可让三服务重新读取（含面板自身重启）。
 
@@ -168,17 +170,22 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 ### 卸载
 
-一键卸载，自动检测部署模式（Docker / 裸金属）：
+一键卸载，自动检测部署模式（Docker / 裸金属）。**默认保留配置/卷**（可重装不丢参数），加 `--purge` 彻底删除一切。
+
+**默认卸载**（移除服务/容器/二进制，保留配置/卷）：
 
 ```bash
-# 默认：移除服务/容器/二进制，保留配置/卷（可重装不丢参数）
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
-  | bash -s -- --uninstall
-
-# 彻底删除一切（配置/密钥/证书/数据卷/镜像/系统调优，不可恢复）
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
-  | bash -s -- --uninstall --purge
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | bash -s -- --uninstall
 ```
+
+**彻底卸载**（删除配置/密钥/证书/数据卷/镜像/系统调优，**不可恢复**）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | bash -s -- --uninstall --purge
+```
+
+<details>
+<summary>📋 两种卸载级别对比</summary>
 
 | 项 | 默认卸载（`--uninstall`）| 彻底卸载（`--uninstall --purge`）|
 |----|------------------------|-------------------------------|
@@ -188,6 +195,8 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 | Docker 数据卷 / 镜像 | ⬜ 保留 | ✅ 删除 |
 | acme.sh 状态 / 备份 / 调优 | ⬜ 保留 | ✅ 删除 |
 | docker 本体 | ⬜ 保留（可能被其他服务使用）| ⬜ 保留 |
+
+</details>
 
 > 卸载前会有二次确认（输入 `yes`）。`--purge` 不可恢复，请确保已备份所需配置。
 

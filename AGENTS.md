@@ -5,8 +5,9 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.5.0**。版本历史见 GitHub Releases。
+> **当前版本：v1.5.1**。版本历史见 GitHub Releases。
 >
+> - **v1.5.1**：修复 `curl ... | bash -s -- --uninstall` 管道形式下卸载确认 `read` 读到 EOF 致「已取消」退出（bash 的 stdin 被 curl 输出占用，三处 read 全失效）；install.sh 检测到非交互 stdin 且 stdout 是 tty 时自动 `exec 0</dev/tty` 恢复交互输入。无 tty 的 CI 环境跳过（走 `--non-interactive`）。文档同步：README/deploy/AGENTS 卸载命令拆成独立代码块便于单独复制
 > - **v1.5.0**：①「密钥管理」页支持**手动设置**各服务密码（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，与随机生成并存，SS2022 自动校验密钥长度）②**手动指定证书**与私钥的完整路径（`cert_mode=manual`，与 acme 二选一；面板「证书管理」页可切换来源 + 重新加载；install.sh 新增 `--cert-mode/--cert-fullchain/--cert-privkey`）③全参数一键安装支持手动证书
 > - **v1.4.3**：面板导航改左侧可折叠侧边栏（桌面可折叠 + 移动端抽屉式，localStorage 记忆）+ 修复白天模式下字体不可读（active 项改蓝底白字 / `<code>` 显式着色 / overlay 阴影双主题适配 / `.logs` 终端风格双主题统一）
 > - **v1.4.2**：新增 `--uninstall` / `--purge` 彻底卸载（自动检测 Docker/裸金属，两级清理：默认保留配置/卷，`--purge` 全删）
@@ -44,7 +45,7 @@
 | 规格 | 1 vCPU / 256MB RAM + 256MB swap / 3.86GB disk |
 | 域名 | `your-domain.com`（已 A + AAAA 解析到本机）|
 | DNS 服务商 | Dynu Systems（NS = ns0~6.dynu.com，zone id = <Dynu_zone_id>）|
-| SSH | `root@<服务器IP>`（密码见 `.secrets.local`）|
+| SSH | `root@<服务器IP>`（**公钥登录 + 端口 25822**，密码登录已禁用，密钥/路径见 `.secrets.local`）|
 
 ### 已完成的基础优化（第一阶段，无需重复）
 - 移除 postfix / mailcap / reportbug / tasksel 等垃圾包
@@ -100,9 +101,11 @@
 | Shadowsocks (sing-box) | `33899` TCP | SS2022 | 按需安装 | ✅ |
 | 第二组 anytls-2 / naive-2 | `21112` / `44334` | TLS / HTTPS | 按需（走 SS 落地）| ✅ |
 | caddy HTTP（重定向）| `80` TCP | HTTP | 固定 | ❌ |
-| SSH | `22` TCP | SSH | 固定 | ❌ |
+| SSH | `25822` TCP | SSH | **已加固**（公钥+禁密码，见 §15）| ❌ |
 
 > :443 是**域名直访伪装站**（纯反代，不提供代理），随面板一起启动。NaiveProxy 用独立端口（默认 44333），不要用 443。
+>
+> ⚠️ **SSH 端口已从默认 22 改为 25822**（2026-06-22 加固，见 §15）。`install.sh` 仍装在 22，加固属部署后动作；新部署若需复刻，加固步骤见 §15。
 
 防火墙（nftables）policy=accept 全放行；部署时仅确保新端口可达，不加 drop 规则（避免锁死 SSH，LXC 安全由宿主负责）。
 
@@ -311,8 +314,9 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 
 /etc/ansgo-deploy/          # install.sh 下载的脚本副本（含 ansgo-landing.sh 等）
 /etc/ansgo-backup-{ts}/     # 每次改配置前的备份
-/etc/sysctl.d/99-ansgo-tune.conf   # stage1 网络调优
-/etc/security/limits.d/99-ansgo.conf  # stage1 fd 上限
+/etc/sysctl.d/99-proxy-tune.conf   # stage1 网络调优（+ 2026-06-22 安全加固段）
+/etc/security/limits.d/99-proxy.conf  # stage1 fd 上限
+/etc/ssh/sshd_config.d/10-hardening.conf  # 2026-06-22 SSH 加固 drop-in（见 §15）
 ```
 
 ---
@@ -399,7 +403,7 @@ Shadowsocks:        33899
 第二组(可选):       anytls2=21112 / naive2=44334（走 SS 落地）
 面板(ansgo-panel):  15608
 caddy HTTP(重定向): 80
-SSH:                22
+SSH:                25822（2026-06-22 加固：原 22，已改非标端口 + 公钥登录 + 禁密码，见 §15）
 ```
 
 ### 证书
@@ -419,7 +423,9 @@ SSH:                22
 /root/.acme.sh/{dnsapi/dns_dynukey.sh, account.conf, your-domain.com_ecc/}
 /etc/sing-box/config.json   /etc/caddy/Caddyfile   /var/www/html/index.html
 /etc/systemd/system/{sing-box, caddy, ansgo-panel}.service
-/etc/sysctl.d/99-ansgo-tune.conf   /etc/security/limits.d/99-ansgo.conf
+/etc/sysctl.d/99-proxy-tune.conf   /etc/security/limits.d/99-proxy.conf
+/etc/ssh/sshd_config.d/10-hardening.conf   # 2026-06-22 SSH 加固 drop-in（见 §15）
+/etc/ansgo-backup-ssh-harden-<TIMESTAMP>/   # SSH 加固前备份（sshd_config + sshd_config.d + 99-proxy-tune.conf）
 /etc/ansgo-backup-update-v1.4.3-{ts}/   # v1.4.3 升级前的二进制+配置备份
 ```
 
@@ -432,7 +438,8 @@ SSH:                22
 | 证书签发失败 | acme.sh 详细日志；失败时保留现有自签证书继续服务，不影响运行；A 失败自动 B |
 | 改配置导致服务起不来 | 每次改动前 `ansgo-admin backup` 到 `/etc/ansgo-backup-{ts}/`，`ansgo-admin restore` 一键回滚 |
 | 面板 Go 二进制崩溃 | systemd `Restart=on-failure` 自动重启；`ansgo-admin` 兜底 |
-| 改面板端口后失联 | SSH 进去 `ansgo-admin panel-port` 重置；或改 panel.json 后 restart |
+| 改面板端口后失联 | SSH 进去 `ansgo-admin panel-port` 重置；或改 panel.json 后 restart。**注意 SSH 端口已改 25822（见 §15），走密钥登录** |
+| SSH 加固后失联（密钥丢失/端口遗忘）| drop-in 备份在 `/etc/ansgo-backup-ssh-harden-<TIMESTAMP>/`；密钥登录走 `~/.ssh/your_key` + 端口 25822（见 `.secrets.local`）；完全失联只能通过 Proxmox 宿主 LXC console 修复 |
 | API Key 泄露 | 只存服务器 root 独占文件；可 `ansgo-admin` 旋转（重新填 Dynu 凭证）|
 | IPv6 入站不可用 | 宿主防火墙限制，容器侧无解；仅用 IPv4 |
 | 面板二进制更新不生效 | scp 覆盖运行中二进制会静默失败；必须 stop→rm→scp→md5 校验→start（见 §9 实战备注，v1.4.3 升级时已用 md5 `8113f1b2...` 校验通过）|
@@ -449,6 +456,7 @@ SSH:                22
 | 手动设置密钥含特殊字符破坏配置 | v1.4.x 的 `_setsecret` 用 `sed -i "s\|^...|...|"`，密钥含 `\|` 会破坏分隔符；v1.5.0 「密钥管理」页手动设置走 Go `setSecret()`（读全文→替换/追加→tmp→rename 原子写，绕开 sed），随机生成仍走 ansgo-admin（生成值无特殊字符，安全） |
 | 手动证书路径错误致三服务全起不来 | manual 模式 `cert_fullchain/cert_privkey` 指向不存在或不可读文件会让 caddy/sing-box/panel 启动失败；面板「证书来源设置」和 install.sh 在写入前都做 `os.ReadFile`/`[ -f ]` 预校验拒绝错误路径；`certPaths()` 对 manual 但路径缺失的情况安全回退 `cert_dir`（不会崩）。若已在服务器上改坏，SSH 改 `/etc/ansgo/panel.json` 的 `cert_mode` 回 `acme` 后重启 |
 | Docker manual 模式证书路径未挂载 | 容器内看不到 host 路径；entrypoint.sh 会记录 `ERROR: 证书文件不存在` 日志。部署前需在 `docker-compose.yml` 的 volumes 把证书目录挂进容器，或改用 cert_dir 卷内路径 |
+| 卸载用 `curl ... \| bash -s -- --uninstall` 提示「已取消」 | 管道形式下 bash 的 stdin 被 curl 输出占用，确认 `read` 读到 EOF（或读到 curl 的输出内容）→ `$a ≠ yes` → 退出。v1.5.0 及之前必现。**v1.5.1 修复**：install.sh 开头检测 `[ ! -t 0 ] && [ -t 1 ] && [ -c /dev/tty ]` 时自动 `exec 0</dev/tty` 恢复交互输入（无 tty 的 CI 跳过，走 `--non-interactive`）。临时绕过：先 `curl -fsSL .../install.sh -o install.sh` 再 `bash install.sh --uninstall` |
 
 ---
 
@@ -506,13 +514,20 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 落地服务器专用：`bash install.sh --landing [--port 8388]`（在该机部署独立 ss-server，供中转机第二组接入）。
 
 卸载（自动检测 Docker / 裸金属）：
+
+**默认卸载**（移除服务/容器/二进制，保留配置/卷）：
 ```bash
-bash install.sh --uninstall            # 移除服务/容器/二进制，保留配置/卷
-bash install.sh --uninstall --purge    # 彻底删除配置/密钥/证书/卷/镜像/调优（不可恢复）
+bash install.sh --uninstall
+```
+
+**彻底卸载**（删除配置/密钥/证书/卷/镜像/调优，不可恢复）：
+```bash
+bash install.sh --uninstall --purge
 ```
 - **默认**：停服务/删容器/删二进制与 unit，**保留** `/etc/ansgo` `/etc/ssl/ansgo` 及 docker 卷（可重装不丢参数）
 - **`--purge`**：上述全部 + 删配置/密钥/证书/acme 状态/备份/sysctl 调优/docker 卷与镜像（docker 本体保留，可能被其他服务使用）
 - 卸载前二次确认；Docker 分支用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配兑底删卷，避免 compose project 名不一致导致遗漏
+- ⚠️ `curl ... | bash -s -- --uninstall` 在 v1.5.0 及之前会因 stdin 被管道占用导致确认 `read` 读到 EOF 而「已取消」退出；v1.5.1 起脚本自动 `exec 0</dev/tty` 恢复交互。临时绕过：先 `curl -o install.sh ...` 再 `bash install.sh --uninstall`
 
 ### 资源来源（全部自有 GitHub / 官方上游）
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
@@ -544,4 +559,83 @@ bash install.sh --uninstall --purge    # 彻底删除配置/密钥/证书/卷/�
 - 不擅自加防火墙 drop 规则（避免锁死 SSH）
 - 所有生成密钥用 `openssl rand`，base64 密钥用标准 base64（不是 urlsafe）
 - Go 交叉编译用 `CGO_ENABLED=0`（纯静态，无 libc 依赖）
-- 执行前先读本文件 §0-§14：§12（一键部署）为推荐入口，§9（部署架构）说明面板优先设计，每步报告进度
+- 执行前先读本文件 §0-§15：§12（一键部署）为推荐入口，§9（部署架构）说明面板优先设计，§15（SSH 加固）为部署后动作，每步报告进度
+
+---
+
+## 15. SSH 加固（2026-06-22 部署后动作）
+
+> 触发：安全检查发现 `<攻击者IP>` 持续暴破 root/admin SSH 字典（`lastb` 显示密集失败）。原配置 `Port 22 + PermitRootLogin yes + PasswordAuthentication yes` 是首要攻击面。
+>
+> ⚠️ **本章节的加固是"部署后动作"，不在 `install.sh` 流程内。** 新部署仍是默认 22 端口，需手动复刻下述步骤。后续可考虑把 `--ssh-port` 参数并入 install.sh。
+
+### 加固范围（已确认决策）
+
+| 项 | 决策 | 说明 |
+|----|------|------|
+| 认证方式 | ✅ 公钥登录 + 禁密码 | ED25519，密钥不入 git（见 `.secrets.local`）|
+| root 登录 | ✅ 保持直登 | `PermitRootLogin prohibit-password`（仅公钥，禁密码）|
+| 防火墙 | ❌ 不动 | nftables 规则集仍空、policy=accept（LXC 安全由宿主负责）|
+| MACs | ❌ 不限制 | 确保任意 IP + 任意客户端 + 密钥均可登录 |
+| 新软件 | ❌ 不装 | 零额外开销，纯 drop-in 配置 + sysctl 追加 |
+
+### 落地配置
+
+**SSH drop-in**：`/etc/ssh/sshd_config.d/10-hardening.conf`（OpenSSH first-match-wins，覆盖主 `sshd_config`）
+```sshd_config
+Port 25822
+PermitRootLogin prohibit-password   # root 仅公钥
+PasswordAuthentication no           # 全局禁密码
+KbdInteractiveAuthentication no
+MaxAuthTries 3                      # 原 6 → 3
+LoginGraceTime 30                   # 原 120 → 30
+X11Forwarding no
+AllowAgentForwarding no
+```
+
+**`ssh.socket` 已 mask**：Debian 12 用 socket activation，`ssh.socket` 配置 `ListenStream=22`——若不 mask，重启后 22 端口会被重新拉起，绕过 drop-in。已 `systemctl mask ssh.socket`（软链到 `/dev/null`），保证 22 永久关闭。
+
+**sysctl 追加**（`/etc/sysctl.d/99-proxy-tune.conf` 末尾）：
+```
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+```
+> `kernel.kptr_restrict` / `kernel.kexec_load_disabled` 因 LXC 宿主只读已移除（容器内 `permission denied`，留着只污染 `sysctl -p` 日志）。
+
+### 下次登录方式（重要）
+```bash
+ssh ansgo-server                                    # 已配 ~/.ssh/config 别名
+# 或
+ssh -i ~/.ssh/your_key -p 25822 root@<服务器IP>
+```
+- ⚠️ **密码 + 22 端口已永久失效**，必须用密钥 + 25822
+- 密钥路径 / 指纹 / config 别名见 `.secrets.local`（不入 git）
+
+### 失联回滚
+```bash
+# 假设还能通过密钥 + 25822 进去：
+rm /etc/ssh/sshd_config.d/10-hardening.conf
+systemctl unmask ssh.socket
+systemctl restart sshd
+# sysctl 回滚：
+cp /etc/ansgo-backup-ssh-harden-<TIMESTAMP>/99-proxy-tune.conf /etc/sysctl.d/
+sysctl -p /etc/sysctl.d/99-proxy-tune.conf
+
+# 若密钥也丢了（完全失联）：只能通过 Proxmox 宿主 LXC console 进入容器修复
+```
+
+### 安全流程参考（本次实施顺序，可复刻）
+1. 本地 `ssh-keygen -t ed25519 -f ~/.ssh/your_key -N ""`
+2. 上传公钥到 `/root/.ssh/authorized_keys`（**密码仍开**，保命）
+3. **新终端验证密钥 + 22 登录成功** → 才能进入下一步（关键防失联）
+4. 备份 → 写 drop-in → `sshd -t` 语法校验
+5. **当前 22 密码会话不退** → `systemctl restart sshd` → 新终端密钥 + 25822 验证
+6. `systemctl mask ssh.socket`（防 socket activation 复活 22）
+7. sysctl 加固追加 + `sysctl -p`
+8. 负面测试：密码 + 25822 应被拒；22 端口应 `Connection refused`
+9. 确认 ansgo 三服务仍 active（加固零影响）
+
+### 备份
+- `/etc/ansgo-backup-ssh-harden-<TIMESTAMP>/`：含 `sshd_config` + `sshd_config.d/` + `99-proxy-tune.conf`（加固前原状）
