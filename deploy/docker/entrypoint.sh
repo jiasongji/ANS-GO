@@ -21,6 +21,10 @@ SECRETS=/etc/ansgo/secrets.env
 CERTDIR=/etc/ssl/ansgo
 DOMAIN="${DOMAIN:-example.com}"
 EMAIL="${EMAIL:-admin@${DOMAIN}}"
+# 证书来源：acme（默认，需 Dynu 凭证）/ manual（手动指定已有证书+私钥路径）
+CERT_MODE="${CERT_MODE:-acme}"
+CERT_FULLCHAIN="${CERT_FULLCHAIN:-}"
+CERT_PRIVKEY="${CERT_PRIVKEY:-}"
 
 log(){ echo "[entrypoint] $*"; }
 
@@ -50,7 +54,10 @@ if [ ! -f "$CONF" ]; then
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
   "svc_naive_enabled": "false",
+  "cert_mode": "${CERT_MODE}",
   "cert_dir": "/etc/ssl/ansgo",
+  "cert_fullchain": "${CERT_FULLCHAIN}",
+  "cert_privkey": "${CERT_PRIVKEY}",
   "db_path": "/etc/ansgo/sessions.db"
 }
 EOF
@@ -78,13 +85,19 @@ if grep -q '"admin_pass_hash": "PLACEHOLDER"' "$CONF" 2>/dev/null && [ -n "${PAN
     || log "WARN: setpass 失败，稍后可用 docker exec ansgo ansgo-admin panel-pass 重置"
 fi
 
-# ---- 3/3 证书：无则自签占位（保证 caddy/panel 能启动），后台再签真实 ----
-if [ ! -s "$CERTDIR/fullchain.pem" ] || [ ! -s "$CERTDIR/privkey.pem" ]; then
-  log "生成自签占位证书（真实证书将由 acme.sh 后台签发覆盖）"
-  openssl ecparam -genkey -name prime256v1 -out "$CERTDIR/privkey.pem" 2>/dev/null \
-    || openssl genrsa -out "$CERTDIR/privkey.pem" 2048
-  openssl req -new -x509 -days 365 -key "$CERTDIR/privkey.pem" \
-    -out "$CERTDIR/fullchain.pem" -subj "/CN=${DOMAIN}" 2>/dev/null || true
+# ---- 3/3 证书：manual 模式校验用户路径；acme 模式无则自签占位 ----
+if [ "$CERT_MODE" = "manual" ]; then
+  log "证书来源：手动模式（cert=$CERT_FULLCHAIN key=$CERT_PRIVKEY）"
+  if [ ! -f "$CERT_FULLCHAIN" ]; then log "ERROR: 证书文件不存在: $CERT_FULLCHAIN（确认已挂载进容器）"; fi
+  if [ ! -f "$CERT_PRIVKEY" ]; then log "ERROR: 私钥文件不存在: $CERT_PRIVKEY（确认已挂载进容器）"; fi
+else
+  if [ ! -s "$CERTDIR/fullchain.pem" ] || [ ! -s "$CERTDIR/privkey.pem" ]; then
+    log "生成自签占位证书（真实证书将由 acme.sh 后台签发覆盖）"
+    openssl ecparam -genkey -name prime256v1 -out "$CERTDIR/privkey.pem" 2>/dev/null \
+      || openssl genrsa -out "$CERTDIR/privkey.pem" 2048
+    openssl req -new -x509 -days 365 -key "$CERTDIR/privkey.pem" \
+      -out "$CERTDIR/fullchain.pem" -subj "/CN=${DOMAIN}" 2>/dev/null || true
+  fi
 fi
 
 # 生成 sing-box / caddy 配置（幂等；失败时写兜底 Caddyfile，避免 caddy 起不来）
@@ -96,11 +109,11 @@ else
     printf '0.0.0.0:443 {\n  respond "ANS-GO"\n}\n:80 {\n  redir https://%s{uri} 308\n}\n' "$DOMAIN" > /etc/caddy/Caddyfile
 fi
 
-# 后台签发真实证书（当前非 LE 且提供了 Dynu 凭证）
+# 后台签发真实证书（acme 模式且当前非 LE 且提供了 Dynu 凭证；manual 模式跳过）
 is_le(){ [ -f "$CERTDIR/fullchain.pem" ] \
   && openssl x509 -in "$CERTDIR/fullchain.pem" -noout -issuer 2>/dev/null \
   | grep -qi "let's encrypt"; }
-if ! is_le && { [ -n "${DYNU_API_KEY:-}" ] || [ -n "${DYNU_CLIENT_ID:-}" ]; }; then
+if [ "$CERT_MODE" != "manual" ] && ! is_le && { [ -n "${DYNU_API_KEY:-}" ] || [ -n "${DYNU_CLIENT_ID:-}" ]; }; then
   log "后台签发 Let's Encrypt 证书（DNS-01，约 1-3 分钟），日志 /var/log/ansgo-cert.log"
   DOMAIN="$DOMAIN" EMAIL="$EMAIL" \
     DYNU_API_KEY="${DYNU_API_KEY:-}" DYNU_CLIENT_ID="${DYNU_CLIENT_ID:-}" DYNU_SECRET="${DYNU_SECRET:-}" \

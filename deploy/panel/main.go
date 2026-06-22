@@ -59,7 +59,12 @@ type Config struct {
 	SSLandingPort      int    `json:"ss_landing_port"`
 	SSLandingMethod    string `json:"ss_landing_method"`
 	SSLandingPassword  string `json:"ss_landing_password"`
+	// 证书来源：cert_mode="acme"(默认) 走 cert_dir/fullchain.pem+privkey.pem；
+	// "manual" 用 cert_fullchain/cert_privkey 两个绝对路径（与 acme 二选一）
+	CertMode           string `json:"cert_mode"`
 	CertDir            string `json:"cert_dir"`
+	CertFullchain      string `json:"cert_fullchain"`
+	CertPrivkey        string `json:"cert_privkey"`
 	DBPath             string `json:"db_path"`
 }
 
@@ -67,7 +72,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.4.3"
+	version = "1.5.0"
 )
 
 func loadConfig() (Config, error) {
@@ -108,6 +113,9 @@ func loadConfig() (Config, error) {
 	if c.CertDir == "" {
 		c.CertDir = defCertDir
 	}
+	if c.CertMode == "" {
+		c.CertMode = "acme"
+	}
 	if c.DBPath == "" {
 		c.DBPath = "/etc/ansgo/sessions.db"
 	}
@@ -127,6 +135,16 @@ func saveConfig(c Config) error {
 		return err
 	}
 	return os.Rename(tmp, confPath)
+}
+
+// certPaths 返回面板（及其他服务通过此函数同样口径读取）应使用的证书/私钥完整路径。
+// manual 模式且两路径都已配置 -> 用绝对路径；否则回退到 cert_dir/fullchain.pem + privkey.pem。
+// 全项目所有证书引用点（main.go / handlers.go / ansgo-genconf / ansgo-cert-reload）均按此语义读取。
+func certPaths(c Config) (fullchain, privkey string) {
+	if c.CertMode == "manual" && c.CertFullchain != "" && c.CertPrivkey != "" {
+		return c.CertFullchain, c.CertPrivkey
+	}
+	return filepath.Join(c.CertDir, "fullchain.pem"), filepath.Join(c.CertDir, "privkey.pem")
 }
 
 // normalizePath: 形如 /xxxx/（首尾斜杠）
@@ -341,8 +359,7 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("ansgo-panel v%s 监听 https://%s%s (域名 %s)", version, addr, c.URLPath, c.Domain)
-	certFile := filepath.Join(c.CertDir, "fullchain.pem")
-	keyFile := filepath.Join(c.CertDir, "privkey.pem")
+	certFile, keyFile := certPaths(c)
 	if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
 		log.Fatalf("TLS 服务失败: %v", err)
 	}
@@ -353,7 +370,7 @@ func cliSetPass(plain string) error {
 	c, err := loadConfig()
 	if err != nil {
 		// 配置缺失时用零值继续（允许首次设置）
-		c = Config{PanelPort: 15608, SessionHours: 8, LoginLockThreshold: 5, LoginLockMinutes: 10, CertDir: defCertDir, DBPath: "/etc/ansgo/sessions.db"}
+		c = Config{PanelPort: 15608, SessionHours: 8, LoginLockThreshold: 5, LoginLockMinutes: 10, CertMode: "acme", CertDir: defCertDir, DBPath: "/etc/ansgo/sessions.db"}
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
 	if err != nil {

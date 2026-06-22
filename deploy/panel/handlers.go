@@ -71,10 +71,16 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		requireAuth(portHandler)(w, r)
 	case rel == "api/regen":
 		requireAuth(regenHandler)(w, r)
+	case rel == "api/key":
+		requireAuth(keyHandler)(w, r)
 	case rel == "api/cert":
 		requireAuth(certHandler)(w, r)
 	case rel == "api/cert/renew":
 		requireAuth(certRenewHandler)(w, r)
+	case rel == "api/cert/config":
+		requireAuth(certConfigHandler)(w, r)
+	case rel == "api/cert/reload":
+		requireAuth(certReloadHandler)(w, r)
 	case rel == "api/settings":
 		requireAuth(settingsHandler)(w, r)
 	case rel == "api/landing":
@@ -185,7 +191,7 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 		"load":   loadAvg(),
 		"uptime": uptimeHours(),
 		"tcp":    tcpEstabCount(),
-		"cert":   certInfo(c.CertDir),
+		"cert":   certInfoFull(c),
 	}
 	jwrite(w, 200, resp)
 }
@@ -364,11 +370,181 @@ func regenHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ===================== 手动设置密钥（直接写 secrets.env）=====================
+
+// setSecret 原子写入单个 secrets.env 字段：存在则替换，不存在则追加。
+// 不走 ansgo-admin 的 sed 路径（避免 `|` 等特殊字符破坏 sed 分隔符），直接全文重写。
+// 与 readSecrets 共用 cfgMu 锁以保证读写互斥。
+func setSecret(key, value string) error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	data, err := os.ReadFile(secretsPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		data = []byte{}
+	}
+	var lines []string
+	found := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			lines = append(lines, line)
+			continue
+		}
+		kv := strings.SplitN(trimmed, "=", 2)
+		if len(kv) == 2 && strings.TrimSpace(kv[0]) == key {
+			lines = append(lines, key+"="+value)
+			found = true
+		} else {
+			lines = append(lines, line)
+		}
+	}
+	if !found {
+		lines = append(lines, key+"="+value)
+	}
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	tmp := secretsPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(out), 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, secretsPath)
+}
+
+// keyHandler 手动设置各协议密钥（与 regen 的随机生成互补）。
+// POST {target, method?, key?, pass?, user?}
+//   - ss      : 写 SS_METHOD + SS_KEY（校验 SS2022 密钥长度）
+//   - anytls  : 写 ANYTLS_PASS
+//   - naive   : 写 NAIVE_USER + NAIVE_PASS
+//   - anytls2 : 写 ANYTLS2_PASS
+//   - naive2  : 写 NAIVE2_USER + NAIVE2_PASS
+func keyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	var b struct {
+		Target string `json:"target"`
+		Method string `json:"method"`
+		Key    string `json:"key"`
+		Pass   string `json:"pass"`
+		User   string `json:"user"`
+	}
+	json.NewDecoder(r.Body).Decode(&b)
+
+	// 各 target 的校验 + 写入分派
+	confTarget := "" // "sing-box" 或 "caddy"
+	switch b.Target {
+	case "ss":
+		method := strings.TrimSpace(b.Method)
+		if method == "" {
+			method = "2022-blake3-aes-128-gcm"
+		}
+		// 校验 SS2022 密钥长度（aes-128 -> 16 字节，aes-256 -> 32 字节）
+		wantBytes := 0
+		switch {
+		case strings.HasPrefix(method, "2022-blake3-aes-128"):
+			wantBytes = 16
+		case strings.HasPrefix(method, "2022-blake3-aes-256"):
+			wantBytes = 32
+		}
+		if wantBytes > 0 && !validSS2022Key(b.Key, wantBytes) {
+			jerr(w, 400, fmt.Sprintf("密钥长度错误：%s 需 base64(%d字节) 的密钥", method, wantBytes))
+			return
+		}
+		if err := setSecret("SS_METHOD", method); err != nil {
+			jerr(w, 500, "写入 SS_METHOD 失败: "+err.Error())
+			return
+		}
+		if err := setSecret("SS_KEY", b.Key); err != nil {
+			jerr(w, 500, "写入 SS_KEY 失败: "+err.Error())
+			return
+		}
+		// method 也要同步到 panel.json（node URI / dashboard 展示用）
+		c := configGet()
+		if c.SSMethod != method {
+			c.SSMethod = method
+			_ = configSet(c)
+		}
+		confTarget = "sing-box"
+	case "anytls":
+		if strings.TrimSpace(b.Pass) == "" {
+			jerr(w, 400, "AnyTLS 密码不能为空")
+			return
+		}
+		if err := setSecret("ANYTLS_PASS", strings.TrimSpace(b.Pass)); err != nil {
+			jerr(w, 500, "写入 ANYTLS_PASS 失败: "+err.Error())
+			return
+		}
+		confTarget = "sing-box"
+	case "naive":
+		u := strings.TrimSpace(b.User)
+		p := strings.TrimSpace(b.Pass)
+		if u == "" || p == "" {
+			jerr(w, 400, "NaiveProxy 用户名和密码均不能为空")
+			return
+		}
+		if err := setSecret("NAIVE_USER", u); err != nil {
+			jerr(w, 500, "写入 NAIVE_USER 失败: "+err.Error())
+			return
+		}
+		if err := setSecret("NAIVE_PASS", p); err != nil {
+			jerr(w, 500, "写入 NAIVE_PASS 失败: "+err.Error())
+			return
+		}
+		confTarget = "caddy"
+	case "anytls2":
+		if strings.TrimSpace(b.Pass) == "" {
+			jerr(w, 400, "AnyTLS-2 密码不能为空")
+			return
+		}
+		if err := setSecret("ANYTLS2_PASS", strings.TrimSpace(b.Pass)); err != nil {
+			jerr(w, 500, "写入 ANYTLS2_PASS 失败: "+err.Error())
+			return
+		}
+		confTarget = "sing-box"
+	case "naive2":
+		u := strings.TrimSpace(b.User)
+		p := strings.TrimSpace(b.Pass)
+		if u == "" || p == "" {
+			jerr(w, 400, "NaiveProxy-2 用户名和密码均不能为空")
+			return
+		}
+		if err := setSecret("NAIVE2_USER", u); err != nil {
+			jerr(w, 500, "写入 NAIVE2_USER 失败: "+err.Error())
+			return
+		}
+		if err := setSecret("NAIVE2_PASS", p); err != nil {
+			jerr(w, 500, "写入 NAIVE2_PASS 失败: "+err.Error())
+			return
+		}
+		confTarget = "caddy"
+	default:
+		jerr(w, 400, "target 必须为 ss/anytls/naive/anytls2/naive2")
+		return
+	}
+	// 重新生成配置 + 重启对应服务（与 regen / landing 同样的 goroutine 模式）
+	go func() {
+		_ = exec.Command(binGenConf, confTarget).Run()
+		_ = exec.Command("systemctl", "restart", confTarget).Run()
+	}()
+	c := configGet()
+	s := readSecrets()
+	jwrite(w, 200, map[string]any{
+		"ok":   true,
+		"uris": buildURIs(c, s),
+	})
+}
+
 // ===================== 证书 =====================
 
 func certHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
-	jwrite(w, 200, certInfo(c.CertDir))
+	jwrite(w, 200, certInfoFull(c))
 }
 
 func certRenewHandler(w http.ResponseWriter, r *http.Request) {
@@ -377,12 +553,119 @@ func certRenewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := configGet()
+	if c.CertMode == "manual" {
+		jerr(w, 400, "当前为手动证书模式，无法通过 acme.sh 续期。请在服务器替换证书文件后点击「重新加载证书」。")
+		return
+	}
 	out, err := exec.Command("sh", "-c", binAcme+" --renew -d "+c.Domain+" --ecc --force 2>&1; "+binGenConf+" all 2>/dev/null; /usr/local/bin/ansgo-cert-reload").CombinedOutput()
 	if err != nil {
 		jwrite(w, 500, map[string]any{"ok": false, "log": string(out)})
 		return
 	}
-	jwrite(w, 200, map[string]any{"ok": true, "log": string(out), "cert": certInfo(c.CertDir)})
+	jwrite(w, 200, map[string]any{"ok": true, "log": string(out), "cert": certInfoFull(c)})
+}
+
+// certReloadHandler 手动证书模式下，用户在服务器替换证书文件后点此触发三服务重新读取。
+// 不跑 acme.sh，直接调 ansgo-cert-reload（restart caddy/sing-box/ansgo-panel）。
+func certReloadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	c := configGet()
+	// 校验当前证书文件可读（避免路径错误导致三服务全部起不来）
+	fullchain, privkey := certPaths(c)
+	if _, err := os.ReadFile(fullchain); err != nil {
+		jerr(w, 400, "证书文件无法读取: "+err.Error())
+		return
+	}
+	if _, err := os.ReadFile(privkey); err != nil {
+		jerr(w, 400, "私钥文件无法读取: "+err.Error())
+		return
+	}
+	go func() {
+		_ = exec.Command("/usr/local/bin/ansgo-cert-reload").Run()
+	}()
+	newURL := fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath)
+	scheduleSelfRestart(3)
+	jwrite(w, 200, map[string]any{
+		"ok":         true,
+		"restart_in": 3,
+		"new_url":    newURL,
+		"msg":        "证书已重新加载，面板将在 3 秒后重启。",
+		"cert":       certInfoFull(c),
+	})
+}
+
+// certConfigHandler 读取/设置证书来源模式（acme | manual）
+// GET  -> {mode, fullchain, privkey, cert_info}
+// POST -> {mode, fullchain?, privkey?}；manual 模式校验两文件可读，写配置后重启三服务
+func certConfigHandler(w http.ResponseWriter, r *http.Request) {
+	c := configGet()
+	if r.Method == "GET" {
+		jwrite(w, 200, map[string]any{
+			"mode":       c.CertMode,
+			"fullchain":  c.CertFullchain,
+			"privkey":    c.CertPrivkey,
+			"cert_info":  certInfoFull(c),
+			"domain":     c.Domain,
+		})
+		return
+	}
+	// POST
+	var b struct {
+		Mode       *string `json:"mode"`
+		Fullchain  *string `json:"fullchain"`
+		Privkey    *string `json:"privkey"`
+	}
+	json.NewDecoder(r.Body).Decode(&b)
+	if b.Mode != nil {
+		m := strings.TrimSpace(*b.Mode)
+		if m != "acme" && m != "manual" {
+			jerr(w, 400, "mode 必须为 acme 或 manual")
+			return
+		}
+		c.CertMode = m
+	}
+	if b.Fullchain != nil {
+		c.CertFullchain = strings.TrimSpace(*b.Fullchain)
+	}
+	if b.Privkey != nil {
+		c.CertPrivkey = strings.TrimSpace(*b.Privkey)
+	}
+	// manual 模式必须两路径齐全且可读
+	if c.CertMode == "manual" {
+		if c.CertFullchain == "" || c.CertPrivkey == "" {
+			jerr(w, 400, "手动模式需同时提供证书与私钥的完整文件路径")
+			return
+		}
+		if _, err := os.ReadFile(c.CertFullchain); err != nil {
+			jerr(w, 400, "证书文件无法读取: "+err.Error())
+			return
+		}
+		if _, err := os.ReadFile(c.CertPrivkey); err != nil {
+			jerr(w, 400, "私钥文件无法读取: "+err.Error())
+			return
+		}
+	}
+	if err := configSet(c); err != nil {
+		jerr(w, 500, "保存失败: "+err.Error())
+		return
+	}
+	// 证书路径/模式变化影响 caddy + sing-box + 面板自身，全部重生成并重启。
+	// 面板自身因 TLS 证书也变，需要 scheduleSelfRestart 并提示前端 overlay 重新登录。
+	go func() {
+		_ = exec.Command(binGenConf, "all").Run()
+		_ = exec.Command("systemctl", "restart", "caddy").Run()
+		_ = exec.Command("systemctl", "restart", "sing-box").Run()
+	}()
+	newURL := fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath)
+	scheduleSelfRestart(3)
+	jwrite(w, 200, map[string]any{
+		"ok": true, "restart_in": 3, "new_url": newURL,
+		"msg":     "证书设置已保存，三服务将在 3 秒后重启（面板会断开，请用新证书重新访问）。",
+		"cert":    certInfoFull(c),
+	})
 }
 
 // ===================== 面板设置 =====================
@@ -401,7 +684,7 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 			"ss_port":              c.SSPort, "anytls_port": c.AnyTLSPort, "naive_port": c.NaivePort,
 			"disguise_panel":       c.DisguisePanel,
 			"disguise_naive":       c.DisguiseNaive,
-			"cert_days_left":       certInfo(c.CertDir)["days_left"],
+			"cert_days_left":       certInfoFull(c)["days_left"],
 		})
 		return
 	}
@@ -723,9 +1006,10 @@ func tcpEstabCount() int {
 	return n
 }
 
-func certInfo(certDir string) map[string]any {
+// certInfo 解析指定证书文件（完整路径，非目录）返回到期等信息。
+// 调用方需先用 certPaths(c) 取得 fullchain 完整路径再传入。
+func certInfo(certFile string) map[string]any {
 	info := map[string]any{}
-	certFile := certDir + "/fullchain.pem"
 	data, err := os.ReadFile(certFile)
 	if err != nil {
 		info["error"] = err.Error()
@@ -759,6 +1043,12 @@ func certInfo(certDir string) map[string]any {
 	info["not_after"] = cert0.NotAfter.Format("2006-01-02")
 	info["days_left"] = days
 	return info
+}
+
+// certInfoFull 按 Config 当前证书模式取完整证书路径并解析信息
+func certInfoFull(c Config) map[string]any {
+	fullchain, _ := certPaths(c)
+	return certInfo(fullchain)
 }
 
 // ===================== 落地 SS 出口设置 =====================

@@ -11,6 +11,7 @@
 # ===== Go 面板编译产物 / 测试数据库 =====
 /deploy/panel/bv-panel
 /bv-panel
+/deploy/panel/ansgo-panel-linux-*
 *.db
 *.db-journal
 *.db-wal

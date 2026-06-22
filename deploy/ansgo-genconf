@@ -36,6 +36,9 @@ CERTDIR = os.environ.get("BV_CERTDIR", "/etc/ssl/ansgo")
 SECRETS = "/etc/ansgo/secrets.env"
 mode = sys.argv[1] if len(sys.argv) > 1 else "all"
 
+# 证书路径：manual 模式读 panel.json 的 cert_fullchain/cert_privkey，否则回退 CERTDIR
+# （此块在下方读 panel.json 之后才完成解析，这里只声明默认值兜底）
+
 # ---- 读取配置 ----
 with open(CONF) as f:
     cfg = json.load(f)
@@ -65,6 +68,15 @@ LANDING_PASS = g("ss_landing_password", "")
 DISGUISE_PANEL = g("disguise_panel", "proxy:https://example.com")
 DISGUISE_NAIVE = g("disguise_naive", "proxy:https://example.com")
 DISGUISE_NAIVE2 = g("disguise_naive2", DISGUISE_NAIVE)
+
+# 证书来源：cert_mode="manual" 且两路径齐全 -> 用绝对路径；否则回退 cert_dir/fullchain.pem+privkey.pem
+# （与 Go 端 certPaths() 语义保持一致，全项目统一）
+if g("cert_mode", "acme") == "manual" and g("cert_fullchain") and g("cert_privkey"):
+    FULLCHAIN = g("cert_fullchain")
+    PRIVKEY = g("cert_privkey")
+else:
+    FULLCHAIN = f"{CERTDIR}/fullchain.pem"
+    PRIVKEY = f"{CERTDIR}/privkey.pem"
 
 # 服务开关（面板内按需安装；无字段时默认 true 兼容旧部署）
 def is_on(k):
@@ -126,8 +138,8 @@ def gen_singbox():
             "users": [{"name": ANYTLS_UUID, "password": ANYTLS_PASS}],
             "tls": {
                 "enabled": True, "server_name": DOMAIN,
-                "certificate_path": f"{CERTDIR}/fullchain.pem",
-                "key_path": f"{CERTDIR}/privkey.pem",
+                "certificate_path": FULLCHAIN,
+                "key_path": PRIVKEY,
             },
         })
 
@@ -139,8 +151,8 @@ def gen_singbox():
             "users": [{"name": ANYTLS2_UUID, "password": ANYTLS2_PASS}],
             "tls": {
                 "enabled": True, "server_name": DOMAIN,
-                "certificate_path": f"{CERTDIR}/fullchain.pem",
-                "key_path": f"{CERTDIR}/privkey.pem",
+                "certificate_path": FULLCHAIN,
+                "key_path": PRIVKEY,
             },
         })
 
@@ -208,15 +220,15 @@ def gen_caddy():
     blocks.append("{\n  order forward_proxy before reverse_proxy\n  order forward_proxy before file_server\n  admin off\n  log {\n    level error\n  }\n}\n")
 
     # :443 纯反代伪装站
-    blocks.append(f"# :443 纯反代伪装站（浏览器直访命中，不提供代理）\n:443 {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n{disguise_block(DISGUISE_PANEL)}}}\n")
+    blocks.append(f"# :443 纯反代伪装站（浏览器直访命中，不提供代理）\n:443 {{\n  tls {FULLCHAIN} {PRIVKEY}\n  encode zstd gzip\n{disguise_block(DISGUISE_PANEL)}}}\n")
 
     # :naive_port NaiveProxy + 伪装（按开关）
     if SVC_NAIVE:
-        blocks.append(f"# :{NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）\n:{NAIVE_PORT} {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE_USER} {NAIVE_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE)}}}\n")
+        blocks.append(f"# :{NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）\n:{NAIVE_PORT} {{\n  tls {FULLCHAIN} {PRIVKEY}\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE_USER} {NAIVE_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE)}}}\n")
 
     # 第2组 naive-2（caddy 另起一个 site）
     if GROUP2_ENABLED and NAIVE2_PORT:
-        blocks.append(f"# :{NAIVE2_PORT} NaiveProxy 第2组（走 ss 落地）\n:{NAIVE2_PORT} {{\n  tls {CERTDIR}/fullchain.pem {CERTDIR}/privkey.pem\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE2_USER} {NAIVE2_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE2)}}}\n")
+        blocks.append(f"# :{NAIVE2_PORT} NaiveProxy 第2组（走 ss 落地）\n:{NAIVE2_PORT} {{\n  tls {FULLCHAIN} {PRIVKEY}\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE2_USER} {NAIVE2_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE2)}}}\n")
 
     # :80 重定向
     blocks.append(f":80 {{\n  redir https://{DOMAIN}{{uri}} permanent\n}}\n")

@@ -21,7 +21,7 @@ set -uo pipefail
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.4.3"
+VER="v1.5.0"
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -34,6 +34,8 @@ esac
 DOMAIN="" DYNU_KEY="" DYNU_CID="" DYNU_SECRET="" EMAIL=""
 SS_PORT=23456 ANYTLS_PORT=8443 NAIVE_PORT=443 PANEL_PORT=15608
 PANEL_USER="admin" DISGUISE_PANEL="proxy:https://example.com" DISGUISE_NAIVE="proxy:https://example.com"
+# 证书来源：acme（默认，需 Dynu 凭证）/ manual（手动指定已有证书+私钥路径，二选一）
+CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
 NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0
 
 # ---- 颜色/日志 ----
@@ -59,6 +61,9 @@ usage(){ cat <<EOF
   --panel-user USER        面板管理员用户名（默认 admin）
   --disguise-panel VAL     :443 直访伪装站点（proxy:<URL> 反代 / page 默认页，默认 proxy:https://example.com）
   --disguise-naive VAL     NaiveProxy 端口的伪装站点（同上格式，默认 proxy:https://example.com）
+  --cert-mode MODE         证书来源：acme（默认，用 Dynu DNS-01 自动签发）| manual（手动指定已有证书，跳过 Dynu/acme）
+  --cert-fullchain PATH    manual 模式：证书文件完整绝对路径（如 /etc/letsencrypt/live/x.com/fullchain.pem）
+  --cert-privkey PATH      manual 模式：私钥文件完整绝对路径（如 /etc/letsencrypt/live/x.com/privkey.pem）
   --docker                 用 ghcr.io all-in-one 镜像跑（KVM；否则裸金属）
   --force-bin              强制从 Releases 重装 sing-box/caddy（已装则跳过）
   --non-interactive        不交互，缺项报错退出
@@ -82,6 +87,9 @@ while [ $# -gt 0 ]; do
     --panel-user) PANEL_USER="$2"; shift 2;;
     --disguise-panel) DISGUISE_PANEL="$2"; shift 2;;
     --disguise-naive) DISGUISE_NAIVE="$2"; shift 2;;
+    --cert-mode) CERT_MODE="$2"; shift 2;;
+    --cert-fullchain) CERT_FILE="$2"; shift 2;;
+    --cert-privkey) KEY_FILE="$2"; shift 2;;
     --docker) DOCKER=1; shift;;
     --force-bin) FORCE_BIN=1; shift;;
     --non-interactive) NONINT=1; shift;;
@@ -256,6 +264,9 @@ DISGUISE_NAIVE=${DISGUISE_NAIVE}
 DYNU_API_KEY=${DYNU_KEY}
 DYNU_CLIENT_ID=${DYNU_CID}
 DYNU_SECRET=${DYNU_SECRET}
+CERT_MODE=${CERT_MODE}
+CERT_FULLCHAIN=${CERT_FILE}
+CERT_PRIVKEY=${KEY_FILE}
 EOF
   chmod 600 "$DIR/ansgo.env"
   log "已生成 $DIR/ansgo.env（含凭证，权限 600）"
@@ -294,8 +305,7 @@ EOF
   用户名:     ${PANEL_USER}
   密码(首次): ${PANEL_PW}
 ───────────────────────────────────────────────────
-  ⚠️ 证书: Let's Encrypt 后台签发中（约 1-3 分钟）
-     首次访问若提示“不受信”，稍候几分钟刷新即可
+  ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 后台签发中（约 1-3 分钟），首次访问若提示不受信稍候刷新即可")
   管理命令:
      cd ${DIR} && docker compose logs -f ansgo   # 查日志/签证书进度
      docker exec ansgo ansgo-admin status         # 服务状态
@@ -351,15 +361,36 @@ systemctl restart systemd-journald 2>/dev/null || true
 log "系统调优完成"
 
 # ---- 交互式收集缺失项 ----
-if [ -z "$DOMAIN" ]; then ask_req "域名（已解析到本机，DNS 托管在 Dynu）"; DOMAIN="$ASK_VAL"; fi
+if [ -z "$DOMAIN" ]; then ask_req "域名（已解析到本机）"; DOMAIN="$ASK_VAL"; fi
 [ -n "$DOMAIN" ] || { err "域名必填"; exit 2; }
 EMAIL="${EMAIL:-admin@${DOMAIN}}"
-if [ -z "$DYNU_KEY" ] && [ -z "$DYNU_CID" ]; then
-  inf "Dynu 凭证双保险：路径A(API Key，推荐) 或 路径B(OAuth Client ID+Secret)"
-  ask "Dynu API Key（路径A，留空则用路径B）"; DYNU_KEY="$ASK_VAL"
-  if [ -z "$DYNU_KEY" ]; then
-    ask_req "Dynu OAuth Client ID（路径B）"; DYNU_CID="$ASK_VAL"
-    ask_req "Dynu OAuth Secret（路径B）"; DYNU_SECRET="$ASK_VAL"
+# 证书来源：未通过参数指定时询问（acme 需要 Dynu 凭证，manual 跳过 Dynu）
+if [ "$CERT_MODE" != "manual" ] && [ "$CERT_MODE" != "acme" ]; then
+  if [ "$NONINT" = 0 ]; then
+    inf "证书来源：1) acme 自动签发（需要 Dynu DNS 凭证，推荐）  2) 手动指定已有证书路径"
+    ask "选择 [1/acme 或 2/manual]" "acme"; CERT_MODE="${ASK_VAL:-acme}"
+    case "$CERT_MODE" in 1|acme|ACME) CERT_MODE="acme";; 2|manual|MANUAL) CERT_MODE="manual";; *) CERT_MODE="acme";; esac
+  else
+    CERT_MODE="acme"
+  fi
+fi
+if [ "$CERT_MODE" = "manual" ]; then
+  # manual 模式：必须提供证书+私钥路径
+  if [ -z "$CERT_FILE" ]; then ask_req "证书文件完整路径（fullchain）"; CERT_FILE="$ASK_VAL"; fi
+  if [ -z "$KEY_FILE" ];  then ask_req "私钥文件完整路径（privkey）"; KEY_FILE="$ASK_VAL"; fi
+  [ -f "$CERT_FILE" ] || { err "证书文件不存在: $CERT_FILE"; exit 2; }
+  [ -f "$KEY_FILE" ]  || { err "私钥文件不存在: $KEY_FILE"; exit 2; }
+  inf "证书来源：手动模式（跳过 Dynu / acme 签发）"
+else
+  # acme 模式：需要 Dynu 凭证
+  CERT_MODE="acme"
+  if [ -z "$DYNU_KEY" ] && [ -z "$DYNU_CID" ]; then
+    inf "Dynu 凭证双保险：路径A(API Key，推荐) 或 路径B(OAuth Client ID+Secret)"
+    ask "Dynu API Key（路径A，留空则用路径B）"; DYNU_KEY="$ASK_VAL"
+    if [ -z "$DYNU_KEY" ]; then
+      ask_req "Dynu OAuth Client ID（路径B）"; DYNU_CID="$ASK_VAL"
+      ask_req "Dynu OAuth Secret（路径B）"; DYNU_SECRET="$ASK_VAL"
+    fi
   fi
 fi
 if [ "$NONINT" = 0 ]; then
@@ -376,7 +407,11 @@ printf "  域名        : %s\n" "$DOMAIN"
 printf "  端口        : ss=%s anytls=%s naive=%s panel=%s\n" "$SS_PORT" "$ANYTLS_PORT" "$NAIVE_PORT" "$PANEL_PORT"
 printf "  直访伪装   : %s\n" "$DISGUISE_PANEL"
 printf "  Naive伪装  : %s\n" "$DISGUISE_NAIVE"
-printf "  Dynu 路径   : %s\n" "${DYNU_KEY:+A(API Key)}${DYNU_KEY:-${DYNU_CID:+B(OAuth)}}"
+if [ "$CERT_MODE" = "manual" ]; then
+  printf "  证书来源    : 手动（%s）\n" "$CERT_FILE"
+else
+  printf "  证书来源    : acme（Dynu %s）\n" "${DYNU_KEY:+路径A(API Key)}${DYNU_KEY:-${DYNU_CID:+路径B(OAuth)}}"
+fi
 printf "  面板模式    : %s\n" "$([ "$DOCKER" = 1 ] && echo Docker || echo 裸金属)"
 echo "----------------------------------------"
 if [ "$NONINT" = 0 ]; then
@@ -455,7 +490,10 @@ if [ ! -f /etc/ansgo/panel.json ]; then
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
   "svc_naive_enabled": "false",
+  "cert_mode": "${CERT_MODE}",
   "cert_dir": "/etc/ssl/ansgo",
+  "cert_fullchain": "${CERT_FILE}",
+  "cert_privkey": "${KEY_FILE}",
   "db_path": "/etc/ansgo/sessions.db"
 }
 EOF
@@ -463,27 +501,40 @@ EOF
 else warn "/etc/ansgo/panel.json 已存在，保留（端口/伪装以现有为准）"; fi
 chmod 600 /etc/ansgo/panel.json
 
-hr "4/8 签发 Let's Encrypt 证书（DNS-01，A 默认 / B 降级）"
 mkdir -p /etc/ssl/ansgo
-# acme.sh 来源：优先本仓库 vendored 快照，回退官方
-ACME_TARBALL=""
-if dl "$REL/$VER/acme.sh-master.tar.gz" /tmp/acme.tar.gz 2>/dev/null; then ACME_TARBALL=/tmp/acme.tar.gz; log "使用本仓库 vendored acme.sh"; fi
-export DOMAIN EMAIL ACME_TARBALL
-export DYNU_API_KEY="$DYNU_KEY" DYNU_CLIENT_ID="$DYNU_CID" DYNU_SECRET="$DYNU_SECRET"
-log "后台签发中…（日志 /root/ansgo-cert-issue.log）"
-nohup bash /etc/ansgo-deploy/ansgo-cert-issue.sh > /root/ansgo-cert-issue.log 2>&1 </dev/null &
-CERT_PID=$!
-# 轮询等签发（最长 ~180s）
-for i in $(seq 1 60); do
-  sleep 3
-  [ -f /etc/ansgo-cert.status ] && break
-done
-wait "$CERT_PID" 2>/dev/null || true
-if grep -q '^SUCCESS' /etc/ansgo-cert.status 2>/dev/null; then
-  log "✅ 证书签发成功 ($(head -1 /etc/ansgo-cert.status))"
+if [ "$CERT_MODE" = "manual" ]; then
+  hr "4/8 使用手动指定证书（跳过 acme 签发）"
+  # 二次校验文件存在且可读（交互阶段已校验，此处幂等兜底）
+  [ -f "$CERT_FILE" ] || { err "证书文件不存在: $CERT_FILE"; exit 2; }
+  [ -f "$KEY_FILE" ]  || { err "私钥文件不存在: $KEY_FILE"; exit 2; }
+  log "✅ 手动证书模式："
+  log "   证书: $CERT_FILE"
+  log "   私钥: $KEY_FILE"
+  log "   （面板/caddy/sing-box 将直接引用上述绝对路径，不再走 /etc/ssl/ansgo/）"
+  # 不复制到 /etc/ssl/ansgo，保留用户原位置；续期由用户自行管理
+  echo "SUCCESS manual-mode (cert=$CERT_FILE key=$KEY_FILE)" > /etc/ansgo-cert.status
 else
-  err "证书签发失败，详见 /root/ansgo-cert-issue.log（已保留，服务暂用占位/旧证书）"
-  warn "可稍后手动重试：DOMAIN=$DOMAIN bash /etc/ansgo-deploy/ansgo-cert-issue.sh"
+  hr "4/8 签发 Let's Encrypt 证书（DNS-01，A 默认 / B 降级）"
+  # acme.sh 来源：优先本仓库 vendored 快照，回退官方
+  ACME_TARBALL=""
+  if dl "$REL/$VER/acme.sh-master.tar.gz" /tmp/acme.tar.gz 2>/dev/null; then ACME_TARBALL=/tmp/acme.tar.gz; log "使用本仓库 vendored acme.sh"; fi
+  export DOMAIN EMAIL ACME_TARBALL
+  export DYNU_API_KEY="$DYNU_KEY" DYNU_CLIENT_ID="$DYNU_CID" DYNU_SECRET="$DYNU_SECRET"
+  log "后台签发中…（日志 /root/ansgo-cert-issue.log）"
+  nohup bash /etc/ansgo-deploy/ansgo-cert-issue.sh > /root/ansgo-cert-issue.log 2>&1 </dev/null &
+  CERT_PID=$!
+  # 轮询等签发（最长 ~180s）
+  for i in $(seq 1 60); do
+    sleep 3
+    [ -f /etc/ansgo-cert.status ] && break
+  done
+  wait "$CERT_PID" 2>/dev/null || true
+  if grep -q '^SUCCESS' /etc/ansgo-cert.status 2>/dev/null; then
+    log "✅ 证书签发成功 ($(head -1 /etc/ansgo-cert.status))"
+  else
+    err "证书签发失败，详见 /root/ansgo-cert-issue.log（已保留，服务暂用占位/旧证书）"
+    warn "可稍后手动重试：DOMAIN=$DOMAIN bash /etc/ansgo-deploy/ansgo-cert-issue.sh"
+  fi
 fi
 
 hr "5/7 生成配置（代理服务默认关闭，面板内按需安装）"

@@ -5,8 +5,9 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.4.3**。版本历史见 GitHub Releases。
+> **当前版本：v1.5.0**。版本历史见 GitHub Releases。
 >
+> - **v1.5.0**：①「密钥管理」页支持**手动设置**各服务密码（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，与随机生成并存，SS2022 自动校验密钥长度）②**手动指定证书**与私钥的完整路径（`cert_mode=manual`，与 acme 二选一；面板「证书管理」页可切换来源 + 重新加载；install.sh 新增 `--cert-mode/--cert-fullchain/--cert-privkey`）③全参数一键安装支持手动证书
 > - **v1.4.3**：面板导航改左侧可折叠侧边栏（桌面可折叠 + 移动端抽屉式，localStorage 记忆）+ 修复白天模式下字体不可读（active 项改蓝底白字 / `<code>` 显式着色 / overlay 阴影双主题适配 / `.logs` 终端风格双主题统一）
 > - **v1.4.2**：新增 `--uninstall` / `--purge` 彻底卸载（自动检测 Docker/裸金属，两级清理：默认保留配置/卷，`--purge` 全删）
 > - **v1.4.1**：修复 install.sh 架构判断 `x86_64: unbound variable` + 补全 release 二进制（sing-box/caddy-naive/panel 双架构）
@@ -107,15 +108,22 @@
 
 ---
 
-## 4. 证书方案（双保险）
+## 4. 证书方案（acme 自动 / 手动指定，二选一）
 
-### 签发工具
+支持两种证书来源，由 `panel.json` 的 `cert_mode` 字段控制（部署后可在面板「证书管理」页切换）：
+
+- **`acme`（默认）**：acme.sh + Dynu DNS-01 自动签发到固定路径，60 天自动续期（详见下文）
+- **`manual`**：直接引用用户提供的证书+私钥**完整绝对路径**（如已有 Let's Encrypt/Caddy/其他 ACME 客户端签发的证书，或商业证书），跳过 Dynu 凭证与 acme.sh 签发。续期由用户自行管理（在服务器替换文件后点面板「重新加载证书」即可）
+
+> `cert_mode` 字段统一驱动三个服务（caddy / sing-box / 面板自身）的证书引用。Go 端 `certPaths()` 与 `ansgo-genconf`（python）按同一语义解析：manual 且两路径齐全 → 用绝对路径；否则回退 `cert_dir/fullchain.pem + privkey.pem`（兼容旧部署）。
+
+### 签发工具（acme 模式）
 **acme.sh**（curl 安装，~200KB，不走 apt）。不用 caddy 自带 ACME——因为 caddy 内部证书存储路径深、版本化命名，sing-box 引用困难且续期后需手动 reload。acme.sh 可签发到固定路径并通过 `--reloadcmd` 续期后自动重启三服务。
 
-### 验证方式
+### 验证方式（acme 模式）
 **DNS-01**（绕开 80 端口依赖，可签泛域名）。
 
-### Dynu 凭证双保险（A 默认，A 失败降级 B）
+### Dynu 凭证双保险（A 默认，A 失败降级 B；仅 acme 模式需要）
 两套都已实测可用（HTTP 200，能读写 zone <Dynu_zone_id>）：
 
 | 路径 | 凭证 | 机制 | 用法 |
@@ -129,13 +137,14 @@
 
 ### 证书落点与续期
 ```
-/etc/ssl/ansgo/fullchain.pem   # 证书链
-/etc/ssl/ansgo/privkey.pem     # 私钥
+acme 模式  : /etc/ssl/ansgo/fullchain.pem + privkey.pem   # 证书链 + 私钥
+manual 模式: cert_fullchain + cert_privkey 字段指定的绝对路径（用户原位置，不复制）
 ```
-- 续期周期：acme.sh 默认 60 天（实际由 ARI 窗口驱动，约 60 天）
-- 续期 reload：统一走 `ansgo-cert-reload` 脚本（`--install-cert --reloadcmd "/usr/local/bin/ansgo-cert-reload"`）。该脚本按需重载——只有**当前配置引用了 `/etc/ssl/ansgo/` 证书**的服务才重载，签名发阶段是 no-op，切换证书后才会生效
+- 续期周期（acme 模式）：acme.sh 默认 60 天（实际由 ARI 窗口驱动，约 60 天）
+- 续期 reload：统一走 `ansgo-cert-reload` 脚本（`--install-cert --reloadcmd "/usr/local/bin/ansgo-cert-reload"`）。v1.5.0 起该脚本改为「配置文件存在即重载」（不再 grep 固定路径，兼容 manual 模式的自定义路径）
 - ⚠️ **caddy 用 restart 不用 reload**：Caddyfile 设了 `admin off`，无 admin API 通道，`systemctl reload caddy` 会失败。续期/改配置统一 `systemctl restart caddy`（naive 闪断 1-2s 可接受）。sing-box（ss+anytls）和 ansgo-panel 用 restart
 - `--keylength ec-256`（ECDSA，体积小、握手快）
+- **manual 模式续期**：用户在服务器替换证书文件后，登录面板「证书管理」页点「🔄 重新加载证书」即可（调 `ansgo-cert-reload` 重启三服务，含面板自身）；也可 SSH 执行 `/usr/local/bin/ansgo-cert-reload`
 
 ---
 
@@ -219,10 +228,10 @@ https://your-domain.com:15608/<随机URL路径>/
 4. **服务控制**：start / stop / restart（二次确认）
 5. **服务安装**：⭐ Shadowsocks / AnyTLS / NaiveProxy 独立安装/卸载（代理服务面板内按需启用）
 6. **端口管理**：各服务端口 + 面板自身端口均可改
-7. **密钥管理**：重新生成某协议密钥（二次确认）+ 生成第二组密钥
+7. **密钥管理**：⭐ **手动输入**自定义密钥（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，SS2022 自动校验 base64(16字节) 长度）+ 🎲 随机生成（二次确认）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；随机生成走 ansgo-admin regen/regen2
 8. **第二组服务**：开关 / 端口 / Naive-2 伪装（启用后额外 anytls-2 + naive-2，走 SS 落地）
 9. **出口落地**：落地服务器 SS 配置（host/port/method/password + 开关），含密钥长度校验
-10. **证书管理**：到期时间 / 手动续期按钮 / 上次续期结果
+10. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
 11. **面板设置**：URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 两个伪装站点
 12. **日志查看**：tail 最近 N 行
 
@@ -437,6 +446,9 @@ SSH:                22
 | 移动端/白天主题显示异常 | v1.4.0 全面适配（侧边栏抽屉 / label 上置 / 网格单列 / 白天文字 `var(--txt)`）；v1.4.3 进一步修复 active 项白字（改蓝底白字）、`<code>` 显式着色、overlay 阴影双主题适配。若仍异常，硬刷新清浏览器缓存 |
 | 卸载不干净（Docker 卷/镜像残留）| v1.4.2 `--uninstall` 用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配(`*_ansgo_(etc\|ssl\|caddy\|sb\|acme)`)兑底删卷；先删容器再删镜像避免 “image is being used” 错误 |
 | install.sh 首行报 `x86_64: unbound variable` | 旧版 `ARCH_MAP=( [x86_64]=amd64 )` 缺 `declare -A`，bash 把它当索引数组，`x86_64` 在算术上下文求值 + `set -u` 触发报错；v1.4.1 改用 `case` 写法（零关联数组）。⚠️ `bash -n` 只查语法不执行，查不出此类运行时变量错误，改完务必**实际执行**开头几行验证 |
+| 手动设置密钥含特殊字符破坏配置 | v1.4.x 的 `_setsecret` 用 `sed -i "s\|^...|...|"`，密钥含 `\|` 会破坏分隔符；v1.5.0 「密钥管理」页手动设置走 Go `setSecret()`（读全文→替换/追加→tmp→rename 原子写，绕开 sed），随机生成仍走 ansgo-admin（生成值无特殊字符，安全） |
+| 手动证书路径错误致三服务全起不来 | manual 模式 `cert_fullchain/cert_privkey` 指向不存在或不可读文件会让 caddy/sing-box/panel 启动失败；面板「证书来源设置」和 install.sh 在写入前都做 `os.ReadFile`/`[ -f ]` 预校验拒绝错误路径；`certPaths()` 对 manual 但路径缺失的情况安全回退 `cert_dir`（不会崩）。若已在服务器上改坏，SSH 改 `/etc/ansgo/panel.json` 的 `cert_mode` 回 `acme` 后重启 |
+| Docker manual 模式证书路径未挂载 | 容器内看不到 host 路径；entrypoint.sh 会记录 `ERROR: 证书文件不存在` 日志。部署前需在 `docker-compose.yml` 的 volumes 把证书目录挂进容器，或改用 cert_dir 卷内路径 |
 
 ---
 
@@ -487,7 +499,9 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --non-interactive
 ```
 
-参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--naive-port`(443) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--docker` `--non-interactive` `--force-bin`。
+参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`，acme 模式必填）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--naive-port`(443) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--cert-mode`(acme|manual，默认 acme) `--cert-fullchain`(manual 模式证书完整路径) `--cert-privkey`(manual 模式私钥完整路径) `--docker` `--non-interactive` `--force-bin`。
+
+> **手动证书模式（与 acme 二选一）**：`--cert-mode manual --cert-fullchain /path/to/fullchain.pem --cert-privkey /path/to/privkey.pem`，无需 Dynu 凭证，跳过 acme 签发。Docker 模式需保证证书路径已挂载进容器（`docker-compose.yml` 的 volumes）。
 
 落地服务器专用：`bash install.sh --landing [--port 8388]`（在该机部署独立 ss-server，供中转机第二组接入）。
 
