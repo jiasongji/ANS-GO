@@ -223,7 +223,13 @@ def disguise_block(val):
 
 def gen_caddy():
     blocks = []
-    blocks.append("{\n  order forward_proxy before reverse_proxy\n  order forward_proxy before file_server\n  admin off\n  log {\n    level error\n  }\n}\n")
+    # global block：caddy_enable=false 时加 auto_https off
+    #   （v1.5.8 修复：caddy 默认 auto_https on 会隐式监听 :80 做 ACME 挑战，
+    #    --no-caddy 模式下 nginx 占着 80 → bind 失败；关掉 auto_https 避免冲突）
+    if CADDY_ENABLE:
+        blocks.append("{\n  order forward_proxy before reverse_proxy\n  order forward_proxy before file_server\n  admin off\n  log {\n    level error\n  }\n}\n")
+    else:
+        blocks.append("{\n  order forward_proxy before reverse_proxy\n  order forward_proxy before file_server\n  admin off\n  auto_https off\n  log {\n    level error\n  }\n}\n")
 
     # :443 纯反代伪装站（caddy_enable=true 时生成；--no-caddy 模式跳过让 nginx 接管）
     if CADDY_ENABLE:
