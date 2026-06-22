@@ -18,20 +18,25 @@
 # =============================================================================
 set -uo pipefail
 
-# curl | bash 管道形式下，bash 的 stdin 被 curl 的输出占用，导致脚本里的
-# read（如卸载确认「输入 yes」、部署确认、ask 交互提问）直接读到 EOF 而失败。
-# 检测到 stdin 非 tty 且 stdout 是 tty（用户在终端里跑）且有 /dev/tty 可用时，
-# 把 stdin 重定向到 /dev/tty，恢复交互输入能力。
-#   - --non-interactive 模式不触发任何 read，本段对 CI/自动化无影响
-#   - 无 /dev/tty（纯 CI 容器）时跳过，走 --non-interactive 即可
-if [ ! -t 0 ] && [ -t 1 ] && [ -c /dev/tty ]; then
-  exec 0</dev/tty 2>/dev/null || true
-fi
+# curl | bash 管道形式下，bash 的 stdin(fd0) 被 curl 输出占用。若用 exec 0</dev/tty
+# 全局切走 fd0，bash 会读不到脚本剩余部分（管道还在喂脚本）→ 后续代码全部不执行。
+# 故不能在脚本中途对 fd0 做 exec；改为定义 readtty 函数，仅在某次 read 时临时把
+# stdin 指到 /dev/tty（局部重定向，不动全局 fd0），读完即恢复。
+#   - NONINT 模式不调用 readtty，本机制对 CI/自动化 无影响
+#   - 无 /dev/tty（纯 CI 容器）时 readtty 回退到原 stdin（读 EOF → 返回空）
+readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的交互读取）
+  local line=""
+  if [ -c /dev/tty ]; then
+    # 用子 shell + 局部重定向：仅这次 read 的 fd0 是 /dev/tty，不影响主脚本读管道
+    line=$(read -r _LINE </dev/tty 2>/dev/null && printf '%s' "$_LINE") || line=""
+  fi
+  printf '%s' "$line"
+}
 
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.1"
+VER="v1.5.2"
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -139,7 +144,9 @@ do_uninstall(){
     echo "默认模式：移除服务/容器/二进制，保留配置/卷（可重装不丢参数）"
     echo "如需彻底删除一切，用: bash install.sh --uninstall --purge"
   fi
-  read -r -p "确认卸载？输入 yes: " a; [ "$a" = yes ] || { echo "已取消"; exit 0; }
+  printf "确认卸载？输入 yes: " >&2
+  a="$(readtty)"
+  [ "$a" = yes ] || { echo "已取消"; exit 0; }
 
   # ---- Docker 模式卸载 ----
   if [ "$HAS_DOCKER" = 1 ]; then
@@ -226,7 +233,7 @@ ask(){ # prompt default -> 读入到 ASK_VAL
   if [ "${NONINT:-0}" = 1 ]; then ASK_VAL="$d"; return; fi
   if [ -n "$d" ]; then printf "%s [%s]: " "$p" "$d" >&2
   else printf "%s: " "$p" >&2; fi
-  read -r v
+  v="$(readtty)"
   ASK_VAL="${v:-$d}"
 }
 ask_req(){ # prompt ; NONINT 下为空则报错
@@ -425,7 +432,9 @@ fi
 printf "  面板模式    : %s\n" "$([ "$DOCKER" = 1 ] && echo Docker || echo 裸金属)"
 echo "----------------------------------------"
 if [ "$NONINT" = 0 ]; then
-  read -r -p "确认开始部署？[Y/n] " c; [ "${c:-Y}" = "Y" ] || [ "${c:-Y}" = "y" ] || { warn "已取消"; exit 0; }
+  printf "确认开始部署？[Y/n] " >&2
+  c="$(readtty)"
+  [ "${c:-Y}" = "Y" ] || [ "${c:-Y}" = "y" ] || { warn "已取消"; exit 0; }
 fi
 
 # ---- Docker 一体化分流（KVM 主机推荐）：容器内跑全部服务，这里完成后即退出 ----
