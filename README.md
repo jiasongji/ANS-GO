@@ -1,6 +1,6 @@
 # ANS-GO
 
-> 在低配 VPS（LXC 或 KVM）上部署 **NaiveProxy + AnyTLS + Shadowsocks** 三协议代理 + **Go Web 管理面板**，共享一张 Let's Encrypt 证书。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
+> 在低配 VPS（LXC 或 KVM）上部署 **NaiveProxy + AnyTLS + Shadowsocks** 三协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
 ![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
@@ -93,6 +93,47 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 部署时自动先尝试 A，A 失败降级 B。
 
+### 证书来源：acme 自动 / 手动指定（二选一）⭐ v1.5.0+
+
+除默认的 acme.sh 自动签发外，v1.5.0 起支持**手动指定已有证书**的完整路径（例如你已经用其他 ACME 客户端、Caddy、或商业证书），跳过 Dynu 凭证与 acme.sh 签发。两种模式由 `--cert-mode` 控制，部署后也可在面板「证书管理」页随时切换。
+
+| 模式 | 参数 | 适用场景 | 续期 |
+|------|------|----------|------|
+| **`acme`（默认）** | `--dynu-key`（或 OAuth B 套）| DNS 托管在 Dynu，全自动签发 | acme.sh 60 天自动续期 + 三服务自动 reload |
+| **`manual`** | `--cert-mode manual --cert-fullchain <PATH> --cert-privkey <PATH>` | 已有证书（其他 ACME 客户端 / Caddy / 商业证书），或 DNS 不在 Dynu | 用户自行管理，替换文件后面板点「重新加载证书」 |
+
+**手动证书模式示例（裸金属）**——无需 Dynu 凭证，直接指定服务器上已有的证书与私钥完整路径：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --cert-mode manual \
+             --cert-fullchain /etc/letsencrypt/live/your-domain.com/fullchain.pem \
+             --cert-privkey /etc/letsencrypt/live/your-domain.com/privkey.pem \
+             --email you@example.com \
+             --ss-port 33899 \
+             --anytls-port 21111 \
+             --naive-port 44333 \
+             --panel-port 15608 \
+             --non-interactive
+```
+
+**手动证书模式 + Docker 一体化**——同样只需加 `--docker`，其余参数一致；但**必须把证书所在目录挂载进容器**（在 `deploy/docker-compose.yml` 的 `volumes` 添加 `- /etc/letsencrypt:/etc/letsencrypt:ro`），否则容器内看不到证书文件：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --cert-mode manual \
+             --cert-fullchain /etc/letsencrypt/live/your-domain.com/fullchain.pem \
+             --cert-privkey /etc/letsencrypt/live/your-domain.com/privkey.pem \
+             --email you@example.com \
+             --docker \
+             --non-interactive
+# 部署后编辑 /etc/ansgo-docker/docker-compose.yml 把证书目录挂载进容器，再 docker compose up -d
+```
+
+> manual 模式下 caddy / sing-box / 面板三个服务都直接引用你指定的绝对路径（不复制到 `/etc/ssl/ansgo/`）。替换证书后登录面板「证书管理」页点「🔄 重新加载证书」即可让三服务重新读取（含面板自身重启）。
+
 ### 参数全集
 
 | 参数 | 默认值 | 说明 |
@@ -109,6 +150,9 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 | `--panel-user` | `admin` | 面板管理员用户名 |
 | `--disguise-panel` | `proxy:https://example.com` | `:443` 直访伪装站点（`proxy:<URL>` 反代 / `page` 静态页）|
 | `--disguise-naive` | `proxy:https://example.com` | Naive 端口伪装站点（同上格式）|
+| `--cert-mode` | `acme` | 证书来源：`acme`（Dynu DNS-01 自动签发，需 Dynu 凭证）/ `manual`（手动指定已有证书路径，跳过 Dynu）⭐ v1.5.0 |
+| `--cert-fullchain` | — | manual 模式：证书文件完整绝对路径（如 `/etc/letsencrypt/live/x.com/fullchain.pem`）⭐ v1.5.0 |
+| `--cert-privkey` | — | manual 模式：私钥文件完整绝对路径 ⭐ v1.5.0 |
 | `--docker` | 关 | Docker 一体化形态（KVM 用；否则裸金属）|
 | `--non-interactive` | 关 | 非交互模式，缺必填项报错退出（CI / 自动化）|
 | `--force-bin` | 关 | 强制重装 sing-box/caddy 二进制（已装则跳过）|
@@ -154,7 +198,9 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 - **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用（不装不占端口）
 - **三协议**：NaiveProxy（caddy forwardproxy-naive 分支）/ AnyTLS / Shadowsocks-2022（sing-box 双 inbound）
 - **Web 管理面板**：Go 单二进制（运行内存 ~12MB），中文 UI，管全部协议参数 / 端口 / 证书 / 自身配置 + 服务安装卸载，含客户端二维码
-- **一张证书共享**：acme.sh + Dynu DNS-01 签发 ECDSA 证书，caddy / sing-box / 面板三服务共享，续期一次三服务一起重载
+- **密钥可手动设置** ⭐ v1.5.0：「密钥管理」页支持手动输入 SS / AnyTLS / Naive + 第二组任意自定义密钥（SS2022 自动校验长度），与随机生成并存
+- **证书 acme / 手动二选一** ⭐ v1.5.0：默认 acme.sh + Dynu DNS-01 自动签发 ECDSA；也可 `--cert-mode manual` 直接引用已有证书路径（其他 ACME 客户端 / Caddy / 商业证书），面板内可随时切换来源
+- **一张证书共享**：无论 acme 还是 manual，caddy / sing-box / 面板三服务都共享同一证书，续期/替换后一次重载三服务一起生效
 - **域名双伪装**：`:443` 纯反代伪装站（域名直访命中，不提供代理）+ naive 端口独立伪装；两个伪装站点均可在 Web 后台独立配置（默认反代 `example.com`）
 - **第二组服务 + 链式出站**：可选启用额外的 anytls-2 + naive-2，出口经 Shadowsocks 走另一台落地服务器（中转→落地）
 - **暗黑/白天双主题 + 移动端自适应**：顶栏一键切换主题（localStorage 记忆）；手机端导航横向滚动 / 表单 label 上置 / 网格自适应单列；白天模式文字对比度已修正
@@ -165,16 +211,20 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 ## 🏗 架构
 
 ```
-            Let's Encrypt (acme.sh + Dynu DNS-01)  路径A: API Key（默认）/ B: OAuth（降级）
-                        │ 签发 / 自动续期 + reload
-                        ▼
-          /etc/ssl/ansgo/{fullchain,privkey}.pem     一张证书三服务共享
+   证书来源（二选一，--cert-mode）
+   ├─ acme（默认）: acme.sh + Dynu DNS-01  路径A: API Key / B: OAuth
+   │      │ 自动签发 → /etc/ssl/ansgo/{fullchain,privkey}.pem
+   │      │ 60 天自动续期 + 三服务 reload
+   └─ manual（v1.5.0+）: 直接引用用户已有证书
+          │ --cert-fullchain / --cert-privkey 指定绝对路径
+          │ 替换文件后面板点「重新加载证书」
                         │
-      ┌─────────────────┼─────────────────────┐
+                        ▼  一张证书三服务共享
+      ┌─────────────────┼─────────────────────────────┐
       ▼                 ▼                     ▼
  caddy :443       sing-box :8443        面板(Go) :15608
  NaiveProxy       AnyTLS + Shadowsocks   Web 管理面板
- + 域名伪装反代
+ + 域名伪装反代                           (含密钥/证书来源切换)
       ▲                 ▲                     ▲
       └─────── ansgo-admin (bash) ───────────┘   SSH 离线兜底
 ```
@@ -192,8 +242,8 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 │   ├── docker/          #    docker-compose.yml + entrypoint.sh（容器初始化 + systemd）
 │   ├── dns_dynukey.sh   #    acme.sh Dynu DNS-01 钩子（API Key）
 │   ├── ansgo-cert-issue.sh  # 步骤 1-3：装 acme.sh + 签发证书（A/B 双保险）
-│   ├── ansgo-cert-reload   #    续期后按需 reload 三服务
-│   ├── ansgo-genconf       #    从 config + secrets 重新生成服务配置
+│   ├── ansgo-cert-reload   #    续期/替换后 reload 三服务（v1.5.0+ 不再依赖固定路径）
+│   ├── ansgo-genconf       #    从 config + secrets 重新生成服务配置（v1.5.0+ 支持手动证书路径）
 │   ├── ansgo-admin         #    离线管理脚本
 │   ├── ansgo-panel.service #    面板 systemd unit
 │   └── panel/              #    Go 面板源码（main/handlers/crypto.go + web/）
