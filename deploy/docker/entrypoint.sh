@@ -112,6 +112,15 @@ else
     printf '0.0.0.0:443 {\n  respond "ANS-GO"\n}\n:80 {\n  redir https://%s{uri} 308\n}\n' "$DOMAIN" > /etc/caddy/Caddyfile
 fi
 
+# v1.5.7: --no-caddy 模式（NO_CADDY=1 或 panel.json caddy_enable=false）
+#   禁用并 mask caddy.service，避免 systemd 拉起 caddy 监听 80/443（让 nginx 等接管）
+#   naive 装上时面板会手动 systemctl unmask + start caddy（gen_caddy 只生成 naive 块）
+if [ "${NO_CADDY:-0}" = 1 ] || grep -q '"caddy_enable": "false"' "$CONF" 2>/dev/null; then
+  log "--no-caddy 模式：禁用 caddy.service（不监听 80/443，让现有 web 服务器接管）"
+  systemctl disable caddy.service 2>/dev/null || true
+  systemctl mask caddy.service 2>/dev/null || true
+fi
+
 # 后台签发真实证书（acme 模式且当前非 LE 且提供了 Dynu 凭证；manual 模式跳过）
 is_le(){ [ -f "$CERTDIR/fullchain.pem" ] \
   && openssl x509 -in "$CERTDIR/fullchain.pem" -noout -issuer 2>/dev/null \
