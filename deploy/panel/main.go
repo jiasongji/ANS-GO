@@ -49,7 +49,7 @@ type Config struct {
 	SvcSSEnabled       string `json:"svc_ss_enabled"`
 	SvcAnyTLSEnabled   string `json:"svc_anytls_enabled"`
 	SvcNaiveEnabled    string `json:"svc_naive_enabled"`
-	// v1.5.9: caddy_enable=false 表示 --no-caddy 模式（caddy 不跑 80/443 伪装站）
+	// v1.5.10: caddy_enable=false 表示 --no-caddy 模式（caddy 不跑 80/443 伪装站）
 	//   空字符串视为 true（兼容旧部署）
 	CaddyEnable        string `json:"caddy_enable"`
 	// 第2组额外服务（用字符串 "true"/"false" 以兼容 genconf 的宽松判断）

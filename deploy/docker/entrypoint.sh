@@ -89,7 +89,7 @@ if grep -q '"admin_pass_hash": "PLACEHOLDER"' "$CONF" 2>/dev/null && [ -n "${PAN
 fi
 
 # ---- 3/3 证书：manual 模式同步到 /etc/ssl/ansgo/ 卷；acme 模式无则自签占位 ----
-# v1.5.9: manual 模式不再让 sing-box/caddy 直接读宿主路径（SELinux/权限问题），
+# v1.5.10: manual 模式不再让 sing-box/caddy 直接读宿主路径（SELinux/权限问题），
 #         改为启动时把宿主证书 cp 到 /etc/ssl/ansgo/ 卷（容器完全控制），
 #         并把 panel.json 的 cert_mode 改为 acme（让 genconf 用 /etc/ssl/ansgo/ 路径）。
 #         续期：宿主更新证书后，docker restart ansgo（重跑 entrypoint 自动同步）
@@ -136,14 +136,26 @@ else
     printf '0.0.0.0:443 {\n  respond "ANS-GO"\n}\n:80 {\n  redir https://%s{uri} 308\n}\n' "$DOMAIN" > /etc/caddy/Caddyfile
 fi
 
-# v1.5.9: --no-caddy 模式（NO_CADDY=1 或 panel.json caddy_enable=false）
-#   不 mask caddy.service（mask 会让 systemctl 无法操作，naive 装上时无法启动）
-#   改用 disable：开机不自动启动，但允许面板装 naive 时手动 systemctl start caddy
-#   caddy 启动时因 caddy_enable=false 只生成 naive 站点（不碰 80/443），与 nginx 共存
+# v1.5.10: --no-caddy 模式 caddy 启停逻辑（修复 v1.5.10 的 bug）
+#   v1.5.10 bug：容器重启时即使 naive 已装（svc_naive_enabled=true）也 stop caddy → naive 失效
+#   正确逻辑：caddy_enable=false 且 naive 未装时才不启 caddy；
+#             naive 已装时 caddy 必须启动（naive 依赖 caddy 的 forwardproxy）
+NO_CADDY_MODE=0
 if [ "${NO_CADDY:-0}" = 1 ] || grep -q '"caddy_enable": "false"' "$CONF" 2>/dev/null; then
-  log "--no-caddy 模式：caddy.service 不自动启动（naive 装上时面板会手动 start，仅听 naive 端口）"
-  systemctl disable caddy.service 2>/dev/null || true
-  systemctl stop caddy.service 2>/dev/null || true
+  NO_CADDY_MODE=1
+fi
+if [ "$NO_CADDY_MODE" = 1 ]; then
+  # 检查 naive 是否已启用（从 panel.json 读 svc_naive_enabled）
+  NAIVE_ON=$(grep -o '"svc_naive_enabled": *"[^"]*"' "$CONF" 2>/dev/null | grep -o '"[^"]*"$' | tr -d '"')
+  if [ "$NAIVE_ON" = "true" ]; then
+    log "--no-caddy 模式但 naive 已启用：启动 caddy（仅听 naive 端口，不碰 80/443）"
+    systemctl enable caddy.service 2>/dev/null || true
+    systemctl restart caddy.service 2>/dev/null || true
+  else
+    log "--no-caddy 模式且 naive 未启用：不启动 caddy（80/443 由 nginx 等接管）"
+    systemctl disable caddy.service 2>/dev/null || true
+    systemctl stop caddy.service 2>/dev/null || true
+  fi
 fi
 
 # 后台签发真实证书（acme 模式且当前非 LE 且提供了 Dynu 凭证；manual 模式跳过）
