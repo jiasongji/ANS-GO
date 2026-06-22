@@ -18,10 +18,20 @@
 # =============================================================================
 set -uo pipefail
 
+# curl | bash 管道形式下，bash 的 stdin 被 curl 的输出占用，导致脚本里的
+# read（如卸载确认「输入 yes」、部署确认、ask 交互提问）直接读到 EOF 而失败。
+# 检测到 stdin 非 tty 且 stdout 是 tty（用户在终端里跑）且有 /dev/tty 可用时，
+# 把 stdin 重定向到 /dev/tty，恢复交互输入能力。
+#   - --non-interactive 模式不触发任何 read，本段对 CI/自动化无影响
+#   - 无 /dev/tty（纯 CI 容器）时跳过，走 --non-interactive 即可
+if [ ! -t 0 ] && [ -t 1 ] && [ -c /dev/tty ]; then
+  exec 0</dev/tty 2>/dev/null || true
+fi
+
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.0"
+VER="v1.5.1"
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in

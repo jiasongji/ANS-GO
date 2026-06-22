@@ -23,10 +23,15 @@
 
 ## 一键部署（推荐）
 
+**交互式**（逐项确认，推荐首次使用）：
+
 ```bash
-# 交互式
 bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
-# 带参数
+```
+
+**带参数一键**（CI / 自动化）：
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com --dynu-key <KEY> --email you@example.com --non-interactive
 ```
@@ -40,25 +45,39 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 - 配置 / 密钥 / 证书 / acme 状态持久化到 docker volume，容器重建不丢失
 - 首次启动容器内自动：生成 `panel.json` + `secrets.env` → 设置管理员密码（`PANEL_PASS`）→ 自签占位证书 → 后台 acme.sh DNS-01 签发真实证书（覆盖自签）
 
+**部署命令**：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com --dynu-key <KEY> --docker --non-interactive
-# 管理命令
-cd /etc/ansgo-docker && docker compose logs -f ansgo   # 查日志 / 签证书进度
-docker exec ansgo ansgo-admin status                   # 服务状态
-docker exec ansgo ansgo-admin info                     # 节点连接参数
+```
+
+**管理命令**：
+
+```bash
+# 查日志 / 签证书进度
+cd /etc/ansgo-docker && docker compose logs -f ansgo
+# 服务状态
+docker exec ansgo ansgo-admin status
+# 节点连接参数
+docker exec ansgo ansgo-admin info
 ```
 
 > 手动构建镜像：`docker build -t ghcr.io/jiasongji/ansgo:latest -f deploy/Dockerfile.allinone .`（国内需配 `HTTPS_PROXY`）
 
 ## 卸载（v1.4.2+）
 
-`install.sh --uninstall` 自动检测部署模式（Docker / 裸金属），两级清理：
+`install.sh --uninstall` 自动检测部署模式（Docker / 裸金属），两级清理。**默认保留配置/卷**（可重装不丢参数），加 `--purge` 彻底删除。
+
+**默认卸载**（移除服务/容器/二进制/unit，保留配置/卷）：
 
 ```bash
-# 默认：移除服务/容器/二进制/unit，保留配置/卷（可重装不丢参数）
 bash install.sh --uninstall
-# 彻底：删除配置/密钥/证书/acme/备份/卷/镜像/调优（不可恢复）
+```
+
+**彻底卸载**（删除配置/密钥/证书/acme/备份/卷/镜像/调优，**不可恢复**）：
+
+```bash
 bash install.sh --uninstall --purge
 ```
 
