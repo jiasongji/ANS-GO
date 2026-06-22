@@ -167,19 +167,39 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 
 func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
+	// v1.5.9: 服务状态 = enabled && 进程 active
+	//   之前只看进程（SS 未装但 sing-box 因 AnyTLS 跑着 → SS 误显示 active）
+	//   现在：未启用的服务显示 inactive（即使载体进程在跑）
+	sbActive := svcActive("sing-box") == "active"
+	caddyActive := svcActive("caddy") == "active"
+	panelActive := svcActive("ansgo-panel") == "active"
+	ssEnabled := c.SvcSSEnabled == "true"
+	anytlsEnabled := c.SvcAnyTLSEnabled == "true"
+	naiveEnabled := c.SvcNaiveEnabled == "true"
+	// caddy 需要 active 的条件：
+	//   默认模式（CaddyEnable=true）：caddy 跑 :443 伪装站，始终需要
+	//   --no-caddy 模式（CaddyEnable=false）：caddy 只在 naive 启用时才需要
+	caddyNeeded := c.CaddyEnable == "true" || naiveEnabled
+	// 服务级状态：enabled && 载体进程 active
+	svcStatus := func(enabled, carrierActive bool) string {
+		if enabled && carrierActive {
+			return "active"
+		}
+		return "inactive"
+	}
 	resp := map[string]any{
 		"services": map[string]string{
-			"naive":    svcActive("caddy"),
-			"ss":       svcActive("sing-box"),
-			"anytls":   svcActive("sing-box"),
-			"panel":    svcActive("ansgo-panel"),
-			"caddy":    svcActive("caddy"),
-			"sing-box": svcActive("sing-box"),
+			"naive":    svcStatus(naiveEnabled, caddyActive),
+			"ss":       svcStatus(ssEnabled, sbActive),
+			"anytls":   svcStatus(anytlsEnabled, sbActive),
+			"panel":    map[bool]string{true: "active", false: "inactive"}[panelActive],
+			"caddy":    svcStatus(caddyNeeded, caddyActive),
+			"sing-box": svcStatus(ssEnabled || anytlsEnabled, sbActive),
 		},
 		"svc_enabled": map[string]bool{
-			"ss":     c.SvcSSEnabled == "true",
-			"anytls": c.SvcAnyTLSEnabled == "true",
-			"naive":  c.SvcNaiveEnabled == "true",
+			"ss":     ssEnabled,
+			"anytls": anytlsEnabled,
+			"naive":  naiveEnabled,
 		},
 		"ports": map[string]int{
 			"naive": c.NaivePort, "anytls": c.AnyTLSPort,
@@ -232,6 +252,56 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 400, "action 必须为 start/stop/restart")
 		return
 	}
+	// v1.5.9: SS/AnyTLS 共享 sing-box 进程，不能直接 stop sing-box（会同时停掉另一个）
+	//   新逻辑：单独停 SS/AnyTLS 时，设 enabled=false + genconf + restart sing-box
+	//   （genconf 按 enabled 字段生成 inbound，停 SS 后 sing-box config 只剩 AnyTLS）
+	//   只有当 SS+AnyTLS 都未启用时，才 stop+disable sing-box
+	if b.Target == "ss" || b.Target == "anytls" {
+		if b.Action == "stop" {
+			c := configGet()
+			if b.Target == "ss" {
+				c.SvcSSEnabled = "false"
+			} else {
+				c.SvcAnyTLSEnabled = "false"
+			}
+			if err := configSet(c); err != nil {
+				jerr(w, 500, "保存配置失败: "+err.Error())
+				return
+			}
+			// 重新生成 sing-box config（移除被停用的 inbound）
+			_ = exec.Command(binGenConf, "sing-box").CombinedOutput()
+			// 检查 sing-box 是否还有启用的 inbound
+			needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.Group2Enabled == "true"
+			if needSB {
+				_ = exec.Command("systemctl", "restart", "sing-box").Run()
+				jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": "stopped", "note": "已从 sing-box 移除，其它服务不受影响"})
+			} else {
+				_ = exec.Command("systemctl", "stop", "sing-box").Run()
+				_ = exec.Command("systemctl", "disable", "sing-box").Run()
+				jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": "stopped", "note": "sing-box 已停（无其他启用服务）"})
+			}
+			return
+		}
+		if b.Action == "start" {
+			c := configGet()
+			if b.Target == "ss" {
+				c.SvcSSEnabled = "true"
+			} else {
+				c.SvcAnyTLSEnabled = "true"
+			}
+			if err := configSet(c); err != nil {
+				jerr(w, 500, "保存配置失败: "+err.Error())
+				return
+			}
+			_ = exec.Command(binGenConf, "sing-box").CombinedOutput()
+			_ = exec.Command("systemctl", "enable", "sing-box").Run()
+			_ = exec.Command("systemctl", "restart", "sing-box").Run()
+			jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": "started"})
+			return
+		}
+		// restart 走原逻辑（直接 restart sing-box）
+	}
+	// 其它 target（naive/panel/all）走原 systemctl 逻辑
 	var svcs []string
 	switch b.Target {
 	case "ss", "anytls":
@@ -1244,13 +1314,13 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 判断该进程是否还需要运行
-	// sing-box：无任何启用 inbound 时可停
-	// caddy：始终需要（:443 伪装站 + :80 跳转是面板/域名基础设施，与代理服务无关）
+	// sing-box：SS/AnyTLS/Group2 任一启用就需运行
+	// caddy：默认模式（CaddyEnable=true）始终需要（:443 伪装站）；--no-caddy 模式只在 naive 启用时需要
 	needProc := false
 	if procName == "sing-box" {
 		needProc = c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.Group2Enabled == "true"
-	} else { // caddy 始终运行
-		needProc = true
+	} else if procName == "caddy" {
+		needProc = c.CaddyEnable == "true" || c.SvcNaiveEnabled == "true"
 	}
 	if b.Action == "install" || needProc {
 		// 启动/重启进程

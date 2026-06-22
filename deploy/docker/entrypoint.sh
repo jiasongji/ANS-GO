@@ -89,7 +89,7 @@ if grep -q '"admin_pass_hash": "PLACEHOLDER"' "$CONF" 2>/dev/null && [ -n "${PAN
 fi
 
 # ---- 3/3 证书：manual 模式同步到 /etc/ssl/ansgo/ 卷；acme 模式无则自签占位 ----
-# v1.5.8: manual 模式不再让 sing-box/caddy 直接读宿主路径（SELinux/权限问题），
+# v1.5.9: manual 模式不再让 sing-box/caddy 直接读宿主路径（SELinux/权限问题），
 #         改为启动时把宿主证书 cp 到 /etc/ssl/ansgo/ 卷（容器完全控制），
 #         并把 panel.json 的 cert_mode 改为 acme（让 genconf 用 /etc/ssl/ansgo/ 路径）。
 #         续期：宿主更新证书后，docker restart ansgo（重跑 entrypoint 自动同步）
@@ -136,7 +136,7 @@ else
     printf '0.0.0.0:443 {\n  respond "ANS-GO"\n}\n:80 {\n  redir https://%s{uri} 308\n}\n' "$DOMAIN" > /etc/caddy/Caddyfile
 fi
 
-# v1.5.8: --no-caddy 模式（NO_CADDY=1 或 panel.json caddy_enable=false）
+# v1.5.9: --no-caddy 模式（NO_CADDY=1 或 panel.json caddy_enable=false）
 #   不 mask caddy.service（mask 会让 systemctl 无法操作，naive 装上时无法启动）
 #   改用 disable：开机不自动启动，但允许面板装 naive 时手动 systemctl start caddy
 #   caddy 启动时因 caddy_enable=false 只生成 naive 站点（不碰 80/443），与 nginx 共存
