@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.4
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.5
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.4）
+VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.5）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -91,10 +91,13 @@ esac
 
 # ---- 默认值 ----
 DOMAIN="" DYNU_KEY="" DYNU_CID="" DYNU_SECRET="" EMAIL=""
-SS_PORT=23456 ANYTLS_PORT=8443 NAIVE_PORT=443 PANEL_PORT=15608
+SS_PORT=23456 ANYTLS_PORT=8443 NAIVE_PORT=44333 PANEL_PORT=15608
 PANEL_USER="admin" DISGUISE_PANEL="proxy:https://soft.xiaoz.org" DISGUISE_NAIVE="proxy:https://soft.xiaoz.org"
 # 证书来源：acme（默认，需 Dynu 凭证）/ manual（手动指定已有证书+私钥路径，二选一）
 CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
+# 各服务密码/密钥（v1.5.5 新增；留空则部署时自动随机生成）
+SS_PASSWORD="" ANYTLS_PASSWORD="" ANYTLS_UUID_IN="" NAIVE_USER_IN="" NAIVE_PASSWORD=""
+PANEL_PASSWORD_IN="" URL_PATH_IN=""
 NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0 LANDING=0
 LANDING_ARGS=()
 
@@ -116,9 +119,16 @@ usage(){ cat <<EOF
   --email EMAIL            ACME 注册邮箱
   --ss-port N              Shadowsocks 端口（默认 23456）
   --anytls-port N          AnyTLS 端口（默认 8443）
-  --naive-port N           NaiveProxy 端口（默认 443）
+  --naive-port N           NaiveProxy 端口（默认 44333，勿用 443）
   --panel-port N           面板端口（默认 15608）
   --panel-user USER        面板管理员用户名（默认 admin）
+  --panel-password PASS    面板管理员密码（默认随机；自定义须 6-64 字符）
+  --panel-url-path PATH    面板 URL 路径（默认随机 /xxxxxxxx/；自定义形如 /my-path/）
+  --ss-password KEY        Shadowsocks 密钥（默认随机；须 base64(16字节)，用 'openssl rand -base64 16' 生成）
+  --anytls-password PASS   AnyTLS 密码（默认随机）
+  --anytls-uuid UUID       AnyTLS 用户 UUID（默认随机；标准 UUID 格式如 a1b2c3d4-e5f6-7890-abcd-ef1234567890）
+  --naive-user USER        NaiveProxy 用户名（默认随机；不含冒号和空白）
+  --naive-password PASS    NaiveProxy 密码（默认随机；不含冒号和空白）
   --disguise-panel VAL     :443 直访伪装站点（proxy:<URL> 反代 / page 默认页，默认 proxy:https://soft.xiaoz.org）
   --disguise-naive VAL     NaiveProxy 端口的伪装站点（同上格式，默认 proxy:https://soft.xiaoz.org）
   --cert-mode MODE         证书来源：acme（默认，用 Dynu DNS-01 自动签发）| manual（手动指定已有证书，跳过 Dynu/acme）
@@ -147,6 +157,13 @@ while [ $# -gt 0 ]; do
     --naive-port) NAIVE_PORT="$2"; shift 2;;
     --panel-port) PANEL_PORT="$2"; shift 2;;
     --panel-user) PANEL_USER="$2"; shift 2;;
+    --panel-password) PANEL_PASSWORD_IN="$2"; shift 2;;
+    --panel-url-path) URL_PATH_IN="$2"; shift 2;;
+    --ss-password) SS_PASSWORD="$2"; shift 2;;
+    --anytls-password) ANYTLS_PASSWORD="$2"; shift 2;;
+    --anytls-uuid) ANYTLS_UUID_IN="$2"; shift 2;;
+    --naive-user) NAIVE_USER_IN="$2"; shift 2;;
+    --naive-password) NAIVE_PASSWORD="$2"; shift 2;;
     --disguise-panel) DISGUISE_PANEL="$2"; shift 2;;
     --disguise-naive) DISGUISE_NAIVE="$2"; shift 2;;
     --cert-mode) CERT_MODE="$2"; shift 2;;
@@ -163,6 +180,100 @@ while [ $# -gt 0 ]; do
     *) err "未知参数: $1"; usage; exit 1;;
   esac
 done
+
+# =============================================================================
+# 参数校验（v1.5.5 新增）
+#   仅对「带参数安装/部署」场景校验；--uninstall / --landing / --purge 跳过
+# =============================================================================
+validate_inputs(){
+  local errs=0 port p
+
+  # 端口范围校验（1-65535，整数）
+  for p in SS_PORT ANYTLS_PORT NAIVE_PORT PANEL_PORT; do
+    port="${!p:-}"
+    [ -n "$port" ] || continue
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      err "$p=$port 不合法（须 1-65535 整数）"; errs=$((errs+1))
+    fi
+  done
+
+  # 端口冲突校验：四个可配端口互相不得重复，且不得占用 caddy/SSH 固定端口
+  #   80=caddy HTTP 跳转，443=caddy :443 伪装站，25822=SSH 加固后端口（如启用）
+  local sys_ports="80 443 25822"
+  local conf_ports=()
+  for p in SS_PORT ANYTLS_PORT NAIVE_PORT PANEL_PORT; do
+    port="${!p:-}"; [ -n "$port" ] || continue
+    # 与系统固定端口冲突
+    for s in $sys_ports; do
+      if [ "$port" = "$s" ]; then err "$p=$port 与系统固定端口冲突（$s 为 caddy/SSH 保留）"; errs=$((errs+1)); fi
+    done
+    # 互相冲突
+    local prev
+    for prev in "${conf_ports[@]:-}"; do
+      if [ "$port" = "$prev" ]; then err "$p=$port 与其它服务端口重复"; errs=$((errs+1)); fi
+    done
+    conf_ports+=("$port")
+  done
+
+  # SS2022 密钥：base64 解码后必须恰好 16 字节（aes-128-gcm）
+  if [ -n "$SS_PASSWORD" ]; then
+    local n
+    n=$(printf '%s' "$SS_PASSWORD" | base64 -d 2>/dev/null | wc -c | tr -d ' ')
+    if [ "$n" != "16" ]; then
+      err "--ss-password 不是合法的 2022-blake3-aes-128-gcm 密钥（base64 解码后须 16 字节，当前 $n 字节）"
+      err "  生成命令: openssl rand -base64 16"
+      errs=$((errs+1))
+    fi
+  fi
+
+  # AnyTLS UUID：标准 v4 格式（大小写不敏感）
+  if [ -n "$ANYTLS_UUID_IN" ]; then
+    if ! [[ "$ANYTLS_UUID_IN" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+      err "--anytls-uuid 格式错误（须标准 UUID 如 a1b2c3d4-e5f6-7890-abcd-ef1234567890）"
+      errs=$((errs+1))
+    fi
+  fi
+
+  # NaiveProxy 用户名/密码：不含冒号和空白（caddy basic_auth 限制）
+  # 注：用平行数组而非 "val:flag" 拼接，避免值本身含冒号被截断
+  local naive_vals=("$NAIVE_USER_IN" "$NAIVE_PASSWORD")
+  local naive_flags=("--naive-user" "--naive-password")
+  local i
+  for i in 0 1; do
+    local val="${naive_vals[$i]}" flag="${naive_flags[$i]}"
+    [ -n "$val" ] || continue
+    if [[ "$val" == *:* ]] || [[ "$val" =~ [[:space:]] ]]; then
+      err "$flag 含有非法字符（冒号或空白，caddy basic_auth 不支持）"; errs=$((errs+1))
+    fi
+  done
+
+  # AnyTLS 密码：非空即可（与现有 Go 端一致，无格式约束）
+  # NaiveProxy 已在上方校验
+
+  # 面板密码：6-64 字符
+  if [ -n "$PANEL_PASSWORD_IN" ]; then
+    local pn=${#PANEL_PASSWORD_IN}
+    if [ "$pn" -lt 6 ] || [ "$pn" -gt 64 ]; then
+      err "--panel-password 长度须 6-64 字符（当前 ${pn}）"; errs=$((errs+1))
+    fi
+  fi
+
+  # 面板 URL 路径：/xxxx/ 形式
+  if [ -n "$URL_PATH_IN" ]; then
+    if ! [[ "$URL_PATH_IN" =~ ^/[A-Za-z0-9_-]+/$ ]]; then
+      err "--panel-url-path 格式错误（须 /xxxx/ 形式，仅含字母数字 _ -）"; errs=$((errs+1))
+    fi
+  fi
+
+  if [ "$errs" -gt 0 ]; then
+    err "参数校验失败（$errs 项），已列出详情。修正后重试。"
+    exit 1
+  fi
+}
+# 仅在「安装/部署」场景下校验；卸载/落地/帮助场景跳过
+if [ "$UNINSTALL" = 0 ] && [ "$LANDING" = 0 ]; then
+  validate_inputs
+fi
 
 # =============================================================================
 # 卸载（apt purge 风格两级：默认保留配置/卷，--purge 彻底删除一切）
@@ -323,11 +434,14 @@ do_docker_deploy(){
   mkdir -p "$DIR" || { err "无法创建 $DIR"; exit 1; }
 
   # 随机面板密码 + URL 路径（仅首次部署生效；卷已存在时以容器内实际为准）
+  # v1.5.5: 支持 --panel-password / --panel-url-path 指定
   local PANEL_PW URL_PATH
-  PANEL_PW=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
-  URL_PATH="/$(openssl rand -hex 4)/"
+  PANEL_PW="${PANEL_PASSWORD_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
+  URL_PATH="${URL_PATH_IN:-/$(openssl rand -hex 4)/}"
 
-  # ansgo.env：凭证 + 端口（600 权限，敏感不入 git）
+  # ansgo.env：凭证 + 端口 + 用户预指定密钥（600 权限，敏感不入 git）
+  # 注：代理服务密钥（SS_KEY_IN 等）用 _IN 后缀避免与容器内同名变量冲突；
+  #     entrypoint.sh 用 ${VAR:-随机} 接收，留空则在容器内随机生成。
   cat > "$DIR/ansgo.env" <<EOF
 DOMAIN=${DOMAIN}
 EMAIL=${EMAIL}
@@ -346,6 +460,11 @@ DYNU_SECRET=${DYNU_SECRET}
 CERT_MODE=${CERT_MODE}
 CERT_FULLCHAIN=${CERT_FILE}
 CERT_PRIVKEY=${KEY_FILE}
+SS_KEY_IN=${SS_PASSWORD}
+ANYTLS_PASS_IN=${ANYTLS_PASSWORD}
+ANYTLS_UUID_IN=${ANYTLS_UUID_IN}
+NAIVE_USER_IN=${NAIVE_USER_IN}
+NAIVE_PASS_IN=${NAIVE_PASSWORD}
 EOF
   chmod 600 "$DIR/ansgo.env"
   log "已生成 $DIR/ansgo.env（含凭证，权限 600）"
@@ -630,21 +749,28 @@ fi
 
 hr "3/8 生成协议密钥 + 面板配置"
 # secrets.env（如已存在则保留，避免覆盖现网密钥）
+# v1.5.5: 支持用户通过 --ss-password / --anytls-password / --anytls-uuid
+#         / --naive-user / --naive-password 预先指定密钥；未指定的随机生成。
 if [ ! -f /etc/ansgo/secrets.env ]; then
+  # 用 ${VAR:-默认} 模式：用户值优先，留空则随机
   cat > /etc/ansgo/secrets.env <<EOF
 SS_METHOD=2022-blake3-aes-128-gcm
-SS_KEY=$(openssl rand -base64 16)
-ANYTLS_PASS=$(openssl rand -hex 16)
-ANYTLS_UUID=$(cat /proc/sys/kernel/random/uuid)
-NAIVE_USER=$(openssl rand -hex 6)
-NAIVE_PASS=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
+SS_KEY=${SS_PASSWORD:-$(openssl rand -base64 16)}
+ANYTLS_PASS=${ANYTLS_PASSWORD:-$(openssl rand -hex 16)}
+ANYTLS_UUID=${ANYTLS_UUID_IN:-$(cat /proc/sys/kernel/random/uuid)}
+NAIVE_USER=${NAIVE_USER_IN:-$(openssl rand -hex 6)}
+NAIVE_PASS=${NAIVE_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
 EOF
   log "已生成 /etc/ansgo/secrets.env"
+  # 提示哪些字段用了用户提供的值（不会打印值本身，仅提示字段名）
+  [ -n "$SS_PASSWORD$ANYTLS_PASSWORD$ANYTLS_UUID_IN$NAIVE_USER_IN$NAIVE_PASSWORD" ] && \
+    inf "  其中部分密钥由 CLI 参数指定（详见各 --xxx-password 参数）"
 else warn "/etc/ansgo/secrets.env 已存在，保留现有密钥"; fi
 chmod 600 /etc/ansgo/secrets.env
 
 # panel.json（端口/设置/域名/伪装）
-URLPATH="/$(openssl rand -hex 4)/"
+# v1.5.5: URL 路径支持 --panel-url-path 指定，否则随机
+URLPATH="${URL_PATH_IN:-/$(openssl rand -hex 4)/}"
 if [ ! -f /etc/ansgo/panel.json ]; then
   cat > /etc/ansgo/panel.json <<EOF
 {
@@ -738,7 +864,8 @@ chmod 0755 /usr/local/bin/ansgo-panel
 dl_or_exit "$RAW/ansgo-panel.service" /etc/systemd/system/ansgo-panel.service
 systemctl daemon-reload
 # 设置管理员密码（bcrypt 写入 panel.json，打印明文仅一次）
-PANEL_PW=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
+# v1.5.5: 支持 --panel-password 指定，否则随机
+PANEL_PW="${PANEL_PASSWORD_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
 /usr/local/bin/ansgo-panel -setpass "$PANEL_PW" 2>/dev/null || true
 systemctl enable ansgo-panel >/dev/null 2>&1 || true
 systemctl restart ansgo-panel && log "ansgo-panel 已启动"

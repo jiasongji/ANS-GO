@@ -39,6 +39,35 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --non-interactive
 ```
 
+<details>
+<summary>🔧 v1.5.5+：全参数 + 自定义密码示例（点击展开）</summary>
+
+需要**预先确定全部凭证**（如自动化部署、配置同步到客户端）时，可指定每个服务的端口和密码。所有密码参数都经过校验，端口自动检查冲突：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --dynu-key <API_KEY> \
+             --email you@example.com \
+             --ss-port 33899 --ss-password $(openssl rand -base64 16) \
+             --anytls-port 21111 --anytls-password MyAnyTLSPass2026 \
+             --anytls-uuid $(cat /proc/sys/kernel/random/uuid) \
+             --naive-port 44333 --naive-user myuser --naive-password MyNaivePass2026 \
+             --panel-port 15608 --panel-user admin \
+             --panel-password MyPanelPass2026 --panel-url-path /my-panel/ \
+             --non-interactive
+```
+
+**校验规则**（`validate_inputs()` 自动执行，失败即拒）：
+- 端口：1-65535 整数 + 互相不重复 + 不占用 caddy/SSH 固定端口（80 / 443 / 25822）
+- SS 密钥：base64 解码后恰好 16 字节（`openssl rand -base64 16` 生成的即是）
+- AnyTLS UUID：标准格式 `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+- Naive 用户名/密码：不含冒号和空白（caddy basic_auth 限制）
+- 面板密码：6-64 字符
+- URL 路径：`/xxxx/` 形式（首尾斜杠，中间仅字母数字 `_-`）
+
+</details>
+
 ### 方式三：中转机 — Docker 一体化一键（KVM / 资源充裕推荐）⭐
 
 单容器（`ghcr.io/jiasongji/ansgo`，all-in-one：sing-box + caddy + 面板 + systemd）内跑全套，面板代码 0 改动。**仅加 `--docker`，其余参数与裸金属完全一致**：
@@ -147,9 +176,16 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 | `--email` | admin@<域名> | ACME 注册邮箱 |
 | `--ss-port` | `23456` | Shadowsocks 端口 |
 | `--anytls-port` | `8443` | AnyTLS 端口 |
-| `--naive-port` | `443` | NaiveProxy 端口 |
+| `--naive-port` | `44333` | NaiveProxy 端口（**勿用 443**，443 是 caddy 伪装站）|
 | `--panel-port` | `15608` | 面板端口 |
 | `--panel-user` | `admin` | 面板管理员用户名 |
+| `--panel-password` | 随机 | 面板管理员密码（自定义须 6-64 字符）⭐ v1.5.5 |
+| `--panel-url-path` | 随机 `/xxxxxxxx/` | 面板 URL 路径（自定义形如 `/my-path/`）⭐ v1.5.5 |
+| `--ss-password` | 随机 | Shadowsocks 密钥（须 base64(16字节)，用 `openssl rand -base64 16` 生成）⭐ v1.5.5 |
+| `--anytls-password` | 随机 | AnyTLS 密码（非空即可）⭐ v1.5.5 |
+| `--anytls-uuid` | 随机 | AnyTLS 用户 UUID（标准格式如 `a1b2c3d4-e5f6-...`）⭐ v1.5.5 |
+| `--naive-user` | 随机 | NaiveProxy 用户名（不含冒号和空白）⭐ v1.5.5 |
+| `--naive-password` | 随机 | NaiveProxy 密码（不含冒号和空白）⭐ v1.5.5 |
 | `--disguise-panel` | `proxy:https://soft.xiaoz.org` | `:443` 直访伪装站点（`proxy:<URL>` 反代 / `page` 静态页）|
 | `--disguise-naive` | `proxy:https://soft.xiaoz.org` | Naive 端口伪装站点（同上格式）|
 | `--cert-mode` | `acme` | 证书来源：`acme`（Dynu DNS-01 自动签发，需 Dynu 凭证）/ `manual`（手动指定已有证书路径，跳过 Dynu）⭐ v1.5.0 |
@@ -209,6 +245,8 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | 
 ## ✨ 特性
 
 - **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用（不装不占端口）
+- **服务安装健壮化** ⭐ v1.5.4：修复面板「服务安装」页首次安装 SS/AnyTLS/Naive 必失败（`FileNotFoundError: '/etc/sing-box/config.json'`）。根因是 install.sh 此前从未创建 `/etc/sing-box/` 配置目录；修复后 `ansgo-genconf` 自建父目录（`os.makedirs`），install.sh 预 `mkdir` 二次保险
+- **带参数指定端口 + 密码** ⭐ v1.5.5：`install.sh` 新增 7 个参数（`--ss-password` / `--anytls-password` / `--anytls-uuid` / `--naive-user` / `--naive-password` / `--panel-password` / `--panel-url-path`），全部可选、留空随机生成（向后兼容）；新增端口范围 + 冲突校验（拦截 `--ss-port 443` 这类与 caddy 冲突的配置）
 - **服务安装健壮化** ⭐ v1.5.4：修复面板「服务安装」页首次安装 SS/AnyTLS/Naive 必失败（`FileNotFoundError: '/etc/sing-box/config.json'`）。根因是 install.sh 此前从未创建 `/etc/sing-box/` 配置目录；修复后 `ansgo-genconf` 自建父目录（`os.makedirs`），install.sh 预 `mkdir` 二次保险
 - **curl\|bash 全面兼容** ⭐ v1.5.3：所有一键命令（交互式主菜单 / 全参数部署 / 卸载 / 彻底卸载 / 落地）均可在 `curl | bash` 管道形式下正常工作（v1.5.2 及之前卸载会报 `curl: (23)`，已根治）
 - **交互式主菜单** ⭐ v1.5.3：无参数运行时显示操作选择（安装/卸载/彻底卸载/落地），不再只能部署

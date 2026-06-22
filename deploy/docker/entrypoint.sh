@@ -47,7 +47,7 @@ if [ ! -f "$CONF" ]; then
   "ss_port": ${SS_PORT:-23456},
   "ss_method": "2022-blake3-aes-128-gcm",
   "anytls_port": ${ANYTLS_PORT:-8443},
-  "naive_port": ${NAIVE_PORT:-443},
+  "naive_port": ${NAIVE_PORT:-44333},
   "disguise_panel": "${DISGUISE_PANEL:-proxy:https://soft.xiaoz.org}",
   "disguise_naive": "${DISGUISE_NAIVE:-proxy:https://soft.xiaoz.org}",
   "disguise_naive2": "${DISGUISE_NAIVE:-proxy:https://soft.xiaoz.org}",
@@ -65,13 +65,15 @@ EOF
   log "已生成 $CONF (url_path=${URLPATH})"
 
   if [ ! -f "$SECRETS" ]; then
+    # v1.5.5: 支持宿主通过 ansgo.env 透传 SS_KEY_IN/ANYTLS_PASS_IN 等预指定密钥
+    #         （install.sh 已校验格式），未指定的留空 → 容器内随机生成
     cat > "$SECRETS" <<EOF
 SS_METHOD=2022-blake3-aes-128-gcm
-SS_KEY=$(openssl rand -base64 16)
-ANYTLS_PASS=$(openssl rand -hex 16)
-ANYTLS_UUID=$(cat /proc/sys/kernel/random/uuid)
-NAIVE_USER=$(openssl rand -hex 6)
-NAIVE_PASS=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
+SS_KEY=${SS_KEY_IN:-$(openssl rand -base64 16)}
+ANYTLS_PASS=${ANYTLS_PASS_IN:-$(openssl rand -hex 16)}
+ANYTLS_UUID=${ANYTLS_UUID_IN:-$(cat /proc/sys/kernel/random/uuid)}
+NAIVE_USER=${NAIVE_USER_IN:-$(openssl rand -hex 6)}
+NAIVE_PASS=${NAIVE_PASS_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
 EOF
     chmod 600 "$SECRETS"
     log "已生成 $SECRETS"
