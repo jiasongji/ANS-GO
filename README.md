@@ -12,13 +12,13 @@
 
 三个入口：**中转机部署**（裸金属 / Docker）、**落地机部署**（独立 SS）、**交互式**。
 
-### 方式一：交互式（逐项确认，推荐首次使用）
+### 方式一：交互式（主菜单选择，推荐首次使用）
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
 ```
 
-> 依次输入：域名、Dynu 凭证（路径A API Key 或 路径B OAuth）、各端口、面板用户名、伪装站点。
+> 先显示主菜单选择操作：① 安装/部署（默认）② 卸载（保留配置/卷）③ 彻底卸载 ④ 部署落地服务器。选安装后依次输入：域名、Dynu 凭证（路径A API Key 或 路径B OAuth）、各端口、面板用户名、伪装站点。
 
 ### 方式二：中转机 — 裸金属一键（LXC / 低配 256MB 推荐）
 
@@ -184,6 +184,10 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | 
 curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | bash -s -- --uninstall --purge
 ```
 
+> 也可直接运行 `bash <(curl ...)` 进入交互式主菜单选择「卸载」或「彻底卸载」。
+>
+> ⚠️ **curl\|bash 卸载历史问题已在 v1.5.3 根治**（旧版本 `curl: (23) Failure writing output`）。根因是 curl\|bash 下脚本中途 exit 触发 SIGPIPE；v1.5.3 用 bootstrap 落地机制解耦，所有 curl\|bash 形式（卸载/部署/落地）均正常工作。
+
 <details>
 <summary>📋 两种卸载级别对比</summary>
 
@@ -205,6 +209,8 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | 
 ## ✨ 特性
 
 - **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用（不装不占端口）
+- **curl\|bash 全面兼容** ⭐ v1.5.3：所有一键命令（交互式主菜单 / 全参数部署 / 卸载 / 彻底卸载 / 落地）均可在 `curl | bash` 管道形式下正常工作（v1.5.2 及之前卸载会报 `curl: (23)`，已根治）
+- **交互式主菜单** ⭐ v1.5.3：无参数运行时显示操作选择（安装/卸载/彻底卸载/落地），不再只能部署
 - **三协议**：NaiveProxy（caddy forwardproxy-naive 分支）/ AnyTLS / Shadowsocks-2022（sing-box 双 inbound）
 - **Web 管理面板**：Go 单二进制（运行内存 ~12MB），中文 UI，管全部协议参数 / 端口 / 证书 / 自身配置 + 服务安装卸载，含客户端二维码
 - **密钥可手动设置** ⭐ v1.5.0：「密钥管理」页支持手动输入 SS / AnyTLS / Naive + 第二组任意自定义密钥（SS2022 自动校验长度），与随机生成并存

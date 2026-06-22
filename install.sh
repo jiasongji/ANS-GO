@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)
-#   交互式：bash install.sh          （逐项提问，带默认值）
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.3
+#   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
 #   卸载  ：bash install.sh --uninstall           # 移除服务/容器，保留配置/卷
@@ -16,7 +16,45 @@
 #
 # 适用于 Debian 11/12（含 LXC），需 root。
 # =============================================================================
+# ---- bootstrap：把脚本完整落地后再执行（解决 curl|bash 的 SIGPIPE 问题） ----
+# 背景：`curl ... | bash -s -- ...` 形式下 bash 从管道逐块读脚本执行。脚本中途
+#   任何 exit（do_uninstall/--landing/--help/错误退出）都会让 bash 提前结束 → 管道
+#   读端关闭 → curl 还在写剩余字节 → curl 收到 SIGPIPE → 报 (23) Failure writing
+#   output to destination，且 bash 可能未读全脚本。
+# 修复：检测是否从管道/进程替换运行；若是，把脚本全文落地到临时文件后 exec 重新执行
+#   自己。新 bash 从文件读（非管道），curl 在落地期间能完整写完正常退出，二者解耦。
+#   - `bash install.sh`（真实文件）        → BASH_SOURCE 是常规路径 → 跳过 bootstrap
+#   - `bash <(curl ...)` （进程替换）       → BASH_SOURCE=/dev/fd/NN → cat 读全量落地
+#   - `curl | bash`      （管道，无 BASH_SOURCE）→ cat 读管道剩余落地
+_ansi_self="${BASH_SOURCE[0]:-}"
+case "$_ansi_self" in
+  "" | /dev/fd/* | /proc/self/fd/*)
+    # 来自管道或进程替换：落地到临时文件后 exec 重跑（保留所有原参数）
+    _ansi_tmp="$(mktemp 2>/dev/null || mktemp -t ansgo)"
+    if [ -n "$_ansi_self" ] && [ -f "$_ansi_self" ]; then
+      cat "$_ansi_self" > "$_ansi_tmp" 2>/dev/null || cp "$_ansi_self" "$_ansi_tmp" 2>/dev/null
+    else
+      cat > "$_ansi_tmp" 2>/dev/null
+    fi
+    # 落地失败则继续从管道执行（退化为旧行为，不至于卡死）
+    if [ -s "$_ansi_tmp" ]; then
+      chmod +rx "$_ansi_tmp" 2>/dev/null
+      # 标记让新脚本退出时清理自身（避免 /tmp 残留）
+      export _ANSGO_BOOTSTRAP_TMP="$_ansi_tmp"
+      exec bash "$_ansi_tmp" "$@"
+    fi
+    rm -f "$_ansi_tmp" 2>/dev/null
+    ;;
+esac
+unset _ansi_self _ansi_tmp
+# ---- bootstrap end ----
+
 set -uo pipefail
+
+# bootstrap 落地模式：退出时清理临时文件（仅 curl|bash 形式产生，文件模式不触发）
+if [ -n "${_ANSGO_BOOTSTRAP_TMP:-}" ] && [ -f "$_ANSGO_BOOTSTRAP_TMP" ]; then
+  trap 'rm -f "$_ANSGO_BOOTSTRAP_TMP" 2>/dev/null' EXIT
+fi
 
 # curl | bash 管道形式下，bash 的 stdin(fd0) 被 curl 输出占用。若用 exec 0</dev/tty
 # 全局切走 fd0，bash 会读不到脚本剩余部分（管道还在喂脚本）→ 后续代码全部不执行。
@@ -36,7 +74,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.2"
+VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.3）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -51,7 +89,8 @@ SS_PORT=23456 ANYTLS_PORT=8443 NAIVE_PORT=443 PANEL_PORT=15608
 PANEL_USER="admin" DISGUISE_PANEL="proxy:https://example.com" DISGUISE_NAIVE="proxy:https://example.com"
 # 证书来源：acme（默认，需 Dynu 凭证）/ manual（手动指定已有证书+私钥路径，二选一）
 CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
-NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0
+NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0 LANDING=0
+LANDING_ARGS=()
 
 # ---- 颜色/日志 ----
 if [ -t 1 ]; then C_G='\033[32m';C_Y='\033[33m';C_R='\033[31m';C_B='\033[36m';C_0='\033[0m'; else C_G='';C_Y='';C_R='';C_B='';C_0=''; fi
@@ -82,9 +121,11 @@ usage(){ cat <<EOF
   --docker                 用 ghcr.io all-in-one 镜像跑（KVM；否则裸金属）
   --force-bin              强制从 Releases 重装 sing-box/caddy（已装则跳过）
   --non-interactive        不交互，缺项报错退出
+  --landing                在落地机部署独立 ss-server（剩余参数 --port N 等透传给落地脚本）
   --uninstall              卸载 ANS-GO（自动检测 Docker/裸金属；保留配置/卷）
   --purge                  与 --uninstall 同用：彻底删除配置/密钥/证书/卷/镜像
   -h, --help
+交互式运行（无参数）会显示主菜单：安装 / 卸载 / 彻底卸载 / 落地
 EOF
 }
 
@@ -108,6 +149,8 @@ while [ $# -gt 0 ]; do
     --docker) DOCKER=1; shift;;
     --force-bin) FORCE_BIN=1; shift;;
     --non-interactive) NONINT=1; shift;;
+    # --landing：剩余参数（--port N 等）透传给 ansgo-landing.sh，不在此解析
+    --landing) LANDING=1; shift; LANDING_ARGS=("$@"); break;;
     --uninstall) UNINSTALL=1; shift;;
     --purge) PURGE=1; shift;;
     -h|--help) usage; exit 0;;
@@ -222,10 +265,23 @@ do_uninstall(){
 if [ "${UNINSTALL:-0}" = 1 ]; then do_uninstall; exit 0; fi
 
 # ---- landing 子命令：在落地机一键部署 ss-server ----
-if [ "${1:-}" = "--landing" ]; then
-  . /etc/ansgo-deploy/ansgo-landing.sh 2>/dev/null || true
-  exit 0
-fi
+# 注：首次执行时 /etc/ansgo-deploy/ansgo-landing.sh 尚未下载，需先从仓库拉取
+do_landing(){
+  [ "$(id -u)" = 0 ] || { err "需 root 运行"; exit 1; }
+  mkdir -p /etc/ansgo-deploy
+  local LSCRIPT=/etc/ansgo-deploy/ansgo-landing.sh
+  if [ ! -f "$LSCRIPT" ]; then
+    log "下载 ansgo-landing.sh ..."
+    if command -v curl >/dev/null; then curl -fsSL "$RAW/ansgo-landing.sh" -o "$LSCRIPT"
+    else wget -qO "$LSCRIPT" "$RAW/ansgo-landing.sh"; fi
+    [ -s "$LSCRIPT" ] || { err "下载 ansgo-landing.sh 失败（$RAW/ansgo-landing.sh）"; exit 3; }
+    chmod 0755 "$LSCRIPT"
+  fi
+  # 透传 --landing 之后剩余的参数（--port / --non-interactive 等）
+  bash "$LSCRIPT" "${LANDING_ARGS[@]}"
+  exit $?
+}
+if [ "${LANDING:-0}" = 1 ]; then do_landing; exit 0; fi
 
 # ---- 交互收集 ----
 ask(){ # prompt default -> 读入到 ASK_VAL
@@ -335,6 +391,29 @@ EOF
 }
 
 hr "ANS-GO 一键部署"
+
+# ---- 交互式主菜单（仅在交互模式且未通过参数指定动作时显示）----
+# 设计：用户 bash <(curl ...) 无参数进入时，先让其选择 安装/卸载/彻底卸载/落地。
+#   参数式调用（--uninstall/--purge/--landing/--non-interactive 或任意部署参数）跳过菜单。
+if [ "${NONINT:-0}" = 0 ] && [ -z "${DOMAIN:-}" ] && [ -c /dev/tty ]; then
+  printf "\n请选择操作：\n"
+  printf "  1) 安装 / 部署管理面板（默认）\n"
+  printf "  2) 卸载（移除服务/容器/二进制，保留配置/卷，可重装不丢参数）\n"
+  printf "  3) 彻底卸载（删除配置/密钥/证书/卷/镜像/调优，不可恢复）\n"
+  printf "  4) 部署落地服务器（独立 ss-server，供中转机第二组接入）\n"
+  printf "请选择 [1]: " >&2
+  _choice="$(readtty)"
+  case "$_choice" in
+    2) UNINSTALL=1; PURGE=0; do_uninstall; exit 0;;
+    3) UNINSTALL=1; PURGE=1; do_uninstall; exit 0;;
+    4) LANDING=1;;
+    ""|1|*) ;;  # 继续部署流程
+  esac
+  unset _choice
+fi
+
+# 菜单选了落地（或 --landing 参数）→ 进入落地部署
+if [ "${LANDING:-0}" = 1 ]; then do_landing; exit 0; fi
 
 # ---- 环境校验 ----
 [ "$(id -u)" = 0 ] || { err "需 root 运行"; exit 1; }
