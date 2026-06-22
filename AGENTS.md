@@ -535,8 +535,9 @@ bash install.sh --uninstall --purge
 ### 资源来源（全部自有 GitHub / 官方上游）
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
 - ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/vX.Y.Z/ansgo-panel-linux-<arch>`
-- sing-box：**v1.5.3 起裸金属直接从 SagerNet 官方 release 下载**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-linux-<arch>.tar.gz`，多架构，本项目 release vendored 作为兜底）。Docker 在 `Dockerfile.allinone` 内同样从 SagerNet 拉取
-- caddy（naive 分支）：从 klzgrad/forwardproxy 源码用 xcaddy 编译。**裸金属 install.sh 优先拉本项目 release 预编译产物，失败则现场 xcaddy 编译**（需 go+git，约 1-2 分钟）；Docker 在 `Dockerfile.allinone` 内现场编译
+- sing-box：**v1.5.3 起裸金属优先从 SagerNet 官方 release 下载**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-linux-<arch>.tar.gz`，多架构），本项目 release vendored 作为兜底。Docker 在 `Dockerfile.allinone` 内同样从 SagerNet 拉取
+- caddy（naive 分支）：从 klzgrad/forwardproxy 源码用 xcaddy 编译。**裸金属 install.sh 优先拉本项目 release 预编译产物**（v1.5.2 release 已上传双架构），**失败则现场 xcaddy 编译**（自动装 Go 官方 1.22 二进制——apt 的 1.19 不支持 xcaddy 的 `toolchain` 指令；需 git，约 3-5 分钟）；Docker 在 `Dockerfile.allinone` 内现场编译
+- ⚠️ **release 资产维护**：每次发新版本 release 必须上传全部 6 个资产（`ansgo-panel-linux-{amd64,arm64}` + `caddy-naive-linux-{amd64,arm64}` + `sing-box-linux-{amd64,arm64}.tar.gz`）。v1.5.0 release 漏传 caddy/sing-box 资产导致 v1.5.1/v1.5.2 部署 404（已在 v1.5.2 release 补齐）。caddy-naive 本地交叉编译：`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 xcaddy build --with github.com/caddyserver/forwardproxy=<本地forwardproxy naive分支> --output caddy-naive-linux-amd64`
 - Docker 一体化镜像（all-in-one：sing-box + caddy + 面板 + systemd，单容器跑全套）：`ghcr.io/jiasongji/ansgo:latest`（多阶段构建，见 `deploy/Dockerfile.allinone` + `deploy/docker/entrypoint.sh`）
 - Docker 面板单镜像（仅面板，兼容用）：`ghcr.io/jiasongji/ansgo-panel:latest`（见 `deploy/Dockerfile`）
 
