@@ -56,6 +56,13 @@ RUN mkdir -p /out && SB=$(dpkg --print-architecture) \
 FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
+# OCI 标准 labels：让 ghcr.io 自动把 package 关联到源 repo
+# （关联后可在 repo Settings → Packages 改 visibility，无需 classic PAT API）
+LABEL org.opencontainers.image.source="https://github.com/jiasongji/ANS-GO" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.title="ANS-GO all-in-one" \
+      org.opencontainers.image.description="NaiveProxy + AnyTLS + Shadowsocks 三协议代理 + Go Web 管理面板（sing-box + caddy + systemd 单容器）"
+
 # systemd + 运行依赖（curl/openssl/jq/python3 供 acme.sh / ansgo-genconf / ansgo-cert-issue 用）
 RUN apt-get update && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus udev \

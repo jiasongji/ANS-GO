@@ -88,7 +88,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --non-interactive
 ```
 
-> Docker 模式自动装 docker、生成 `/etc/ansgo-docker/ansgo.env`（凭证，600 权限）+ `docker-compose.yml`、拉取/本地构建镜像并 `docker compose up -d`。需 `privileged` + host 网络（脚本已自动配置）。管理：`cd /etc/ansgo-docker && docker compose logs -f ansgo`、`docker exec ansgo ansgo-admin status`。
+> Docker 模式自动装 docker、生成 `/etc/ansgo-docker/ansgo.env`（凭证，600 权限）+ `docker-compose.yml`、`docker compose pull` 拉取公开镜像并 `docker compose up -d`。**v1.5.6+ 已发布公开镜像 `ghcr.io/jiasongji/ansgo:latest`（amd64+arm64 双架构，312MB）**，正常网络下 `docker compose pull` 直接成功，无需本地构建。需 `privileged` + host 网络（脚本已自动配置）。管理：`cd /etc/ansgo-docker && docker compose logs -f ansgo`、`docker exec ansgo ansgo-admin status`。
 
 <details>
 <summary>🔧 v1.5.6+：nginx 共存场景（已有 nginx/宝塔的服务器）</summary>

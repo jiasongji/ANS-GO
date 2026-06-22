@@ -489,7 +489,8 @@ EOF
 
   # 拉镜像；失败则 clone 仓库本地构建
   if ! docker compose pull 2>/dev/null; then
-    warn "ghcr 镜像拉取失败，尝试本地构建（需下载 sing-box/caddy，国内建议配 docker 代理）"
+    warn "ghcr 镜像拉取失败（v1.5.6+ 已发布公开镜像 ghcr.io/jiasongji/ansgo，正常不应失败；可能网络问题）"
+    warn "回退到本地构建（需从 github 下载 sing-box/caddy/Go modules，国内可能需要 docker 代理）"
     command -v git >/dev/null 2>&1 || apt-get install -y git
     rm -rf /tmp/ansgo-build
     if git clone --depth 1 https://github.com/${REPO} /tmp/ansgo-build 2>/dev/null; then
