@@ -569,29 +569,54 @@ if [ "$FORCE_BIN" = 1 ] || ! command -v sing-box >/dev/null; then
 fi
 
 # caddy-naive：klzgrad/forwardproxy 只发源码，需本项目预编译产物或现场 xcaddy 编译
-#   源1: 本项目 release 预编译产物（推荐，免编译）
-#   源2: 现场 xcaddy 编译（需 go + git，约 1-2 分钟）
+#   源1: 本项目 release 预编译产物（推荐，免编译，秒级）
+#   源2: 现场 xcaddy 编译（需 Go 1.22+ + git，约 3-5 分钟）
+#        注意：Debian 12 apt 的 golang-go 是 1.19，xcaddy@latest 的 go.mod 用了
+#        toolchain 指令（需 Go 1.21+），故必须用 Go 官方二进制，不能 apt 装。
 if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -q forwardproxy; then
   log "安装 caddy (naive 分支, arch=$AARCH)"
   if dl "$REL/$VER/caddy-naive-linux-${AARCH}" /usr/local/bin/caddy 2>/dev/null && [ -s /usr/local/bin/caddy ]; then
     chmod 0755 /usr/local/bin/caddy
     log "  → 从本项目 release 下载成功"
   else
-    # 回退：现场用 xcaddy 编译（需 go + git）
-    warn "本项目 release 无 caddy-naive 预编译产物，改用 xcaddy 现场编译（需 go + git，约 1-2 分钟）"
-    command -v go >/dev/null 2>&1 || { log "安装 golang-go ..."; apt-get update && apt-get install -y golang-go; }
-    command -v git >/dev/null 2>&1 || apt-get install -y git
+    # 回退：现场用 xcaddy 编译
+    warn "本项目 release 无 caddy-naive 预编译产物，改用 xcaddy 现场编译（约 3-5 分钟）"
+    command -v git >/dev/null 2>&1 || { apt-get update && apt-get install -y git; }
+
+    # 确保 Go 版本 >= 1.21（xcaddy go.mod 用 toolchain 指令，旧版 Go 报 unknown directive）
+    # 优先用已装的 go；版本不足或缺失则装 Go 官方二进制（apt 的 1.19 不够新）
+    GO_BIN=""
+    if command -v go >/dev/null 2>&1; then
+      # go version 输出 "go version go1.22.5 ..."，提取 minor 版本号（22）判断 >= 21
+      GO_MINOR=$(go version 2>/dev/null | grep -oE 'go[0-9]+\.[0-9]+' | head -1 | sed 's/go[0-9]*\.//')
+      [ "${GO_MINOR:-0}" -ge 21 ] 2>/dev/null && GO_BIN="$(command -v go)"
+    fi
+    if [ -z "$GO_BIN" ]; then
+      log "当前无 Go 或版本 < 1.21，安装 Go 官方二进制 ..."
+      GO_INSTALL_VER="1.22.5"
+      case "$AARCH" in amd64) GO_ARCH=amd64;; arm64) GO_ARCH=arm64;; *) GO_ARCH=amd64;; esac
+      if dl "https://go.dev/dl/go${GO_INSTALL_VER}.linux-${GO_ARCH}.tar.gz" /tmp/go.tgz; then
+        rm -rf /usr/local/go && tar xzf /tmp/go.tgz -C /usr/local
+        GO_BIN="/usr/local/go/bin/go"
+        export PATH="/usr/local/go/bin:$PATH"
+      else
+        err "Go 官方二进制下载失败，无法编译 caddy-naive。请确保 release 有预编译产物"
+        exit 3
+      fi
+    fi
+
     rm -rf /tmp/caddy-naive-build && mkdir -p /tmp/caddy-naive-build
-    if ( cd /tmp/caddy-naive-build && \
-         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest && \
+    if ( export PATH="/usr/local/go/bin:$PATH" GOPATH="${GOPATH:-/root/go}"; \
+         cd /tmp/caddy-naive-build && \
+         "$GO_BIN" install github.com/caddyserver/xcaddy/cmd/xcaddy@latest && \
          git clone -b naive --depth 1 https://github.com/klzgrad/forwardproxy.git /tmp/caddy-naive-build/fp && \
-         CGO_ENABLED=0 "$(go env GOPATH)/bin/xcaddy" build \
+         CGO_ENABLED=0 "${GOPATH:-/root/go}/bin/xcaddy" build \
            --with github.com/caddyserver/forwardproxy=/tmp/caddy-naive-build/fp \
            --output /usr/local/bin/caddy ); then
       chmod 0755 /usr/local/bin/caddy
       log "  → xcaddy 编译成功"
     else
-      err "caddy-naive 编译失败（需 go + git + 网络）。可手动编译后放到 /usr/local/bin/caddy"
+      err "caddy-naive 编译失败（需 Go 1.22+ + git + 网络）。可手动编译后放到 /usr/local/bin/caddy"
       exit 3
     fi
   fi
