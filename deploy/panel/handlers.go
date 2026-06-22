@@ -167,7 +167,7 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 
 func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
-	// v1.5.9: 服务状态 = enabled && 进程 active
+	// v1.5.10: 服务状态 = enabled && 进程 active
 	//   之前只看进程（SS 未装但 sing-box 因 AnyTLS 跑着 → SS 误显示 active）
 	//   现在：未启用的服务显示 inactive（即使载体进程在跑）
 	sbActive := svcActive("sing-box") == "active"
@@ -252,7 +252,7 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 400, "action 必须为 start/stop/restart")
 		return
 	}
-	// v1.5.9: SS/AnyTLS 共享 sing-box 进程，不能直接 stop sing-box（会同时停掉另一个）
+	// v1.5.10: SS/AnyTLS 共享 sing-box 进程，不能直接 stop sing-box（会同时停掉另一个）
 	//   新逻辑：单独停 SS/AnyTLS 时，设 enabled=false + genconf + restart sing-box
 	//   （genconf 按 enabled 字段生成 inbound，停 SS 后 sing-box config 只剩 AnyTLS）
 	//   只有当 SS+AnyTLS 都未启用时，才 stop+disable sing-box
