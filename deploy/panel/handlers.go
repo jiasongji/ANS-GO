@@ -269,7 +269,7 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// 重新生成 sing-box config（移除被停用的 inbound）
-			_ = exec.Command(binGenConf, "sing-box").CombinedOutput()
+			exec.Command(binGenConf, "sing-box").Run()
 			// 检查 sing-box 是否还有启用的 inbound
 			needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.Group2Enabled == "true"
 			if needSB {
@@ -293,7 +293,7 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 				jerr(w, 500, "保存配置失败: "+err.Error())
 				return
 			}
-			_ = exec.Command(binGenConf, "sing-box").CombinedOutput()
+			exec.Command(binGenConf, "sing-box").Run()
 			_ = exec.Command("systemctl", "enable", "sing-box").Run()
 			_ = exec.Command("systemctl", "restart", "sing-box").Run()
 			jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": "started"})
