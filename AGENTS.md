@@ -7,7 +7,7 @@
 >
 > **当前版本：v1.5.3**（install.sh 脚本版本；面板二进制仍为 v1.5.2，无功能改动）。版本历史见 GitHub Releases。
 >
-> - **v1.5.3**：根治 `curl|bash` 系列问题。**真正根因**：v1.5.1/v1.5.2 都在治 `read` 读 stdin 的症状，但真正的 bug 是 `curl | bash` 下脚本中途任何 `exit`（do_uninstall/--landing/--help/错误退出）让 bash 提前结束 → 管道读端关闭 → curl 写剩余字节时收到 **SIGPIPE** → 报 `(23) Failure writing output to destination`（用户实测 `--uninstall --purge` / `--uninstall` 均 `curl: (23)`）。修复：在脚本最开头加 **bootstrap**——检测到从管道/进程替换运行时，先把脚本全文落地到临时文件再 `exec bash $tmp "$@"` 重新执行自己，bash 从文件读（非管道），curl 能完整输出完毕，二者解耦。同时①新增**交互式主菜单**（无参数运行时显示：安装/卸载/彻底卸载/落地）②修复 `--landing` 首次执行下载 + `--port` 等参数透传。⚠️ **经验教训：`curl | bash` 下 SIGPIPE 是 `exit` 引起的，不是 `read` 引起的——必须让脚本先落地再执行，任何"脚本中途的修复"都治标不治本**
+> - **v1.5.3**：根治 `curl|bash` 系列问题。**三个根因**：① `curl: (23) Failure writing output`——v1.5.1/v1.5.2 都在治 `read` 读 stdin 的症状，但真正根因是 `curl | bash` 下脚本中途任何 `exit`（do_uninstall/--landing/--help/错误退出）让 bash 提前结束 → 管道读端关闭 → curl 写剩余字节收到 **SIGPIPE**；② **进程替换模式 `bash <(curl)` 卡死**——bootstrap 用 `[ -f /dev/fd/NN ]` 判断进程替换，但 fd 在 `-f` 测试中返回 false（非常规文件）→ 误走 `cat`（无参数）从 fd0 读 → fd0 是用户终端 → 吃掉用户输入卡死；③ **sing-box/caddy 二进制 404**——install.sh 从本项目 release 下载二进制，但 release 未上传这些资产。修复：① bootstrap 落地机制（检测管道/进程替换→落地临时文件→exec 重跑）② 进程替换判断改用 `[ -e ]`（fd 通过 `-e` 测试）+ `cat "$_ansi_self"`（从 /dev/fd/NN 读，不碰 fd0）③ sing-box 改从 **SagerNet 官方 release** 下载（与 Dockerfile/ansgo-admin 一致），caddy-naive 加 xcaddy 现场编译回退。同时①新增**交互式主菜单**（无参数运行显示：安装/卸载/彻底卸载/落地）②修复 `--landing` 首次执行下载 + `--port` 参数透传。⚠️ **经验教训：`curl | bash` 下 SIGPIPE 是 `exit` 引起的；进程替换下 `[ -f ]` 对 fd 失败必须用 `[ -e ]`；二进制下载不能依赖单一源**
 > - **v1.5.2**：（已被 v1.5.3 取代）曾用 `readtty()` 子 shell 局部 `</dev/tty` 修复 v1.5.1 回归（治对了 `read` 但没治 `exit` 的 SIGPIPE 根因）
 > - **v1.5.1**：（已被 v1.5.2 取代）曾尝试用 `exec 0</dev/tty` 修复 `curl|bash --uninstall` 确认失效，但该写法本身在管道下会截断脚本（见 v1.5.2）；文档改动（卸载命令拆分独立代码块）保留
 > - **v1.5.0**：①「密钥管理」页支持**手动设置**各服务密码（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，与随机生成并存，SS2022 自动校验密钥长度）②**手动指定证书**与私钥的完整路径（`cert_mode=manual`，与 acme 二选一；面板「证书管理」页可切换来源 + 重新加载；install.sh 新增 `--cert-mode/--cert-fullchain/--cert-privkey`）③全参数一键安装支持手动证书
@@ -535,8 +535,8 @@ bash install.sh --uninstall --purge
 ### 资源来源（全部自有 GitHub / 官方上游）
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
 - ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/vX.Y.Z/ansgo-panel-linux-<arch>`
-- sing-box：从 SagerNet 官方 release 拉取（`github.com/SagerNet/sing-box/releases`，多架构）
-- caddy（naive 分支）：从 klzgrad/forwardproxy 源码用 xcaddy 编译（裸金属由 install.sh 拉本项目预编译产物；Docker 在 `Dockerfile.allinone` 内现场编译）
+- sing-box：**v1.5.3 起裸金属直接从 SagerNet 官方 release 下载**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-linux-<arch>.tar.gz`，多架构，本项目 release vendored 作为兜底）。Docker 在 `Dockerfile.allinone` 内同样从 SagerNet 拉取
+- caddy（naive 分支）：从 klzgrad/forwardproxy 源码用 xcaddy 编译。**裸金属 install.sh 优先拉本项目 release 预编译产物，失败则现场 xcaddy 编译**（需 go+git，约 1-2 分钟）；Docker 在 `Dockerfile.allinone` 内现场编译
 - Docker 一体化镜像（all-in-one：sing-box + caddy + 面板 + systemd，单容器跑全套）：`ghcr.io/jiasongji/ansgo:latest`（多阶段构建，见 `deploy/Dockerfile.allinone` + `deploy/docker/entrypoint.sh`）
 - Docker 面板单镜像（仅面板，兼容用）：`ghcr.io/jiasongji/ansgo-panel:latest`（见 `deploy/Dockerfile`）
 

@@ -16,24 +16,30 @@
 #
 # 适用于 Debian 11/12（含 LXC），需 root。
 # =============================================================================
-# ---- bootstrap：把脚本完整落地后再执行（解决 curl|bash 的 SIGPIPE 问题） ----
-# 背景：`curl ... | bash -s -- ...` 形式下 bash 从管道逐块读脚本执行。脚本中途
-#   任何 exit（do_uninstall/--landing/--help/错误退出）都会让 bash 提前结束 → 管道
-#   读端关闭 → curl 还在写剩余字节 → curl 收到 SIGPIPE → 报 (23) Failure writing
-#   output to destination，且 bash 可能未读全脚本。
-# 修复：检测是否从管道/进程替换运行；若是，把脚本全文落地到临时文件后 exec 重新执行
-#   自己。新 bash 从文件读（非管道），curl 在落地期间能完整写完正常退出，二者解耦。
-#   - `bash install.sh`（真实文件）        → BASH_SOURCE 是常规路径 → 跳过 bootstrap
-#   - `bash <(curl ...)` （进程替换）       → BASH_SOURCE=/dev/fd/NN → cat 读全量落地
-#   - `curl | bash`      （管道，无 BASH_SOURCE）→ cat 读管道剩余落地
+# ---- bootstrap：把脚本完整落地后再执行（解决 curl|bash 的两个问题） ----
+# 问题1 SIGPIPE：`curl ... | bash -s -- ...` 形式下 bash 从管道逐块读脚本执行。
+#   脚本中途任何 exit（do_uninstall/--landing/--help/错误退出）都会让 bash 提前结束
+#   → 管道读端关闭 → curl 还在写剩余字节 → curl 收到 SIGPIPE → 报 (23)。
+# 问题2 进程替换卡死：`bash <(curl ...)` 下 BASH_SOURCE=/dev/fd/NN，脚本内容在 fd，
+#   fd0 是用户终端。若误用 cat（无参数）从 fd0 读 → 吃掉用户终端输入 → 卡死。
+# 修复：检测管道/进程替换运行 → 落地临时文件 → exec 重跑。关键：
+#   - 进程替换判断用 [ -e ]（fd 通过 -e 测试，但 [ -f ] 失败因为非常规文件）
+#   - 进程替换下 cat "$_ansi_self"（从 /dev/fd/NN 读脚本），绝不 cat 无参数（会吃终端）
+#   - 管道下（BASH_SOURCE 空）才 cat 无参数（从 fd0=管道读）
+#   - `bash install.sh`（真实文件）→ BASH_SOURCE 常规路径 → 跳过 bootstrap
 _ansi_self="${BASH_SOURCE[0]:-}"
 case "$_ansi_self" in
   "" | /dev/fd/* | /proc/self/fd/*)
     # 来自管道或进程替换：落地到临时文件后 exec 重跑（保留所有原参数）
     _ansi_tmp="$(mktemp 2>/dev/null || mktemp -t ansgo)"
-    if [ -n "$_ansi_self" ] && [ -f "$_ansi_self" ]; then
+    # 注意：进程替换下 BASH_SOURCE=/dev/fd/NN，但 [ -f ] 对 fd 返回 false（非常规文件），
+    #   必须用 [ -e ] 判断；且脚本内容在 /dev/fd/NN 里，不在 stdin(fd0=用户终端)。
+    #   管道模式下 BASH_SOURCE 为空，脚本内容在 stdin，必须 cat 从 stdin 读。
+    if [ -n "$_ansi_self" ] && [ -e "$_ansi_self" ]; then
+      # 进程替换：脚本内容在 /dev/fd/NN，cat 它（绝不能 cat 无参数从 fd0 读，那会吃用户终端输入）
       cat "$_ansi_self" > "$_ansi_tmp" 2>/dev/null || cp "$_ansi_self" "$_ansi_tmp" 2>/dev/null
     else
+      # 管道：BASH_SOURCE 为空，脚本内容在 stdin，cat 从 stdin 读
       cat > "$_ansi_tmp" 2>/dev/null
     fi
     # 落地失败则继续从管道执行（退化为旧行为，不至于卡死）
@@ -538,16 +544,57 @@ install -m 0755 /etc/ansgo-deploy/ansgo-genconf     /usr/local/bin/ansgo-genconf
 install -m 0755 /etc/ansgo-deploy/ansgo-cert-reload /usr/local/bin/ansgo-cert-reload
 
 hr "2/8 确保 sing-box / caddy(naive) 就位"
-# 从本项目 Releases 拉 vendored 二进制（sing-box 1.13.13 / caddy-naive v2.11.4）
-# 均为 CGO-free 纯静态；sing-box 官方包含 glibc 依赖，debian/ubuntu 原生支持
+# sing-box：优先 SagerNet 官方 release（与 Dockerfile.allinone / ansgo-admin 一致），
+#   回退本项目 release vendored 产物。官方格式：sing-box-<ver>-linux-<arch>.tar.gz
+SB_VER="1.13.13"
 if [ "$FORCE_BIN" = 1 ] || ! command -v sing-box >/dev/null; then
-  log "安装 sing-box (from release, arch=$AARCH)"
-  dl_or_exit "$REL/$VER/sing-box-linux-${AARCH}.tar.gz" /tmp/sb.tgz
-  tar xzf /tmp/sb.tgz -C /tmp && install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
+  log "安装 sing-box v${SB_VER} (arch=$AARCH)"
+  SB_OK=0
+  # 源1: SagerNet 官方 release（稳定，多架构）
+  if dl "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${AARCH}.tar.gz" /tmp/sb.tgz; then
+    log "  → 从 SagerNet 官方下载成功"
+    SB_OK=1
+  # 源2: 本项目 release vendored（兜底）
+  elif dl "$REL/$VER/sing-box-linux-${AARCH}.tar.gz" /tmp/sb.tgz; then
+    log "  → 从本项目 release 下载成功"
+    SB_OK=1
+  fi
+  if [ "$SB_OK" = 1 ] && tar xzf /tmp/sb.tgz -C /tmp 2>/dev/null && [ -f /tmp/sing-box-*/sing-box ]; then
+    install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
+  else
+    err "sing-box 下载失败（SagerNet 官方 + 本项目 release 均不可用）"
+    err "可手动下载后放到 /usr/local/bin/sing-box 再重跑，或检查网络/代理"
+    exit 3
+  fi
 fi
+
+# caddy-naive：klzgrad/forwardproxy 只发源码，需本项目预编译产物或现场 xcaddy 编译
+#   源1: 本项目 release 预编译产物（推荐，免编译）
+#   源2: 现场 xcaddy 编译（需 go + git，约 1-2 分钟）
 if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -q forwardproxy; then
-  log "安装 caddy (naive 分支, from release, arch=$AARCH)"
-  dl_or_exit "$REL/$VER/caddy-naive-linux-${AARCH}" /usr/local/bin/caddy && chmod 0755 /usr/local/bin/caddy
+  log "安装 caddy (naive 分支, arch=$AARCH)"
+  if dl "$REL/$VER/caddy-naive-linux-${AARCH}" /usr/local/bin/caddy 2>/dev/null && [ -s /usr/local/bin/caddy ]; then
+    chmod 0755 /usr/local/bin/caddy
+    log "  → 从本项目 release 下载成功"
+  else
+    # 回退：现场用 xcaddy 编译（需 go + git）
+    warn "本项目 release 无 caddy-naive 预编译产物，改用 xcaddy 现场编译（需 go + git，约 1-2 分钟）"
+    command -v go >/dev/null 2>&1 || { log "安装 golang-go ..."; apt-get update && apt-get install -y golang-go; }
+    command -v git >/dev/null 2>&1 || apt-get install -y git
+    rm -rf /tmp/caddy-naive-build && mkdir -p /tmp/caddy-naive-build
+    if ( cd /tmp/caddy-naive-build && \
+         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest && \
+         git clone -b naive --depth 1 https://github.com/klzgrad/forwardproxy.git /tmp/caddy-naive-build/fp && \
+         CGO_ENABLED=0 "$(go env GOPATH)/bin/xcaddy" build \
+           --with github.com/caddyserver/forwardproxy=/tmp/caddy-naive-build/fp \
+           --output /usr/local/bin/caddy ); then
+      chmod 0755 /usr/local/bin/caddy
+      log "  → xcaddy 编译成功"
+    else
+      err "caddy-naive 编译失败（需 go + git + 网络）。可手动编译后放到 /usr/local/bin/caddy"
+      exit 3
+    fi
+  fi
 fi
 
 hr "3/8 生成协议密钥 + 面板配置"
