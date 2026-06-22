@@ -5,8 +5,9 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.5.4**（install.sh 脚本版本；面板二进制仍为 v1.5.2，无功能改动）。版本历史见 GitHub Releases。
+> **当前版本：v1.5.5**（install.sh 脚本版本；面板二进制仍为 v1.5.2，无功能改动）。版本历史见 GitHub Releases。
 >
+> - **v1.5.5**：① **带参数安装支持指定端口 + 密码**——新增 7 个 CLI 参数：`--ss-password`（须 base64(16字节)）/`--anytls-password`/`--anytls-uuid`（标准 UUID）/`--naive-user`/`--naive-password`（不含冒号空白）/`--panel-password`（6-64 字符）/`--panel-url-path`（/xxxx/ 形式），全部可选，留空则随机生成（向后兼容）。裸金属 + Docker 双形态都支持（host ansgo.env 用 `SS_KEY_IN`/`ANYTLS_PASS_IN` 等 `_IN` 后缀变量透传给 entrypoint.sh，避免与容器内同名变量冲突）。② **新增 `validate_inputs()` 参数校验**——端口范围（1-65535）+ 互相冲突 + 与 caddy/SSH 固定端口（80/443/25822）冲突检测；SS2022 密钥 base64 解码长度校验；UUID 格式校验；NaiveProxy 用户名/密码字符校验；面板密码长度校验；URL 路径格式校验。校验仅对安装/部署场景生效，`--uninstall`/`--landing` 跳过。③ **顺手修 NaiveProxy 默认端口 443→44333**——项目长期存在 `install.sh`/`entrypoint.sh`/`ansgo-admin` 默认 443、但 AGENTS.md §3 明确警告「naive 不要用 443」的矛盾，本次统一为 44333（与文档/ansgo-genconf 默认一致）。⚠️ **经验教训：bash 的 `$var` 后紧跟非 ASCII 字符（如全角`）`）在 set -u 下会被当成 `var）` 变量名报 unbound，须用 `${var}` 显式界定；heredoc 里的反引号代码示例会被执行，文档示例改用单引号包裹**
 > - **v1.5.4**：修复**面板「服务安装」首次安装代理服务必失败**（`生成配置失败: FileNotFoundError: '/etc/sing-box/config.json'`）。**根因**：install.sh 装面板阶段（步骤 1-2）装了 sing-box 二进制和 systemd unit，但**从未创建 `/etc/sing-box/` 目录**；步骤 5/7 调 `ansgo-genconf all` 初始化占位配置时同样会失败，但被 `2>&1 | tail -3` 静默吞掉让部署继续走完，**问题被掩盖直到用户在面板点「安装」**才冒泡给前端（`exec.Command(genconf).CombinedOutput()` 直接把 traceback 返回给浏览器）。修复双保险：① `ansgo-genconf` 的 `gen_singbox()`/`gen_caddy()` 在 `open(...,"w")` 前 `os.makedirs(parent, exist_ok=True)` 治本（脚本自身不再依赖外部预建目录）② `install.sh` 步骤 2/8 预 `mkdir -p /etc/sing-box /etc/caddy /var/www/html` 防御（与 `Dockerfile.allinone:117` / `entrypoint.sh:31` 对齐，裸金属此前漏建）。⚠️ **经验教训：`ansgo-genconf` 这类「写配置」工具必须自建父目录，不能假定上游已建；install.sh 里 `cmd | tail` 这种吞错管道会掩盖致命错误，应在被吞的命令上加 `|| warn` 至少留诊断痕迹**
 > - **v1.5.3**：根治 `curl|bash` 系列问题。**三个根因**：① `curl: (23) Failure writing output`——v1.5.1/v1.5.2 都在治 `read` 读 stdin 的症状，但真正根因是 `curl | bash` 下脚本中途任何 `exit`（do_uninstall/--landing/--help/错误退出）让 bash 提前结束 → 管道读端关闭 → curl 写剩余字节收到 **SIGPIPE**；② **进程替换模式 `bash <(curl)` 卡死**——bootstrap 用 `[ -f /dev/fd/NN ]` 判断进程替换，但 fd 在 `-f` 测试中返回 false（非常规文件）→ 误走 `cat`（无参数）从 fd0 读 → fd0 是用户终端 → 吃掉用户输入卡死；③ **sing-box/caddy 二进制 404**——install.sh 从本项目 release 下载二进制，但 release 未上传这些资产。修复：① bootstrap 落地机制（检测管道/进程替换→落地临时文件→exec 重跑）② 进程替换判断改用 `[ -e ]`（fd 通过 `-e` 测试）+ `cat "$_ansi_self"`（从 /dev/fd/NN 读，不碰 fd0）③ sing-box 改从 **SagerNet 官方 release** 下载（与 Dockerfile/ansgo-admin 一致），caddy-naive 加 xcaddy 现场编译回退。同时①新增**交互式主菜单**（无参数运行显示：安装/卸载/彻底卸载/落地）②修复 `--landing` 首次执行下载 + `--port` 参数透传。⚠️ **经验教训：`curl | bash` 下 SIGPIPE 是 `exit` 引起的；进程替换下 `[ -f ]` 对 fd 失败必须用 `[ -e ]`；二进制下载不能依赖单一源**
 > - **v1.5.2**：（已被 v1.5.3 取代）曾用 `readtty()` 子 shell 局部 `</dev/tty` 修复 v1.5.1 回归（治对了 `read` 但没治 `exit` 的 SIGPIPE 根因）
@@ -461,6 +462,9 @@ SSH:                25822（2026-06-22 加固：原 22，已改非标端口 + �
 | Docker manual 模式证书路径未挂载 | 容器内看不到 host 路径；entrypoint.sh 会记录 `ERROR: 证书文件不存在` 日志。部署前需在 `docker-compose.yml` 的 volumes 把证书目录挂进容器，或改用 cert_dir 卷内路径 |
 | 卸载用 `curl ... \| bash -s -- --uninstall` 报 `curl: (23) Failure writing output` / 完全无输出 / 「已取消」 | **v1.5.3 根治**。三层历史问题演进：① v1.5.0 及之前「已取消」：管道下 `read` 读到 curl 输出 → `$a ≠ yes`；② v1.5.1 回归「完全无输出」：`exec 0</dev/tty` 切走 fd0；③ **v1.5.2 仍报 `curl: (23)`（本次用户实测）**：治对了 `read` 但没治根因——真正根因是 `curl \| bash` 下脚本中途任何 `exit`（do_uninstall/--landing/--help）让 bash 提前结束 → 管道读端关闭 → curl 写剩余字节收到 **SIGPIPE** → `(23)`。**v1.5.3 修复**：脚本最开头加 bootstrap，检测到管道/进程替换运行时先落地到临时文件再 `exec` 重跑，bash 从文件读，curl 能完整输出，二者解耦。已通过 PTY 端到端 + 8 项回归测试验证 |
 | 面板「服务安装」页首次安装 SS/AnyTLS/Naive 必失败，提示 `生成配置失败: ...FileNotFoundError: [Errno 2] No such file or directory: '/etc/sing-box/config.json'` | **v1.5.4 根治**。根因：install.sh 装面板阶段（步骤 1-2）装了 sing-box 二进制和 systemd unit，但**从未创建 `/etc/sing-box/` 配置目录**；步骤 5/7 调 `ansgo-genconf all` 初始化占位配置时本应同样失败，但被 `ansgo-genconf all 2>&1 \| tail -3` **静默吞掉**让部署继续走完，问题被掩盖，直到用户在面板点「安装」时才冒泡给前端（`exec.Command(genconf).CombinedOutput()` 把 traceback 直接返回浏览器）。**修复双保险**：① `ansgo-genconf` 的 `gen_singbox()`/`gen_caddy()` 在 `open(...,"w")` 前 `os.makedirs(parent, exist_ok=True)` 治本（脚本自身不再依赖外部预建目录）② `install.sh` 步骤 2/8 预 `mkdir -p /etc/sing-box /etc/caddy /var/www/html` 防御（与 `Dockerfile.allinone:117` / `entrypoint.sh:31` 对齐，裸金属此前漏建）③ 步骤 5/7 的吞错管道加 `\|\| warn` 留诊断痕迹。已通过沙盒模拟目录缺失场景验证（sing-box/caddy/all 三模式 + 幂等性 + naive 安装场景全 exit=0；对照组复现原 traceback）。**线上修复方式**：已部署的服务器只需更新 `/usr/local/bin/ansgo-genconf`（重启面板），或 SSH 手动 `mkdir -p /etc/sing-box /etc/caddy` 即可立即恢复 |
+| 端口写错导致服务起不来（如 SS 端口=443 与 caddy 冲突、端口超 65535、两个服务用同端口）| **v1.5.5 根治**。install.sh 此前对端口零校验（`--ss-port 99999` 或 `--naive-port 443` 都照单全收，部署后服务起不来才知道）。新增 `validate_inputs()` 函数：① 端口范围 1-65535 整数 ② 四个可配端口（SS/AnyTLS/Naive/Panel）互相不得重复 ③ 不得占用 caddy 固定端口（80 HTTP 跳转、443 伪装站）和 SSH 加固端口 25822。校验在参数解析后立即执行，失败直接 exit 1 列出所有错误，不进入实际部署。**仅对安装/部署场景生效**，`--uninstall`/`--landing`/`--purge` 跳过 |
+| NaiveProxy 默认端口 443 与 caddy :443 伪装站冲突 | **v1.5.5 根治**。项目长期存在矛盾：install.sh/entrypoint.sh/ansgo-admin 默认 `NAIVE_PORT=443`，但 AGENTS.md §3 明确警告「NaiveProxy 端口不要用 443，默认 44333」（443 是 caddy 纯反代伪装站）。v1.5.5 统一为 44333（与 ansgo-genconf 默认一致），影响：install.sh L94、usage 文档、entrypoint.sh L50、ansgo-admin L81。**注意：已部署服务器的 panel.json 不受影响**（仅新部署默认值改变） |
+| 手动指定 SS/AnyTLS/Naive/Panel 密码含特殊字符破坏配置 | **v1.5.5 防御**。install.sh 新增 `validate_inputs()` 对用户密码做格式校验：SS_KEY 必须 base64(16字节)（`openssl rand -base64 16` 生成）；AnyTLS UUID 须标准格式；NaiveProxy 用户名/密码不含冒号和空白（caddy basic_auth 限制）；面板密码 6-64 字符；URL 路径 `/xxxx/` 形式。secrets.env 用 heredoc 整体写入（不走 sed），避免 v1.4.x `_setsecret` 的 `\|` 分隔符陷阱 |
 
 ---
 
@@ -512,7 +516,33 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --non-interactive
 ```
 
-参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`，acme 模式必填）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--naive-port`(443) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--cert-mode`(acme|manual，默认 acme) `--cert-fullchain`(manual 模式证书完整路径) `--cert-privkey`(manual 模式私钥完整路径) `--docker` `--non-interactive` `--force-bin`。
+参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`，acme 模式必填）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--naive-port`(44333) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--cert-mode`(acme|manual，默认 acme) `--cert-fullchain`(manual 模式证书完整路径) `--cert-privkey`(manual 模式私钥完整路径) `--docker` `--non-interactive` `--force-bin`。
+>
+> **⭐ v1.5.5 新增：密码/密钥参数化（全部可选，留空则随机生成）**：
+> - `--ss-password KEY`：Shadowsocks 密钥，须 base64(16字节)，生成命令 `openssl rand -base64 16`
+> - `--anytls-password PASS`：AnyTLS 密码（非空即可）
+> - `--anytls-uuid UUID`：AnyTLS 用户 UUID，标准格式如 `a1b2c3d4-e5f6-7890-abcd-ef1234567890`
+> - `--naive-user USER`：NaiveProxy 用户名（不含冒号和空白，caddy basic_auth 限制）
+> - `--naive-password PASS`：NaiveProxy 密码（不含冒号和空白）
+> - `--panel-password PASS`：面板管理员密码（6-64 字符，默认随机）
+> - `--panel-url-path PATH`：面板 URL 路径（/xxxx/ 形式，默认随机）
+>
+> 所有参数都经过 `validate_inputs()` 校验，端口额外检查范围（1-65535）+ 互相冲突 + 与 caddy/SSH 固定端口（80/443/25822）冲突。Docker 形态通过 ansgo.env 的 `SS_KEY_IN`/`ANYTLS_PASS_IN` 等 `_IN` 后缀变量透传给容器 entrypoint.sh。
+
+**全参数 + 自定义密码示例**（v1.5.5+，适合需要预先确定全部凭证的场景）：
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --dynu-key <API_KEY> \
+             --email you@example.com \
+             --ss-port 33899 --ss-password $(openssl rand -base64 16) \
+             --anytls-port 21111 --anytls-password MyAnyTLSPass2026 \
+             --anytls-uuid $(cat /proc/sys/kernel/random/uuid) \
+             --naive-port 44333 --naive-user myuser --naive-password MyNaivePass2026 \
+             --panel-port 15608 --panel-user admin \
+             --panel-password MyPanelPass2026 --panel-url-path /my-panel/ \
+             --non-interactive
+```
 
 > **手动证书模式（与 acme 二选一）**：`--cert-mode manual --cert-fullchain /path/to/fullchain.pem --cert-privkey /path/to/privkey.pem`，无需 Dynu 凭证，跳过 acme 签发。Docker 模式需保证证书路径已挂载进容器（`docker-compose.yml` 的 volumes）。
 

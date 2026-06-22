@@ -78,7 +78,7 @@ print_uris(){
   local domain; domain="$(DOMAIN)"
   local ss_port anytls_port naive_port
   ss_port="$(_conf ss_port)"; anytls_port="$(_conf anytls_port)"; naive_port="$(_conf naive_port)"
-  python3 - "$domain" "${ss_port:-23456}" "${anytls_port:-8443}" "${naive_port:-443}" \
+  python3 - "$domain" "${ss_port:-23456}" "${anytls_port:-8443}" "${naive_port:-44333}" \
           "${SS_METHOD:-2022-blake3-aes-128-gcm}" "${SS_KEY:-}" "${ANYTLS_PASS:-}" "${NAIVE_USER:-}" "${NAIVE_PASS:-}" <<'PY'
 import sys,base64,urllib.parse
 domain,ssp,atp,nvp,method,ssk,atp_pass,nu,np=sys.argv[1:10]
