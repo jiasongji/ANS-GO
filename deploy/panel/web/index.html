@@ -160,9 +160,7 @@
         <button data-t="dash" class="active" onclick="showTab('dash')"><span class="ico">📊</span><span class="label">仪表盘</span></button>
         <button data-t="node" onclick="showTab('node')"><span class="ico">🌐</span><span class="label">节点信息</span></button>
         <button data-t="svc" onclick="showTab('svc')"><span class="ico">🎛️</span><span class="label">服务控制</span></button>
-        <button data-t="install" onclick="showTab('install')"><span class="ico">📦</span><span class="label">服务安装</span></button>
-        <button data-t="port" onclick="showTab('port')"><span class="ico">🔧</span><span class="label">端口管理</span></button>
-        <button data-t="key" onclick="showTab('key')"><span class="ico">🔑</span><span class="label">密钥管理</span></button>
+        <button data-t="mgmt" onclick="showTab('mgmt')"><span class="ico">🗂️</span><span class="label">服务管理</span></button>
         <button data-t="g2" onclick="showTab('g2')"><span class="ico">🔀</span><span class="label">第二组服务</span></button>
         <button data-t="landing" onclick="showTab('landing')"><span class="ico">🛬</span><span class="label">出口落地</span></button>
         <button data-t="cert" onclick="showTab('cert')"><span class="ico">📜</span><span class="label">证书管理</span></button>
@@ -206,7 +204,7 @@ async function doLogin(){
 async function doLogout(){await api('api/logout',{method:'POST'});location.reload()}
 function showApp(){$('#login').style.display='none';$('#app').style.display='flex'}
 function showTab(t){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.t===t));
-  ({dash:loadDash,node:loadNode,svc:loadSvc,install:loadInstall,port:loadPort,key:loadKey,g2:loadG2,landing:loadLanding,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)();
+  ({dash:loadDash,node:loadNode,svc:loadSvc,mgmt:loadMgmt,install:loadInstall,port:loadPort,key:loadKey,g2:loadG2,landing:loadLanding,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)();
   closeSidebar()  // 移动端选页后收起抽屉（桌面端 no-op）
 }
 // 侧边栏：桌面端折叠/展开（记忆），移动端开关抽屉
@@ -276,7 +274,104 @@ async function loadNode(){
   });
 }
 
-// 服务安装（面板内按需启用/停用代理服务）
+// 服务管理（合并版：安装/卸载 + 端口 + 密钥 + 启停 一站式）
+// 一次并行拉取 dashboard（状态/端口/svc_enabled）+ node（密钥/凭证），每服务渲染一张卡片。
+// 保留所有原有字段 ID（#p_ss / #k_at_pass 等），让 svcInstall/setPort/saveKey/regen 无需改动。
+async function loadMgmt(){
+  $('#content').innerHTML='<div class="mut">加载中…</div>';
+  const [d,n]=await Promise.all([api('api/dashboard'),api('api/node')]);
+  if(d.error)return $('#content').innerHTML='<div class="card">'+d.error+'</div>';
+  if(n.error)return $('#content').innerHTML='<div class="card">'+n.error+'</div>';
+  const en=d.svc_enabled||{};
+  const ports=d.ports||{};
+  const st=d.services||{};
+  const ss=n.ss||{}, at=n.anytls||{}, nv=n.naive||{};
+  const at2=n.anytls2||{}, nv2=n.naive2||{};
+  const g2=n.group2_enabled;
+  // 状态标签：未安装（灰色）/ 已安装·active（绿）/ 已安装·inactive（橙）
+  const statusTag=(enabled,active)=>{
+    if(!enabled)return '<span class="tag">未安装</span>';
+    return active==='active'
+      ?'<span class="tag" style="background:var(--ok);color:#fff">已安装·运行中</span>'
+      :'<span class="tag" style="background:var(--warn);color:#fff">已安装·未运行</span>';
+  };
+  // 启停按钮组（已安装才显示）
+  const ctrlBtns=(target,active)=>{
+    return `<button class="ok" onclick="svc('${target}','restart')">重启</button> `
+      +(active==='active'
+        ?`<button onclick="svc('${target}','stop')">停止</button>`
+        :`<button class="primary" onclick="svc('${target}','start')">启动</button>`);
+  };
+  $('#content').innerHTML=`
+   <div class="card"><h3>🗂️ 服务管理</h3>
+     <div class="help">一站式管理各代理服务：安装/卸载、端口、密钥、启停。修改端口或密钥后对应服务会自动重启（断开现有连接）。第二组（AnyTLS-2/NaiveProxy-2）在「第二组服务」页启用后下方显示。</div></div>
+
+   <div class="card">
+     <h3>🔐 Shadowsocks ${statusTag(en.ss,st.ss)}</h3>
+     <div class="row"><label>端口</label><div class="f"><input id="p_ss" type="number" value="${ports.ss||''}" placeholder="23456"></div><button class="primary" onclick="setPort('ss')">应用</button></div>
+     <div class="row"><label>加密方式</label><div class="f"><input id="k_ss_method" value="${ss.method||'2022-blake3-aes-128-gcm'}" placeholder="2022-blake3-aes-128-gcm"></div></div>
+     <div class="row"><label>SS 密钥</label><div class="f"><input id="k_ss_key" value="${ss.password||''}" placeholder="base64(16字节)密钥"></div></div>
+     <div style="margin-top:6px">
+       ${en.ss?'<button class="danger" onclick="svcInstall(\'ss\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\'ss\',\'install\')">安装</button>'}
+       ${en.ss?ctrlBtns('ss',st.ss):''}
+       <button class="mut" onclick="regen('ss')" style="margin-left:8px">🎲 随机</button>
+       <button class="primary" onclick="saveKey('ss')">💾 保存密钥</button>
+     </div>
+   </div>
+
+   <div class="card">
+     <h3>🛡️ AnyTLS ${statusTag(en.anytls,st.anytls)}</h3>
+     <div class="row"><label>端口</label><div class="f"><input id="p_anytls" type="number" value="${ports.anytls||''}" placeholder="8443"></div><button class="primary" onclick="setPort('anytls')">应用</button></div>
+     <div class="row"><label>AnyTLS 密码</label><div class="f"><input id="k_at_pass" value="${at.password||''}" placeholder="任意字符串"></div></div>
+     <div style="margin-top:6px">
+       ${en.anytls?'<button class="danger" onclick="svcInstall(\'anytls\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\'anytls\',\'install\')">安装</button>'}
+       ${en.anytls?ctrlBtns('anytls',st.anytls):''}
+       <button class="mut" onclick="regen('anytls')" style="margin-left:8px">🎲 随机</button>
+       <button class="primary" onclick="saveKey('anytls')">💾 保存密钥</button>
+     </div>
+   </div>
+
+   <div class="card">
+     <h3>🌀 NaiveProxy ${statusTag(en.naive,st.naive)}</h3>
+     <div class="row"><label>端口</label><div class="f"><input id="p_naive" type="number" value="${ports.naive||''}" placeholder="44333"></div><button class="primary" onclick="setPort('naive')">应用</button></div>
+     <div class="row"><label>Naive 用户名</label><div class="f"><input id="k_nv_user" value="${nv.user||''}" placeholder="用户名"></div></div>
+     <div class="row"><label>Naive 密码</label><div class="f"><input id="k_nv_pass" value="${nv.pass||''}" placeholder="密码"></div></div>
+     <div style="margin-top:6px">
+       ${en.naive?'<button class="danger" onclick="svcInstall(\'naive\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\'naive\',\'install\')">安装</button>'}
+       ${en.naive?ctrlBtns('naive',st.naive):''}
+       <button class="mut" onclick="regen('naive')" style="margin-left:8px">🎲 随机</button>
+       <button class="primary" onclick="saveKey('naive')">💾 保存密钥</button>
+     </div>
+   </div>
+
+   ${g2?`
+   <div class="card">
+     <h3>🔀 AnyTLS-2 <span class="tag" style="background:var(--ok);color:#fff">出口走 SS 落地</span></h3>
+     <div class="row"><label>AnyTLS-2 密码</label><div class="f"><input id="k_at2_pass" value="${at2.password||''}" placeholder="第2组未生成时可手动填"></div></div>
+     <div style="margin-top:6px">
+       <button class="mut" onclick="regen('g2')">🎲 随机全部第2组</button>
+       <button class="primary" onclick="saveKey('anytls2')">💾 保存</button>
+       <span class="mut" style="font-size:12px;margin-left:8px">端口在「第二组服务」页配置</span>
+     </div>
+   </div>
+   <div class="card">
+     <h3>🔀 NaiveProxy-2 <span class="tag" style="background:var(--ok);color:#fff">出口走 SS 落地</span></h3>
+     <div class="row"><label>Naive-2 用户名</label><div class="f"><input id="k_nv2_user" value="${nv2.user||''}" placeholder="用户名"></div></div>
+     <div class="row"><label>Naive-2 密码</label><div class="f"><input id="k_nv2_pass" value="${nv2.pass||''}" placeholder="密码"></div></div>
+     <div style="margin-top:6px">
+       <button class="primary" onclick="saveKey('naive2')">💾 保存</button>
+       <span class="mut" style="font-size:12px;margin-left:8px">用户名+密码一起保存；端口在「第二组服务」页</span>
+     </div>
+   </div>`:''}
+
+   <div class="card">
+     <h3>⚙️ 管理面板 <span class="tag" style="background:${st.panel==='active'?'var(--ok)':'var(--err)'};color:#fff">${st.panel==='active'?'运行中':'未运行'}</span></h3>
+     <div class="row"><label>面板端口</label><div class="f"><input id="p_panel" type="number" value="${ports.panel||''}" placeholder="15608"></div><button class="danger" onclick="setPort('panel')">应用并重启</button></div>
+     <div class="help" style="margin-top:8px">⚠️ 改面板端口会让当前会话断开，需用 <code>https://${d.domain}:${ports.panel}<URL路径>/</code> 新地址重新登录。</div>
+   </div>`;
+}
+
+// 服务安装（面板内按需启用/停用代理服务）—— v1.5.10 起并入「服务管理」页，本函数保留作为兼容入口
 async function loadInstall(){
   const j=await api('api/dashboard');
   if(j.error)return $('#content').innerHTML=j.error;
@@ -299,8 +394,13 @@ async function svcInstall(name,act){
   if(!confirm(`确认${verb} ${name} 服务？${act==='uninstall'?'该服务将停止，现有连接断开。':''}`))return;
   toast(`正在${verb}…`);
   const j=await api('api/svc-install',{method:'POST',body:JSON.stringify({service:name,action:act})});
-  if(j.ok){toast(`${verb}完成`);setTimeout(loadInstall,500)}
+  if(j.ok){toast(`${verb}完成`);setTimeout(reloadCurrentTab,500)}
   else toast(j.error||'操作失败');
+}
+// 刷新当前激活 tab（svcInstall/setPort/saveKey/regen 完成后无差别刷新）
+function reloadCurrentTab(){
+  const cur=document.querySelector('.nav button.active');
+  if(cur&&cur.dataset.t)showTab(cur.dataset.t);
 }
 
 // 服务控制
@@ -318,7 +418,7 @@ async function svc(t,a){
   if(!confirm(`确认${verb} ${t}？${a==='restart'||a==='stop'?'现有连接会断开。':''}`))return;
   toast('正在'+verb+'…');
   const j=await api('api/service',{method:'POST',body:JSON.stringify({target:t,action:a})});
-  if(j.ok){toast(verb+'完成');setTimeout(loadSvc,800)}
+  if(j.ok){toast(verb+'完成');setTimeout(reloadCurrentTab,800)}
   else toast(j.error||'操作失败');
 }
 
@@ -374,7 +474,7 @@ async function regen(t){
   if(!confirm(`⚠️ 确认随机重新生成 ${lbl} 的密钥？\n\n此操作会：\n• 备份当前配置\n• 生成新密钥\n• 重启该服务（断开现有连接）\n• 旧密钥立即失效`))return;
   toast('正在生成新密钥…');
   const j=await api('api/regen',{method:'POST',body:JSON.stringify({target:t})});
-  if(j.ok){toast('密钥已更新');loadKey()}
+  if(j.ok){toast('密钥已更新');reloadCurrentTab()}
   else toast(j.error||'失败');
 }
 async function saveKey(t){
@@ -388,7 +488,7 @@ async function saveKey(t){
   if(!confirm(`⚠️ 确认手动保存 ${lbl} 的密钥？\n\n保存后旧密钥立即失效，所有客户端需更新；对应服务会自动重启。`))return;
   toast('正在保存…');
   const j=await api('api/key',{method:'POST',body:JSON.stringify(body)});
-  if(j.ok){toast('密钥已保存，服务正在重启');loadKey()}
+  if(j.ok){toast('密钥已保存，服务正在重启');reloadCurrentTab()}
   else toast(j.error||'保存失败');
 }
 
