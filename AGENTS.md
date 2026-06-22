@@ -5,9 +5,10 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.5.2**。版本历史见 GitHub Releases。
+> **当前版本：v1.5.3**（install.sh 脚本版本；面板二进制仍为 v1.5.2，无功能改动）。版本历史见 GitHub Releases。
 >
-> - **v1.5.2**：紧急修复 v1.5.1 引入的回归 bug——`exec 0</dev/tty` 在脚本中途把 fd0 切走，curl|bash 下 bash 读不到脚本剩余部分 → **完全无输出**（用户实测：连 `═══ ANS-GO 卸载 ═══` 都没出现）。改为 `readtty()` 函数：仅在单次 `read` 时用子 shell 局部 `</dev/tty`，不动全局 fd0（用 PTY 端到端对照复现验证：v1.5.1 输出 0 行 vs v1.5.2 完整执行）。⚠️ **经验教训：`curl|bash` 下绝不能在脚本中途对 fd0 做 `exec`——bash 是从 fd0 逐块读脚本内容执行的**
+> - **v1.5.3**：根治 `curl|bash` 系列问题。**真正根因**：v1.5.1/v1.5.2 都在治 `read` 读 stdin 的症状，但真正的 bug 是 `curl | bash` 下脚本中途任何 `exit`（do_uninstall/--landing/--help/错误退出）让 bash 提前结束 → 管道读端关闭 → curl 写剩余字节时收到 **SIGPIPE** → 报 `(23) Failure writing output to destination`（用户实测 `--uninstall --purge` / `--uninstall` 均 `curl: (23)`）。修复：在脚本最开头加 **bootstrap**——检测到从管道/进程替换运行时，先把脚本全文落地到临时文件再 `exec bash $tmp "$@"` 重新执行自己，bash 从文件读（非管道），curl 能完整输出完毕，二者解耦。同时①新增**交互式主菜单**（无参数运行时显示：安装/卸载/彻底卸载/落地）②修复 `--landing` 首次执行下载 + `--port` 等参数透传。⚠️ **经验教训：`curl | bash` 下 SIGPIPE 是 `exit` 引起的，不是 `read` 引起的——必须让脚本先落地再执行，任何"脚本中途的修复"都治标不治本**
+> - **v1.5.2**：（已被 v1.5.3 取代）曾用 `readtty()` 子 shell 局部 `</dev/tty` 修复 v1.5.1 回归（治对了 `read` 但没治 `exit` 的 SIGPIPE 根因）
 > - **v1.5.1**：（已被 v1.5.2 取代）曾尝试用 `exec 0</dev/tty` 修复 `curl|bash --uninstall` 确认失效，但该写法本身在管道下会截断脚本（见 v1.5.2）；文档改动（卸载命令拆分独立代码块）保留
 > - **v1.5.0**：①「密钥管理」页支持**手动设置**各服务密码（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，与随机生成并存，SS2022 自动校验密钥长度）②**手动指定证书**与私钥的完整路径（`cert_mode=manual`，与 acme 二选一；面板「证书管理」页可切换来源 + 重新加载；install.sh 新增 `--cert-mode/--cert-fullchain/--cert-privkey`）③全参数一键安装支持手动证书
 > - **v1.4.3**：面板导航改左侧可折叠侧边栏（桌面可折叠 + 移动端抽屉式，localStorage 记忆）+ 修复白天模式下字体不可读（active 项改蓝底白字 / `<code>` 显式着色 / overlay 阴影双主题适配 / `.logs` 终端风格双主题统一）
@@ -457,7 +458,7 @@ SSH:                25822（2026-06-22 加固：原 22，已改非标端口 + �
 | 手动设置密钥含特殊字符破坏配置 | v1.4.x 的 `_setsecret` 用 `sed -i "s\|^...|...|"`，密钥含 `\|` 会破坏分隔符；v1.5.0 「密钥管理」页手动设置走 Go `setSecret()`（读全文→替换/追加→tmp→rename 原子写，绕开 sed），随机生成仍走 ansgo-admin（生成值无特殊字符，安全） |
 | 手动证书路径错误致三服务全起不来 | manual 模式 `cert_fullchain/cert_privkey` 指向不存在或不可读文件会让 caddy/sing-box/panel 启动失败；面板「证书来源设置」和 install.sh 在写入前都做 `os.ReadFile`/`[ -f ]` 预校验拒绝错误路径；`certPaths()` 对 manual 但路径缺失的情况安全回退 `cert_dir`（不会崩）。若已在服务器上改坏，SSH 改 `/etc/ansgo/panel.json` 的 `cert_mode` 回 `acme` 后重启 |
 | Docker manual 模式证书路径未挂载 | 容器内看不到 host 路径；entrypoint.sh 会记录 `ERROR: 证书文件不存在` 日志。部署前需在 `docker-compose.yml` 的 volumes 把证书目录挂进容器，或改用 cert_dir 卷内路径 |
-| 卸载用 `curl ... \| bash -s -- --uninstall` 提示「已取消」/ 完全无输出 | 两种历史问题：① v1.5.0 及之前，管道下 `read` 读到 curl 输出内容 → `$a ≠ yes` → 「已取消」；② **v1.5.1 回归 bug**（更严重）：`exec 0</dev/tty` 把 fd0 切走 → bash 读不到脚本剩余部分 → **完全无输出**。**v1.5.2 修复**：改用 `readtty()` 子 shell 局部 `</dev/tty`（仅单次 read 临时重定向，不动全局 fd0）。临时绕过：先 `curl -fsSL .../install.sh -o install.sh` 再 `bash install.sh --uninstall` |
+| 卸载用 `curl ... \| bash -s -- --uninstall` 报 `curl: (23) Failure writing output` / 完全无输出 / 「已取消」 | **v1.5.3 根治**。三层历史问题演进：① v1.5.0 及之前「已取消」：管道下 `read` 读到 curl 输出 → `$a ≠ yes`；② v1.5.1 回归「完全无输出」：`exec 0</dev/tty` 切走 fd0；③ **v1.5.2 仍报 `curl: (23)`（本次用户实测）**：治对了 `read` 但没治根因——真正根因是 `curl \| bash` 下脚本中途任何 `exit`（do_uninstall/--landing/--help）让 bash 提前结束 → 管道读端关闭 → curl 写剩余字节收到 **SIGPIPE** → `(23)`。**v1.5.3 修复**：脚本最开头加 bootstrap，检测到管道/进程替换运行时先落地到临时文件再 `exec` 重跑，bash 从文件读，curl 能完整输出，二者解耦。已通过 PTY 端到端 + 8 项回归测试验证 |
 
 ---
 
@@ -470,7 +471,8 @@ SSH:                25822（2026-06-22 加固：原 22，已改非标端口 + �
 ### 交互式
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
-# 依次交互输入：域名、Dynu API Key（或 OAuth Client ID+Secret）、各端口、面板用户名等
+# 先显示主菜单：1) 安装/部署  2) 卸载（保留配置/卷）  3) 彻底卸载  4) 部署落地服务器
+# 选 1 后依次交互输入：域名、Dynu API Key（或 OAuth Client ID+Secret）、各端口、面板用户名等
 ```
 
 ### 带参数一键（全参数示例）
@@ -528,7 +530,7 @@ bash install.sh --uninstall --purge
 - **默认**：停服务/删容器/删二进制与 unit，**保留** `/etc/ansgo` `/etc/ssl/ansgo` 及 docker 卷（可重装不丢参数）
 - **`--purge`**：上述全部 + 删配置/密钥/证书/acme 状态/备份/sysctl 调优/docker 卷与镜像（docker 本体保留，可能被其他服务使用）
 - 卸载前二次确认；Docker 分支用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配兑底删卷，避免 compose project 名不一致导致遗漏
-- ⚠️ `curl ... | bash -s -- --uninstall` 历史问题：v1.5.0 及之前「已取消」，v1.5.1 回归致「完全无输出」（exec 0</dev/tty 切走 fd0，bash 读不到脚本剩余部分）。**v1.5.2 起用 `readtty()` 子 shell 局部重定向修复**。临时绕过：先 `curl -fsSL .../install.sh -o install.sh` 再 `bash install.sh --uninstall`
+- ⚠️ `curl ... | bash -s -- --uninstall` 历史问题已 **v1.5.3 根治**（bootstrap 落地机制：检测管道/进程替换运行时先落地临时文件再 exec 重跑，bash 从文件读，curl 能完整输出，二者解耦；详见风险表）。所有 curl|bash 形式（`--uninstall` / `--purge` / `--landing` / `--non-interactive` 全参数部署 / 交互式主菜单）均通过 PTY + 回归测试验证
 
 ### 资源来源（全部自有 GitHub / 官方上游）
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
