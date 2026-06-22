@@ -487,24 +487,36 @@ EOF
   dl_or_exit "$RAW/docker-compose.yml" "$DIR/docker-compose.yml"
   cd "$DIR" || exit 1
 
-  # 拉镜像；失败则 clone 仓库本地构建
-  if ! docker compose pull 2>/dev/null; then
-    warn "ghcr 镜像拉取失败（v1.5.6+ 已发布公开镜像 ghcr.io/jiasongji/ansgo，正常不应失败；可能网络问题）"
-    warn "回退到本地构建（需从 github 下载 sing-box/caddy/Go modules，国内可能需要 docker 代理）"
-    command -v git >/dev/null 2>&1 || apt-get install -y git
-    rm -rf /tmp/ansgo-build
-    if git clone --depth 1 https://github.com/${REPO} /tmp/ansgo-build 2>/dev/null; then
-      # v1.5.6 修复：-f 必须用绝对路径，否则 docker 按 cwd（/etc/ansgo-docker）解析相对路径
-      docker build -t ghcr.io/${REPO%/*}/ansgo:latest \
-        -f /tmp/ansgo-build/deploy/Dockerfile.allinone /tmp/ansgo-build \
-        || { err "本地构建失败，请检查网络/代理后重跑 install.sh --docker"; exit 6; }
-    else
-      err "git clone 失败。请手动：git clone https://github.com/${REPO} && docker build -f deploy/Dockerfile.allinone ."
-      exit 5
+  # v1.5.6 修复：检测 docker compose v2（子命令）vs docker-compose v1（独立二进制）
+  #   宝塔/老 Debian 可能只有 v1（docker-compose），没有 v2（docker compose 子命令）
+  #   之前用 `docker compose pull 2>/dev/null` 吞掉 stderr，导致 v2 不存在时静默失败 → 误走本地构建
+  COMPOSE=""
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE="docker-compose"
+  else
+    err "未找到 docker compose（v2 子命令）也未找到 docker-compose（v1）。请安装 docker compose plugin 或 docker-compose。"
+    err "  Debian/Ubuntu: apt-get install docker-compose-plugin 或 curl -L https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose"
+    exit 8
+  fi
+  log "使用 compose 命令: $COMPOSE ($($COMPOSE version --short 2>/dev/null || echo unknown))"
+
+  # 拉镜像：优先 compose pull；失败再用 docker pull 兜底（绕过 compose 自身问题）
+  #   v1.5.6 已发布公开镜像 ghcr.io/jiasongji/ansgo:latest（amd64+arm64）
+  IMG="ghcr.io/${REPO%/*}/ansgo:latest"
+  if ! $COMPOSE pull 2>&1 | tail -5; then
+    warn "$COMPOSE pull 失败，尝试直接 docker pull $IMG 兜底"
+    if ! docker pull "$IMG" 2>&1 | tail -10; then
+      err "docker pull $IMG 失败（网络问题？）。可手动："
+      err "  1. docker pull $IMG（检查错误）"
+      err "  2. 或回退本地构建：git clone https://github.com/${REPO} && docker build -f deploy/Dockerfile.allinone ."
+      exit 6
     fi
+    log "docker pull 成功（绕过 compose 问题）"
   fi
 
-  docker compose up -d && log "容器已启动" || { err "docker compose up 失败"; exit 7; }
+  $COMPOSE up -d && log "容器已启动" || { err "$COMPOSE up 失败"; exit 7; }
   sleep 5
 
   # 读取容器内实际 url_path（卷已存在时可能与此处生成的不一致）
@@ -523,7 +535,7 @@ EOF
 ───────────────────────────────────────────────────
   ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 后台签发中（约 1-3 分钟），首次访问若提示不受信稍候刷新即可")
   管理命令:
-     cd ${DIR} && docker compose logs -f ansgo   # 查日志/签证书进度
+     cd ${DIR} && $COMPOSE logs -f ansgo   # 查日志/签证书进度
      docker exec ansgo ansgo-admin status         # 服务状态
      docker exec ansgo ansgo-admin info           # 节点连接参数
   下一步: 登录面板 →「服务安装」页按需开启代理服务
