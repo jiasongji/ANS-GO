@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.8
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.9
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.8）
+VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.9）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -108,7 +108,7 @@ inf(){ printf "${C_B}[i]${C_0} %s\n" "$*"; }
 warn(){ printf "${C_Y}[!]${C_0} %s\n" "$*" >&2; }
 err(){ printf "${C_R}[X]${C_0} %s\n" "$*" >&2; }
 hr(){ printf "\n${C_B}═══ %s ═══${C_0}\n" "$*"; }
-# 下载辅助（curl 优先，回退 wget）—— v1.5.8 修复：提前定义到 do_docker_deploy 之前
+# 下载辅助（curl 优先，回退 wget）—— v1.5.9 修复：提前定义到 do_docker_deploy 之前
 # 之前定义在 line 654（在 do_docker_deploy 的 line 472 调用之后才解析），
 # 导致 bash 单遍解析时 do_docker_deploy 内调用 dl_or_exit 报 command not found
 dl(){ # URL DEST
@@ -209,7 +209,7 @@ validate_inputs(){
 
   # 端口冲突校验：四个可配端口互相不得重复，且不得占用 caddy/SSH 固定端口
   #   80=caddy HTTP 跳转，443=caddy :443 伪装站，25822=SSH 加固后端口（如启用）
-  #   v1.5.8: --no-caddy 模式下 caddy 不监听 80/443，故不保留这两个端口（让用户可自由用）
+  #   v1.5.9: --no-caddy 模式下 caddy 不监听 80/443，故不保留这两个端口（让用户可自由用）
   local sys_ports="25822"
   [ "$NO_CADDY" = 0 ] && sys_ports="80 443 25822"
   local conf_ports=()
@@ -435,7 +435,7 @@ do_docker_deploy(){
   hr "Docker 一体化部署（all-in-one 容器）"
   command -v docker >/dev/null 2>&1 || { log "安装 docker ..."; curl -fsSL https://get.docker.com | sh; }
 
-  # host 网络端口冲突预警（v1.5.8: --no-caddy 模式下 80/443 不再预警，由 nginx 等接管）
+  # host 网络端口冲突预警（v1.5.9: --no-caddy 模式下 80/443 不再预警，由 nginx 等接管）
   WARN_PORTS="$PANEL_PORT"
   [ "$NO_CADDY" = 0 ] && WARN_PORTS="80 443 $PANEL_PORT"
   for p in $WARN_PORTS; do
@@ -486,9 +486,9 @@ EOF
 
   dl_or_exit "$RAW/docker-compose.yml" "$DIR/docker-compose.yml"
 
-  # v1.5.8: manual 证书模式——由 entrypoint.sh 在容器启动时把宿主证书
+  # v1.5.9: manual 证书模式——由 entrypoint.sh 在容器启动时把宿主证书
   #   bind mount 进来并同步到 /etc/ssl/ansgo/ 卷。这里不再注入 docker-compose
-  #   volumes（v1.5.8 的 bind mount 方案有 SELinux/权限问题，实测失败）。
+  #   volumes（v1.5.9 的 bind mount 方案有 SELinux/权限问题，实测失败）。
   #   新方案：install.sh 把 manual 证书路径写到 ansgo.env（CERT_FULLCHAIN/CERT_PRIVKEY），
   #   docker-compose.yml 增加只读 bind mount（下方注入），entrypoint 启动时
   #   读 CERT_FULLCHAIN，cp 到 /etc/ssl/ansgo/，genconf 用 acme 路径。
@@ -517,7 +517,7 @@ EOF
 
   cd "$DIR" || exit 1
 
-  # v1.5.8 修复：检测 docker compose v2（子命令）vs docker-compose v1（独立二进制）
+  # v1.5.9 修复：检测 docker compose v2（子命令）vs docker-compose v1（独立二进制）
   #   宝塔/老 Debian 可能只有 v1（docker-compose），没有 v2（docker compose 子命令）
   #   之前用 `docker compose pull 2>/dev/null` 吞掉 stderr，导致 v2 不存在时静默失败 → 误走本地构建
   COMPOSE=""
@@ -533,7 +533,7 @@ EOF
   log "使用 compose 命令: $COMPOSE ($($COMPOSE version --short 2>/dev/null || echo unknown))"
 
   # 拉镜像：优先 compose pull；失败再用 docker pull 兜底（绕过 compose 自身问题）
-  #   v1.5.8 已发布公开镜像 ghcr.io/jiasongji/ansgo:latest（amd64+arm64）
+  #   v1.5.9 已发布公开镜像 ghcr.io/jiasongji/ansgo:latest（amd64+arm64）
   IMG="ghcr.io/${REPO%/*}/ansgo:latest"
   if ! $COMPOSE pull 2>&1 | tail -5; then
     warn "$COMPOSE pull 失败，尝试直接 docker pull $IMG 兜底"
@@ -682,7 +682,7 @@ if [ "$NONINT" = 0 ]; then
   ask "面板管理员用户名" "$PANEL_USER"; PANEL_USER="${ASK_VAL:-$PANEL_USER}"
   ask "直访伪装 :443 (proxy:<URL> 或 page)" "$DISGUISE_PANEL"; DISGUISE_PANEL="${ASK_VAL:-$DISGUISE_PANEL}"
   ask "Naive伪装 (代理端口, proxy:<URL> 或 page)" "$DISGUISE_NAIVE"; DISGUISE_NAIVE="${ASK_VAL:-$DISGUISE_NAIVE}"
-  # v1.5.8: 检测 80/443 占用，提示是否跳过 caddy（适配已有 nginx 的服务器）
+  # v1.5.9: 检测 80/443 占用，提示是否跳过 caddy（适配已有 nginx 的服务器）
   if [ "$NO_CADDY" = 0 ] && command -v ss >/dev/null 2>&1; then
     PORT_BUSY=""
     for p in 80 443; do
@@ -719,7 +719,7 @@ if [ "$DOCKER" = 1 ]; then
   do_docker_deploy
 fi
 
-# ---- 下载助手已提前在文件顶部定义（line 112 附近，v1.5.8 修复）----
+# ---- 下载助手已提前在文件顶部定义（line 112 附近，v1.5.9 修复）----
 
 hr "1/8 下载部署脚本（本仓库 raw）"
 mkdir -p /etc/ansgo /etc/ansgo-deploy
@@ -922,7 +922,7 @@ for s in sing-box caddy; do
 done
 systemctl daemon-reload
 # caddy 启动（:443 伪装站 + :80 跳转 是域名直访体验的一部分，随面板一起起来）
-# v1.5.8: --no-caddy 模式下不启动 caddy（让现有 nginx 等 web 服务器接管 80/443）。
+# v1.5.9: --no-caddy 模式下不启动 caddy（让现有 nginx 等 web 服务器接管 80/443）。
 #   caddy 二进制和 unit 仍安装（面板后续装 naive 时可手动 enable/restart caddy 只听 naive 端口）。
 if [ "$NO_CADDY" = 1 ]; then
   log "跳过 caddy 启动（--no-caddy 模式；80/443 由现有 web 服务器接管）"
