@@ -88,11 +88,35 @@ if grep -q '"admin_pass_hash": "PLACEHOLDER"' "$CONF" 2>/dev/null && [ -n "${PAN
     || log "WARN: setpass 失败，稍后可用 docker exec ansgo ansgo-admin panel-pass 重置"
 fi
 
-# ---- 3/3 证书：manual 模式校验用户路径；acme 模式无则自签占位 ----
+# ---- 3/3 证书：manual 模式同步到 /etc/ssl/ansgo/ 卷；acme 模式无则自签占位 ----
+# v1.5.8: manual 模式不再让 sing-box/caddy 直接读宿主路径（SELinux/权限问题），
+#         改为启动时把宿主证书 cp 到 /etc/ssl/ansgo/ 卷（容器完全控制），
+#         并把 panel.json 的 cert_mode 改为 acme（让 genconf 用 /etc/ssl/ansgo/ 路径）。
+#         续期：宿主更新证书后，docker restart ansgo（重跑 entrypoint 自动同步）
 if [ "$CERT_MODE" = "manual" ]; then
-  log "证书来源：手动模式（cert=$CERT_FULLCHAIN key=$CERT_PRIVKEY）"
-  if [ ! -f "$CERT_FULLCHAIN" ]; then log "ERROR: 证书文件不存在: $CERT_FULLCHAIN（确认已挂载进容器）"; fi
-  if [ ! -f "$CERT_PRIVKEY" ]; then log "ERROR: 私钥文件不存在: $CERT_PRIVKEY（确认已挂载进容器）"; fi
+  log "证书来源：手动模式（宿主 cert=$CERT_FULLCHAIN）"
+  if [ ! -f "$CERT_FULLCHAIN" ] || [ ! -f "$CERT_PRIVKEY" ]; then
+    log "ERROR: 证书/私钥文件不存在（确认 docker-compose.yml 已 bind mount 宿主证书目录）"
+    log "  缺失: $([ ! -f "$CERT_FULLCHAIN" ] && echo "$CERT_FULLCHAIN") $([ ! -f "$CERT_PRIVKEY" ] && echo "$CERT_PRIVKEY")"
+  else
+    # 同步宿主证书到 ansgo_ssl 卷（容器完全控制，无权限问题）
+    cp -f "$CERT_FULLCHAIN" "$CERTDIR/fullchain.pem"
+    cp -f "$CERT_PRIVKEY" "$CERTDIR/privkey.pem"
+    chmod 644 "$CERTDIR/fullchain.pem" "$CERTDIR/privkey.pem"
+    log "已同步宿主证书到 $CERTDIR/（fullchain.pem + privkey.pem，644 权限）"
+    # 改 panel.json 为 acme 模式（让 genconf 用 /etc/ssl/ansgo/，不再依赖宿主路径）
+    if [ -f "$CONF" ]; then
+      python3 -c "
+import json
+p = '$CONF'
+c = json.load(open(p))
+c.pop('cert_fullchain', None)
+c.pop('cert_privkey', None)
+c['cert_mode'] = 'acme'
+json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
+" 2>/dev/null && log "panel.json 已切换为 acme 模式（用 $CERTDIR/）"
+    fi
+  fi
 else
   if [ ! -s "$CERTDIR/fullchain.pem" ] || [ ! -s "$CERTDIR/privkey.pem" ]; then
     log "生成自签占位证书（真实证书将由 acme.sh 后台签发覆盖）"
@@ -112,13 +136,14 @@ else
     printf '0.0.0.0:443 {\n  respond "ANS-GO"\n}\n:80 {\n  redir https://%s{uri} 308\n}\n' "$DOMAIN" > /etc/caddy/Caddyfile
 fi
 
-# v1.5.7: --no-caddy 模式（NO_CADDY=1 或 panel.json caddy_enable=false）
-#   禁用并 mask caddy.service，避免 systemd 拉起 caddy 监听 80/443（让 nginx 等接管）
-#   naive 装上时面板会手动 systemctl unmask + start caddy（gen_caddy 只生成 naive 块）
+# v1.5.8: --no-caddy 模式（NO_CADDY=1 或 panel.json caddy_enable=false）
+#   不 mask caddy.service（mask 会让 systemctl 无法操作，naive 装上时无法启动）
+#   改用 disable：开机不自动启动，但允许面板装 naive 时手动 systemctl start caddy
+#   caddy 启动时因 caddy_enable=false 只生成 naive 站点（不碰 80/443），与 nginx 共存
 if [ "${NO_CADDY:-0}" = 1 ] || grep -q '"caddy_enable": "false"' "$CONF" 2>/dev/null; then
-  log "--no-caddy 模式：禁用 caddy.service（不监听 80/443，让现有 web 服务器接管）"
+  log "--no-caddy 模式：caddy.service 不自动启动（naive 装上时面板会手动 start，仅听 naive 端口）"
   systemctl disable caddy.service 2>/dev/null || true
-  systemctl mask caddy.service 2>/dev/null || true
+  systemctl stop caddy.service 2>/dev/null || true
 fi
 
 # 后台签发真实证书（acme 模式且当前非 LE 且提供了 Dynu 凭证；manual 模式跳过）
