@@ -1,24 +1,24 @@
 #!/bin/sh
 # =============================================================================
-# ansgo-cert-reload —— 证书续期后按需重载三服务
+# ansgo-cert-reload —— 证书续期/替换后按需重载三服务
 #
-# 设计：仅重载「当前配置引用了 /etc/ssl/ansgo/ 证书」的服务。
-#   - 步骤3刚签发证书时，三服务仍指向自签证书，此脚本为 no-op（零中断）
-#   - 步骤4/5切换到真实证书后，caddy/sing-box 才会被 reload/restart
-#   - ansgo-panel 装好后（步骤8）才会被重启
-#   这样续期 reloadcmd 在任何阶段都能安全运行。
+# 设计：重载「配置文件存在」的服务（不再 grep 固定证书路径）。
+#   - acme.sh 模式：由 acme.sh --install-cert 的 --reloadcmd 自动调用
+#   - 手动证书模式：由面板「重新加载证书」按钮或 SSH 手动调用
+#   - 两种模式下证书都确已变更，文件存在即可 reload，无需校验路径内容
 #
-# 由 acme.sh --install-cert 的 --reloadcmd 调用；也可手动执行。
+# 注：caddy 因 Caddyfile 设了 admin off，reload 无法通信，直接 restart
+#     （续期闪断 1-2s 可接受）；sing-box 同样用 restart。
 # =============================================================================
 set -u
 
-# caddy：因 Caddyfile 设了 admin off，reload 无法通信，直接 restart（续期闪断 1-2s 可接受）
-if [ -f /etc/caddy/Caddyfile ] && grep -q '/etc/ssl/ansgo/' /etc/caddy/Caddyfile 2>/dev/null; then
+# caddy：因 admin off 用 restart
+if [ -f /etc/caddy/Caddyfile ]; then
   systemctl restart caddy 2>/dev/null || true
 fi
 
 # sing-box：restart（含 ss + anytls）
-if [ -f /etc/sing-box/config.json ] && grep -q '/etc/ssl/ansgo/' /etc/sing-box/config.json 2>/dev/null; then
+if [ -f /etc/sing-box/config.json ]; then
   systemctl restart sing-box 2>/dev/null || true
 fi
 

@@ -341,21 +341,55 @@ async function setPort(t){
   if(j.ok)toast('端口已更新');else toast(j.error||'失败');
 }
 
-// 密钥管理
-function loadKey(){
+// 密钥管理（手动设置 + 随机生成二合一）
+async function loadKey(){
+  const n=await api('api/node');
+  const g2=n.group2_enabled;
+  const ss=n.ss||{}, at=n.anytls||{}, nv=n.naive||{}, at2=n.anytls2||{}, nv2=n.naive2||{};
+  const row=(title,html)=>`<div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"><b>${title}</b></div>${html}`;
   $('#content').innerHTML=`<div class="card"><h3>🔑 密钥管理</h3>
-   <div class="help" style="margin-bottom:12px">重新生成密钥后，旧密钥立即失效，所有使用旧密钥的客户端需更新。操作前会自动备份。</div>
-   <table><tr><th>协议</th><th>操作</th></tr>
-   <tr><td>Shadowsocks</td><td><button class="danger" onclick="regen('ss')">重新生成密钥</button></td></tr>
-   <tr><td>AnyTLS</td><td><button class="danger" onclick="regen('anytls')">重新生成密码</button></td></tr>
-   <tr><td>NaiveProxy</td><td><button class="danger" onclick="regen('naive')">重新生成账号</button></td></tr></table></div>`;
+   <div class="help" style="margin-bottom:12px">支持手动输入自定义密钥，或点 🎲 随机生成。保存后旧密钥立即失效，所有客户端需更新；服务会自动重启（断开现有连接）。</div>
+   ${row('Shadowsocks',
+     `<div class="row"><label>加密方式</label><div class="f"><input id="k_ss_method" value="${n.ss?(ss.method||'2022-blake3-aes-128-gcm'):''}" placeholder="2022-blake3-aes-128-gcm"></div></div>
+      <div class="row"><label>SS 密钥</label><div class="f"><input id="k_ss_key" value="${ss.password||''}" placeholder="base64(16字节)密钥"></div></div>
+      <div style="margin-top:6px"><button class="mut" onclick="regen('ss')">🎲 随机生成</button> <button class="primary" onclick="saveKey('ss')">💾 保存</button></div>`)}
+   ${row('AnyTLS',
+     `<div class="row"><label>AnyTLS 密码</label><div class="f"><input id="k_at_pass" value="${at.password||''}" placeholder="任意字符串"></div></div>
+      <div style="margin-top:6px"><button class="mut" onclick="regen('anytls')">🎲 随机生成</button> <button class="primary" onclick="saveKey('anytls')">💾 保存</button></div>`)}
+   ${row('NaiveProxy',
+     `<div class="row"><label>Naive 用户名</label><div class="f"><input id="k_nv_user" value="${nv.user||''}" placeholder="用户名"></div></div>
+      <div class="row"><label>Naive 密码</label><div class="f"><input id="k_nv_pass" value="${nv.pass||''}" placeholder="密码"></div></div>
+      <div style="margin-top:6px"><button class="mut" onclick="regen('naive')">🎲 随机生成</button> <button class="primary" onclick="saveKey('naive')">💾 保存</button></div>`)}
+   ${row('AnyTLS-2（第2组'+(g2?'':'，未启用')+'）',
+     `<div class="row"><label>AnyTLS-2 密码</label><div class="f"><input id="k_at2_pass" value="${at2.password||''}" placeholder="第2组未生成时可手动填"></div></div>
+      <div style="margin-top:6px"><button class="mut" onclick="regen('g2')">🎲 随机生成全部第2组</button> <button class="primary" onclick="saveKey('anytls2')">💾 保存</button></div>`)}
+   ${row('NaiveProxy-2（第2组'+(g2?'':'，未启用')+'）',
+     `<div class="row"><label>Naive-2 用户名</label><div class="f"><input id="k_nv2_user" value="${nv2.user||''}" placeholder="用户名"></div></div>
+      <div class="row"><label>Naive-2 密码</label><div class="f"><input id="k_nv2_pass" value="${nv2.pass||''}" placeholder="密码"></div></div>
+      <div style="margin-top:6px"><button class="primary" onclick="saveKey('naive2')">💾 保存</button> <span class="mut" style="font-size:12px;margin-left:8px">用户名+密码一起保存</span></div>`)}
+   </div>`;
 }
 async function regen(t){
-  if(!confirm(`⚠️ 确认重新生成 ${t} 的密钥？\n\n此操作会：\n• 备份当前配置\n• 生成新密钥\n• 重启该服务（断开现有连接）\n• 旧密钥立即失效`))return;
+  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',naive:'NaiveProxy',g2:'第2组全部'}[t]||t;
+  if(!confirm(`⚠️ 确认随机重新生成 ${lbl} 的密钥？\n\n此操作会：\n• 备份当前配置\n• 生成新密钥\n• 重启该服务（断开现有连接）\n• 旧密钥立即失效`))return;
   toast('正在生成新密钥…');
   const j=await api('api/regen',{method:'POST',body:JSON.stringify({target:t})});
-  if(j.ok){toast('密钥已更新');setTimeout(()=>{showTab('node')},600)}
+  if(j.ok){toast('密钥已更新');loadKey()}
   else toast(j.error||'失败');
+}
+async function saveKey(t){
+  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',naive:'NaiveProxy',anytls2:'AnyTLS-2',naive2:'NaiveProxy-2'}[t]||t;
+  let body={target:t};
+  if(t==='ss'){body.method=$('#k_ss_method').value;body.key=$('#k_ss_key').value}
+  else if(t==='anytls'){body.pass=$('#k_at_pass').value}
+  else if(t==='naive'){body.user=$('#k_nv_user').value;body.pass=$('#k_nv_pass').value}
+  else if(t==='anytls2'){body.pass=$('#k_at2_pass').value}
+  else if(t==='naive2'){body.user=$('#k_nv2_user').value;body.pass=$('#k_nv2_pass').value}
+  if(!confirm(`⚠️ 确认手动保存 ${lbl} 的密钥？\n\n保存后旧密钥立即失效，所有客户端需更新；对应服务会自动重启。`))return;
+  toast('正在保存…');
+  const j=await api('api/key',{method:'POST',body:JSON.stringify(body)});
+  if(j.ok){toast('密钥已保存，服务正在重启');loadKey()}
+  else toast(j.error||'保存失败');
 }
 
 // 第二组服务
@@ -418,13 +452,51 @@ async function saveLanding(){
   else toast(j.error||'失败');
 }
 
-// 证书
+// 证书（来源切换 + 续期/重新加载）
 async function loadCert(){
-  const c=await api('api/cert');
+  const [c,cfg]=await Promise.all([api('api/cert'),api('api/cert/config')]);
+  const mode=cfg.mode||'acme';
+  const certRows=c.error?'':Object.entries(c).filter(([k])=>k!=='error').map(([k,v])=>`<tr><th>${{subject:'域名',issuer:'签发者',issuer_org:'签发机构',not_before:'生效',not_after:'到期',days_left:'剩余天数'}[k]||k}</th><td>${k==='days_left'?`<b style="color:${v<14?'var(--err)':'var(--ok)'}">${v} 天</b>`:v}</td></tr>`).join('');
+  const isAcme=mode==='acme';
   $('#content').innerHTML=`<div class="card"><h3>📜 证书管理</h3>
-   <table>${Object.entries(c).filter(([k])=>k!=='error').map(([k,v])=>`<tr><th>${{subject:'域名',issuer:'签发者',issuer_org:'签发机构',not_before:'生效',not_after:'到期',days_left:'剩余天数'}[k]||k}</th><td>${k==='days_left'?`<b style="color:${v<14?'var(--err)':'var(--ok)'}">${v} 天</b>`:v}</td></tr>`).join('')}</table>
-   <div style="margin-top:14px"><button class="primary" onclick="certRenew()">🔄 手动续期</button>
-   <span class="mut" style="margin-left:10px;font-size:12px">acme.sh 已配置 60 天自动续期，通常无需手动操作。</span></div></div>`;
+   <table>${certRows||'<tr><td colspan="2" style="color:var(--err)">'+(c.error||'无证书信息')+'</td></tr>'}</table>
+   <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
+   <div class="row"><label>证书来源</label><div class="f"><select id="cert_mode">
+     <option value="acme" ${isAcme?'selected':''}>acme 自动签发（Let's Encrypt + Dynu DNS-01）</option>
+     <option value="manual" ${!isAcme?'selected':''}>手动指定已有证书（自定义路径）</option>
+   </select></div></div>
+   <div id="manual_wrap" style="display:${isAcme?'none':'block'}">
+     <div class="help" style="margin:6px 0">手动模式下填写服务器上证书与私钥的<b>完整绝对路径</b>（如 <code>/etc/letsencrypt/live/example.com/fullchain.pem</code>）。面板、caddy、sing-box 都将改用这两个路径。</div>
+     <div class="row"><label>证书文件路径</label><div class="f"><input id="cert_fullchain" value="${cfg.fullchain||''}" placeholder="/绝对路径/fullchain.pem"></div></div>
+     <div class="row"><label>私钥文件路径</label><div class="f"><input id="cert_privkey" value="${cfg.privkey||''}" placeholder="/绝对路径/privkey.pem"></div></div>
+   </div>
+   <div style="margin-top:10px">
+     <button class="primary" onclick="saveCertConfig()">💾 保存来源设置</button>
+     ${isAcme
+       ?'<button class="mut" style="margin-left:8px" onclick="certRenew()">🔄 手动续期</button><span class="mut" style="margin-left:8px;font-size:12px">acme.sh 已配置 60 天自动续期。</span>'
+       :'<button class="mut" style="margin-left:8px" onclick="certReload()">🔄 重新加载证书</button><span class="mut" style="margin-left:8px;font-size:12px">手动模式：在服务器替换证书后点此重新加载三服务。</span>'}
+   </div>
+   <div class="help" style="margin-top:12px">⚠️ 切换来源或改路径会让面板自身也重启（TLS 证书变了），届时会断开需重新登录。</div></div>`;
+  $('#cert_mode').onchange=()=>{$('#manual_wrap').style.display=$('#cert_mode').value==='manual'?'block':'none'};
+}
+async function saveCertConfig(){
+  const mode=$('#cert_mode').value;
+  const body={mode};
+  if(mode==='manual'){body.fullchain=$('#cert_fullchain').value;body.privkey=$('#cert_privkey').value}
+  if(!confirm('保存证书来源设置？面板及三服务将重启，会断开连接。'))return;
+  toast('正在保存…（三服务将重启）');
+  const j=await api('api/cert/config',{method:'POST',body:JSON.stringify(body)});
+  if(j.ok&&j.new_url){showRestartOverlay(j.msg||'证书设置已保存，面板即将重启',j.new_url,j.restart_in||3);return}
+  if(j.ok)toast('已保存');
+  else toast(j.error||'保存失败');
+}
+async function certReload(){
+  if(!confirm('重新加载证书？caddy/sing-box/面板都会重启，会断开连接。'))return;
+  toast('正在重新加载…');
+  const j=await api('api/cert/reload',{method:'POST'});
+  if(j.ok&&j.new_url){showRestartOverlay(j.msg||'证书已重新加载',j.new_url,j.restart_in||3);return}
+  if(j.ok)toast('已重新加载');
+  else toast(j.error||'失败');
 }
 async function certRenew(){
   if(!confirm('手动触发证书续期？续期后三服务会自动 reload。'))return;
