@@ -188,6 +188,7 @@ def gen_singbox():
 
     # 无任何 inbound 时写一个占位配置（避免 sing-box 启动失败），
     # 但调用方应判断是否需要启动 sing-box
+    os.makedirs("/etc/sing-box", exist_ok=True)
     if not inbounds:
         with open("/etc/sing-box/config.json", "w") as f:
             json.dump({"log": {"level": "warn"}, "inbounds": [], "outbounds": outbounds}, f, indent=2)
@@ -233,6 +234,7 @@ def gen_caddy():
     # :80 重定向
     blocks.append(f":80 {{\n  redir https://{DOMAIN}{{uri}} permanent\n}}\n")
 
+    os.makedirs("/etc/caddy", exist_ok=True)
     with open("/etc/caddy/Caddyfile", "w") as f:
         f.write("\n".join(blocks))
     note = f":443 纯伪装={DISGUISE_PANEL}"

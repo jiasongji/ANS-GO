@@ -209,6 +209,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | 
 ## ✨ 特性
 
 - **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用（不装不占端口）
+- **服务安装健壮化** ⭐ v1.5.4：修复面板「服务安装」页首次安装 SS/AnyTLS/Naive 必失败（`FileNotFoundError: '/etc/sing-box/config.json'`）。根因是 install.sh 此前从未创建 `/etc/sing-box/` 配置目录；修复后 `ansgo-genconf` 自建父目录（`os.makedirs`），install.sh 预 `mkdir` 二次保险
 - **curl\|bash 全面兼容** ⭐ v1.5.3：所有一键命令（交互式主菜单 / 全参数部署 / 卸载 / 彻底卸载 / 落地）均可在 `curl | bash` 管道形式下正常工作（v1.5.2 及之前卸载会报 `curl: (23)`，已根治）
 - **交互式主菜单** ⭐ v1.5.3：无参数运行时显示操作选择（安装/卸载/彻底卸载/落地），不再只能部署
 - **三协议**：NaiveProxy（caddy forwardproxy-naive 分支）/ AnyTLS / Shadowsocks-2022（sing-box 双 inbound）

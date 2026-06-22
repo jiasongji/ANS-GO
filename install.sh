@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.3
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.4
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.3）
+VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.4）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -544,6 +544,12 @@ install -m 0755 /etc/ansgo-deploy/ansgo-genconf     /usr/local/bin/ansgo-genconf
 install -m 0755 /etc/ansgo-deploy/ansgo-cert-reload /usr/local/bin/ansgo-cert-reload
 
 hr "2/8 确保 sing-box / caddy(naive) 就位"
+# 预创建服务配置目录（与 Dockerfile.allinone / entrypoint.sh 一致）。
+# ansgo-genconf 写 /etc/sing-box/config.json 与 /etc/caddy/Caddyfile 时
+# 不会自动建父目录（早期版本），旧部署或全新机首次安装可能缺失 → 面板
+# 「服务安装」时报 FileNotFoundError。这里 mkdir 兜底，genconf 也加了
+# os.makedirs 二次保险（v1.5.4）。
+mkdir -p /etc/sing-box /etc/caddy /var/www/html
 # sing-box：优先 SagerNet 官方 release（与 Dockerfile.allinone / ansgo-admin 一致），
 #   回退本项目 release vendored 产物。官方格式：sing-box-<ver>-linux-<arch>.tar.gz
 SB_VER="1.13.13"
@@ -708,8 +714,9 @@ else
 fi
 
 hr "5/7 生成配置（代理服务默认关闭，面板内按需安装）"
-# 初始化密钥（面板安装服务时需要）
-ansgo-genconf all 2>&1 | tail -3
+# 初始化占位配置（genconf 已自建父目录，v1.5.4）。失败不阻塞部署——
+# 代理服务本就是面板内按需安装，占位配置缺失不影响面板/caddy 起来。
+ansgo-genconf all 2>&1 | tail -3 || warn "ansgo-genconf 初始化失败（不阻塞，面板内装服务时会再调）"
 
 hr "6/7 部署 systemd unit + 启动面板与伪装站"
 # sing-box / caddy 的 unit（面板安装服务时会 enable）
