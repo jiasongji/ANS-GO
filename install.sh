@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.10
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.11
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.10）
+VER="v1.5.11"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.11）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -108,7 +108,7 @@ inf(){ printf "${C_B}[i]${C_0} %s\n" "$*"; }
 warn(){ printf "${C_Y}[!]${C_0} %s\n" "$*" >&2; }
 err(){ printf "${C_R}[X]${C_0} %s\n" "$*" >&2; }
 hr(){ printf "\n${C_B}═══ %s ═══${C_0}\n" "$*"; }
-# 下载辅助（curl 优先，回退 wget）—— v1.5.10 修复：提前定义到 do_docker_deploy 之前
+# 下载辅助（curl 优先，回退 wget）—— v1.5.6 修复：提前定义到 do_docker_deploy 之前
 # 之前定义在 line 654（在 do_docker_deploy 的 line 472 调用之后才解析），
 # 导致 bash 单遍解析时 do_docker_deploy 内调用 dl_or_exit 报 command not found
 dl(){ # URL DEST

@@ -9,9 +9,11 @@
 *.tmp
 
 # ===== Go 面板编译产物 / 测试数据库 =====
+# 交叉编译临时输出目录（release asset 走 gh release，不入库）
 /deploy/panel/bv-panel
 /bv-panel
 /deploy/panel/ansgo-panel-linux-*
+/deploy/panel/out/
 *.db
 *.db-journal
 *.db-wal

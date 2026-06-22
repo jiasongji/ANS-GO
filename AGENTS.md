@@ -5,8 +5,10 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.5.9**（install.sh 脚本版本；**面板 Go 二进制升级到 v1.5.9**，含 SS/AnyTLS 状态解耦 + caddy 智能启停）。版本历史见 GitHub Releases。
+> **当前版本：v1.5.11**（install.sh 脚本版本；**面板 Go 二进制升级到 v1.5.11**，含三页合并的统一「服务管理」页）。版本历史见 GitHub Releases。
 >
+> - **v1.5.11**：**前端 UX 重构——「服务安装」「端口管理」「密钥管理」三页合并为统一「服务管理」页**（裸金属 + Docker 同步生效，纯前端改动）。① **新增 `loadMgmt()` 函数**（`index.html`）：一次并行拉取 `api/dashboard` + `api/node`，每服务渲染一张卡片——状态标签（未安装/已安装·运行中/已安装·未运行）+ 端口输入 + 密钥/凭证输入 + 安装/卸载 + 启停按钮 + 🎲随机/💾保存密钥，一站式完成原先跨三页的全部操作。② **导航精简**：删除 `install/port/key` 三个 nav button，新增 `🗂️ 服务管理`（data-t="mgmt"）；`showTab` 派发表加 `mgmt:loadMgmt`（保留 `install:loadInstall/port:loadPort/key:loadKey` 映射不破坏潜在引用，但不再有 nav 入口）。③ **`reloadCurrentTab()` 抽象**：`svcInstall/svc/regen/saveKey` 完成回调从硬编码 `loadInstall/loadSvc/loadKey` 改为 `reloadCurrentTab()`（按当前激活 tab 自动刷新），让这些操作在 mgmt 页面也能正确刷新状态/密钥。④ 保留所有原字段 ID（`#p_ss` `#k_at_pass` 等），`setPort/saveKey/regen/svcInstall` 函数签名 0 改动，后端 API 0 改动。⚠️ **经验教训：HTML 经 `//go:embed` 编译进 Go 二进制，改前端必须重新 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 出包 + stop→rm→scp→md5→start 流程（AGENTS.md §9），浏览器硬刷新清缓存；动作函数完成回调统一走「刷新当前 tab」而非硬编码本页函数，避免后续合并/拆分页面时回调链断裂**
+> - **v1.5.10**：修复 v1.5.9 的 Docker 容器重启回归——**容器重启时 naive 已装但 caddy 被停的 bug**。根因：`entrypoint.sh` 第 143 行只看 `caddy_enable=false` 就 `systemctl stop caddy`，没看 `svc_naive_enabled`。容器重启（`docker-compose up -d`）后即使 naive 已装，caddy 仍被停 → NaiveProxy inactive。修复：`--no-caddy` 模式下检查 `svc_naive_enabled`：naive 已装 → `enable + restart caddy`（仅听 naive 端口，不碰 80/443）；naive 未装 → `disable + stop caddy`（80/443 由 nginx 接管）。`handlers.go` 同步把 caddy 启用条件对齐到 `CaddyEnable=="true" || SvcNaiveEnabled=="true"`。**测试**：`docker-compose pull && docker-compose up -d` 后 naive 应自动恢复 active。
 > - **v1.5.9**：修复用户反馈的 SS/AnyTLS 状态耦合 + caddy 自启动问题。**首次自 v1.5.0 改动 Go 面板代码**（main.go + handlers.go），Docker 镜像内面板二进制已更新（裸金属用户需等下一个面板 release tag 才能用上）。① **反馈 1：SS/AnyTLS 状态显示解耦**——`dashboardHandler` 服务状态改为 `enabled && 进程active`，未启用的服务显示 inactive（不再因载体进程在跑而误报 active）。② **反馈 1：停止 SS 不停 AnyTLS**——`serviceHandler` 对 ss/anytls 单独处理：设 enabled=false + genconf + restart sing-box（genconf 按 enabled 生成 inbound，停 SS 后 config 只剩 AnyTLS），不再 systemctl stop sing-box 误伤其他服务。只有 SS+AnyTLS 都未启用时才 stop+disable sing-box。③ **反馈 3：caddy 智能启停**——`Config` struct 加 `CaddyEnable` 字段（解析 panel.json `caddy_enable`，默认 true 兼容旧部署）；`svcInstallHandler` caddy 启用条件改为 `CaddyEnable=="true" || SvcNaiveEnabled=="true"`（默认模式始终跑 :443 伪装站；--no-caddy 模式只在 naive 启用时才 enable+start caddy）。⚠️ **Go 编译坑：`exec.Command(...).CombinedOutput()` 返回 `(output, err)` 两个值，不能 `_ = ...` 赋给单值，用 `.Run()` 替代（只返回 err）**
 > - **v1.5.8**：根治 v1.5.7 `--no-caddy` + manual 证书模式部署后服务起不来的 4 个根因（实测：硅谷 VPS + 宝塔 nginx + manual 证书 + --no-caddy + --docker，部署后需要大量手动 SSH 修复才能跑通）。① **ansgo-genconf `caddy_enable=false` 加 `auto_https off`**——caddy 默认 auto_https on 会隐式监听 :80 做 ACME 挑战，--no-caddy 模式下 nginx 占着 80 → bind 失败；修复后 global block 自动加 `auto_https off`。② **install.sh manual 证书改由 entrypoint 同步**——v1.5.7 让 genconf 直接读宿主 `/www/server/...` 路径，但容器内 SELinux/权限 denied；改为 install.sh 只注入 bind mount，实际 cp 由 entrypoint 完成。③ **entrypoint.sh manual 证书启动时同步到 `/etc/ssl/ansgo/` + 改 panel.json 为 acme**——启动时 cp 宿主证书 → 卷（644 权限），清理 panel.json 的 `cert_fullchain/cert_privkey`，`cert_mode` 改 acme，让 genconf 用 `/etc/ssl/ansgo/`（容器完全控制，无权限问题）。续期只需 `docker restart ansgo`。④ **entrypoint.sh `--no-caddy` 模式 `mask` → `disable`**——v1.5.7 用 mask 让 systemctl 无法操作，naive 装上时无法 unmask 启动；改 disable + stop（不 mask），允许面板手动 start caddy。**实测验证**：部署后 caddy/sing-box/ansgo-panel 全 active，AnyTLS 21002 + NaiveProxy 21008 + 面板 10568 全部监听，nginx 继续占 80/443 无冲突。
 > - **v1.5.7**：修复 v1.5.6 `--no-caddy` + manual 证书模式部署后面板打不开的 3 个根因（实测场景：硅谷 VPS + 宝塔 nginx + manual 证书 + --no-caddy + --docker）。① **entrypoint.sh 在 --no-caddy 模式 mask caddy.service**——原问题：panel.json 写了 `caddy_enable=false`，但镜像里 caddy.service 已 enable，systemd 仍会拉起 caddy 占 443（无证书起不来导致整体 systemd 状态混乱）；修复：NO_CADDY=1 时显式 `systemctl disable + mask caddy.service`，systemd 永远拉不起。② **install.sh manual 证书模式自动注入 bind mount**——原问题：宝塔证书在宿主 `/www/server/...`，容器内看不到 → entrypoint 报「证书文件不存在」；修复：CERT_MODE=manual 时用 awk 在 docker-compose.yml 的 volumes 段追加 `- /宿主证书目录:/容器同路径:ro` 让 entrypoint 能读到（awk 跨平台，避免 macOS sed -i 与 GNU sed 语法差异）。③ **docker compose v1/v2 自动检测**——服务器装的是 `docker-compose` v1（独立二进制）而非 `docker compose` v2（子命令），原代码 `docker compose pull 2>/dev/null` 吞 stderr 误判为「拉取失败 → 本地构建」；修复：检测两个变体选可用那个，compose pull 失败再 docker pull 兜底，不吞 stderr。
@@ -237,14 +239,12 @@ https://your-domain.com:15608/<随机URL路径>/
 2. **仪表盘**：各服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时
 3. **节点信息**：各启用服务连接参数 + URI 一键复制 + 客户端二维码（启用第二组时额外显示 anytls-2/naive-2）
 4. **服务控制**：start / stop / restart（二次确认）
-5. **服务安装**：⭐ Shadowsocks / AnyTLS / NaiveProxy 独立安装/卸载（代理服务面板内按需启用）
-6. **端口管理**：各服务端口 + 面板自身端口均可改
-7. **密钥管理**：⭐ **手动输入**自定义密钥（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，SS2022 自动校验 base64(16字节) 长度）+ 🎲 随机生成（二次确认）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；随机生成走 ansgo-admin regen/regen2
-8. **第二组服务**：开关 / 端口 / Naive-2 伪装（启用后额外 anytls-2 + naive-2，走 SS 落地）
-9. **出口落地**：落地服务器 SS 配置（host/port/method/password + 开关），含密钥长度校验
-10. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
-11. **面板设置**：URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 两个伪装站点
-12. **日志查看**：tail 最近 N 行
+5. **服务管理** ⭐（v1.5.11 起由「服务安装」+「端口管理」+「密钥管理」三页合并）：每服务一张卡片，一站式完成：① 状态标签（未安装/已安装·运行中/已安装·未运行）② Shadowsocks/AnyTLS/NaiveProxy 独立安装/卸载 ③ 各服务端口 + 面板端口均可改 ④ 手动输入自定义密钥（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，SS2022 自动校验 base64(16字节) 长度）+ 🎲 随机生成 ⑤ 启停按钮（start/stop/restart）。第二组（AnyTLS-2/Naive-2）在本页底部当 group2 启用时显示（端口仍走「第二组服务」页配置）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；随机生成走 ansgo-admin regen/regen2
+6. **第二组服务**：开关 / 端口 / Naive-2 伪装（启用后额外 anytls-2 + naive-2，走 SS 落地）
+7. **出口落地**：落地服务器 SS 配置（host/port/method/password + 开关），含密钥长度校验
+8. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
+9. **面板设置**：URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 两个伪装站点
+10. **日志查看**：tail 最近 N 行
 
 ### 6.5 面板端口"可改"的技术机制（重要，必须诚实告知用户）
 面板端口写在 `config.json`，Go 二进制启动时读取。Web 改端口的流程：
@@ -474,6 +474,7 @@ SSH:                25822（2026-06-22 加固：原 22，已改非标端口 + �
 | Docker `--no-caddy` 模式部署后 caddy 仍占 443 / 面板打不开 | **v1.5.7 根治**。根因：v1.5.6 加了 `caddy_enable=false` 字段，但镜像里 `caddy.service` 已 `systemctl enable`，容器内 systemd 启动时无视 panel.json 仍拉起 caddy → caddy 占 443 又因无证书起不来 → 整体 systemd 状态混乱 → ansgo-panel 也受影响。修复：entrypoint.sh 在 NO_CADDY=1 时显式 `systemctl disable + mask caddy.service`，让 systemd 永远拉不起 caddy（naive 装上后面板手动 unmask + start） |
 | Docker manual 证书模式 `ERROR: 证书文件不存在` | **v1.5.7 根治**。根因：宝塔/已有证书在宿主 `/www/server/...`，docker volume 只挂了 `/etc/ssl/ansgo`（命名卷），容器内看不到宿主证书路径。修复：install.sh 在 CERT_MODE=manual 时用 awk 在 docker-compose.yml 的 volumes 段自动追加 `- /宿主证书目录:/容器同路径:ro` bind mount（去重；awk 跨平台避免 macOS sed -i 与 GNU sed 语法差异） |
 | Docker 部署 `docker compose pull` 失败但 `docker pull` 手动成功 | **v1.5.7 根治**。根因：服务器装的是 `docker-compose` v1（独立二进制）而非 `docker compose` v2（子命令），原代码 `docker compose pull 2>/dev/null` 吞掉「'compose' is not a docker command」错误 → 误判失败 → 走本地构建 → 本地构建又失败。修复：检测 `docker compose version` / `command -v docker-compose` 自动选用可用那个（COMPOSE 变量）；compose pull 失败用 `docker pull` 直拉兜底；不吞 stderr（用 `tail -N` 保留诊断） |
+| 合并/拆分菜单页后操作回调不刷新数据 | **v1.5.11 抽象**。原先 `svcInstall/svc/regen/saveKey` 完成后硬编码 `setTimeout(loadInstall/loadSvc/loadKey, ...)` 回调，一旦操作按钮被搬到别的页面（v1.5.11 合三为一为「服务管理」），原回调刷新的还是旧独立页而不是当前页 → 用户点了「安装」但当前页状态不更新。修复：新增 `reloadCurrentTab()`（按 `.nav button.active` 的 `data-t` 派发对应 `loadXxx`），所有动作函数完成回调统一走它，避免后续合并/拆分页面时回调链断裂 |
 
 ---
 
