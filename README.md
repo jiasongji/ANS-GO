@@ -90,6 +90,36 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 > Docker 模式自动装 docker、生成 `/etc/ansgo-docker/ansgo.env`（凭证，600 权限）+ `docker-compose.yml`、拉取/本地构建镜像并 `docker compose up -d`。需 `privileged` + host 网络（脚本已自动配置）。管理：`cd /etc/ansgo-docker && docker compose logs -f ansgo`、`docker exec ansgo ansgo-admin status`。
 
+<details>
+<summary>🔧 v1.5.6+：nginx 共存场景（已有 nginx/宝塔的服务器）</summary>
+
+服务器上已装 nginx（或宝塔 BT panel）占用了 80/443？加 `--no-caddy` 让 ANS-GO 不部署 caddy 的 80/443 站点，nginx 继续接管 web，ANS-GO 面板/代理按各自端口跑。配合 `--cert-mode manual` 直接用宝塔签发的 Let's Encrypt 证书：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --domain svc.giize.com \
+             --cert-mode manual \
+             --cert-fullchain /www/server/panel/vhost/cert/svc.giize.com/fullchain.pem \
+             --cert-privkey  /www/server/panel/vhost/cert/svc.giize.com/privkey.pem \
+             --anytls-port 21002 \
+             --naive-port 21008 \
+             --panel-port 10568 \
+             --panel-user ad_admin \
+             --no-caddy \
+             --non-interactive \
+             --docker
+```
+
+**行为差异**：
+- caddy 不启动（不下载二进制/不 enable；裸金属下 caddy 二进制+unit 仍装好，面板装 naive 时可手动 enable）
+- `ansgo-genconf gen_caddy()` 因 `caddy_enable=false` 跳过 `:443`/`:80` 块，只生成 naive 站点（如启用）
+- 端口校验：`--no-caddy` 时 80/443 不再视为保留端口（用户可自由用）
+- 交互式模式：检测到 80/443 占用时主动提示「是否跳过 caddy？」
+
+**nginx 反代到面板（可选）**：在 nginx 配置里加 `proxy_pass https://127.0.0.1:10568;` 即可让 nginx 代理面板访问。
+
+</details>
+
 ### 方式四：落地机 — 独立 Shadowsocks（第二组出口用）
 
 在**另一台服务器**部署独立 ss-server，供中转机第二组服务（anytls-2 / naive-2）经 SS 接入（中转→落地架构）：
@@ -192,6 +222,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 | `--cert-fullchain` | — | manual 模式：证书文件完整绝对路径（如 `/etc/letsencrypt/live/x.com/fullchain.pem`）⭐ v1.5.0 |
 | `--cert-privkey` | — | manual 模式：私钥文件完整绝对路径 ⭐ v1.5.0 |
 | `--docker` | 关 | Docker 一体化形态（KVM 用；否则裸金属）|
+| `--no-caddy` | 关 | 不部署 caddy 的 80/443 站点，让已装 nginx/宝塔等 web 服务器接管（v1.5.6+；naive 仍可装但只听 naive 端口）|
 | `--non-interactive` | 关 | 非交互模式，缺必填项报错退出（CI / 自动化）|
 | `--force-bin` | 关 | 强制重装 sing-box/caddy 二进制（已装则跳过）|
 | `--landing` | — | 子命令：落地机部署独立 SS（仅 `--port` / `--non-interactive` 有效）|
@@ -246,6 +277,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | 
 
 - **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用（不装不占端口）
 - **服务安装健壮化** ⭐ v1.5.4：修复面板「服务安装」页首次安装 SS/AnyTLS/Naive 必失败（`FileNotFoundError: '/etc/sing-box/config.json'`）。根因是 install.sh 此前从未创建 `/etc/sing-box/` 配置目录；修复后 `ansgo-genconf` 自建父目录（`os.makedirs`），install.sh 预 `mkdir` 二次保险
+- **nginx 共存模式** ⭐ v1.5.6：`--no-caddy` 让 caddy 不监听 80/443，已装 nginx/宝塔的服务器可共存。ANS-GO 面板/SS/AnyTLS/Naive 按各自端口跑，nginx 继续接管 web。配合 `--cert-mode manual` 可直接用宝塔签发的证书
 - **带参数指定端口 + 密码** ⭐ v1.5.5：`install.sh` 新增 7 个参数（`--ss-password` / `--anytls-password` / `--anytls-uuid` / `--naive-user` / `--naive-password` / `--panel-password` / `--panel-url-path`），全部可选、留空随机生成（向后兼容）；新增端口范围 + 冲突校验（拦截 `--ss-port 443` 这类与 caddy 冲突的配置）
 - **服务安装健壮化** ⭐ v1.5.4：修复面板「服务安装」页首次安装 SS/AnyTLS/Naive 必失败（`FileNotFoundError: '/etc/sing-box/config.json'`）。根因是 install.sh 此前从未创建 `/etc/sing-box/` 配置目录；修复后 `ansgo-genconf` 自建父目录（`os.makedirs`），install.sh 预 `mkdir` 二次保险
 - **curl\|bash 全面兼容** ⭐ v1.5.3：所有一键命令（交互式主菜单 / 全参数部署 / 卸载 / 彻底卸载 / 落地）均可在 `curl | bash` 管道形式下正常工作（v1.5.2 及之前卸载会报 `curl: (23)`，已根治）

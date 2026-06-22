@@ -54,6 +54,7 @@ if [ ! -f "$CONF" ]; then
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
   "svc_naive_enabled": "false",
+  "caddy_enable": "$([ "${NO_CADDY:-0}" = 1 ] && echo false || echo true)",
   "cert_mode": "${CERT_MODE}",
   "cert_dir": "/etc/ssl/ansgo",
   "cert_fullchain": "${CERT_FULLCHAIN}",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.5
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.6
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.5）
+VER="v1.5.2"          # 面板二进制 release tag（install.sh 脚本本体 v1.5.6）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -98,7 +98,7 @@ CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
 # 各服务密码/密钥（v1.5.5 新增；留空则部署时自动随机生成）
 SS_PASSWORD="" ANYTLS_PASSWORD="" ANYTLS_UUID_IN="" NAIVE_USER_IN="" NAIVE_PASSWORD=""
 PANEL_PASSWORD_IN="" URL_PATH_IN=""
-NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0 LANDING=0
+NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0 LANDING=0 NO_CADDY=0
 LANDING_ARGS=()
 
 # ---- 颜色/日志 ----
@@ -108,6 +108,14 @@ inf(){ printf "${C_B}[i]${C_0} %s\n" "$*"; }
 warn(){ printf "${C_Y}[!]${C_0} %s\n" "$*" >&2; }
 err(){ printf "${C_R}[X]${C_0} %s\n" "$*" >&2; }
 hr(){ printf "\n${C_B}═══ %s ═══${C_0}\n" "$*"; }
+# 下载辅助（curl 优先，回退 wget）—— v1.5.6 修复：提前定义到 do_docker_deploy 之前
+# 之前定义在 line 654（在 do_docker_deploy 的 line 472 调用之后才解析），
+# 导致 bash 单遍解析时 do_docker_deploy 内调用 dl_or_exit 报 command not found
+dl(){ # URL DEST
+  if command -v curl >/dev/null; then curl -fsSL "$1" -o "$2"
+  else wget -qO "$2" "$1"; fi
+}
+dl_or_exit(){ dl "$1" "$2" || { err "下载失败: $1"; exit 3; }; }
 
 # ---- 参数解析 ----
 usage(){ cat <<EOF
@@ -135,6 +143,7 @@ usage(){ cat <<EOF
   --cert-fullchain PATH    manual 模式：证书文件完整绝对路径（如 /etc/letsencrypt/live/x.com/fullchain.pem）
   --cert-privkey PATH      manual 模式：私钥文件完整绝对路径（如 /etc/letsencrypt/live/x.com/privkey.pem）
   --docker                 用 ghcr.io all-in-one 镜像跑（KVM；否则裸金属）
+  --no-caddy               不部署 caddy 的 :80/:443 站点（让已装的 nginx/其它 web 服务器接管；naive 仍可装但只听 naive 端口）
   --force-bin              强制从 Releases 重装 sing-box/caddy（已装则跳过）
   --non-interactive        不交互，缺项报错退出
   --landing                在落地机部署独立 ss-server（剩余参数 --port N 等透传给落地脚本）
@@ -170,6 +179,7 @@ while [ $# -gt 0 ]; do
     --cert-fullchain) CERT_FILE="$2"; shift 2;;
     --cert-privkey) KEY_FILE="$2"; shift 2;;
     --docker) DOCKER=1; shift;;
+    --no-caddy) NO_CADDY=1; shift;;
     --force-bin) FORCE_BIN=1; shift;;
     --non-interactive) NONINT=1; shift;;
     # --landing：剩余参数（--port N 等）透传给 ansgo-landing.sh，不在此解析
@@ -199,7 +209,9 @@ validate_inputs(){
 
   # 端口冲突校验：四个可配端口互相不得重复，且不得占用 caddy/SSH 固定端口
   #   80=caddy HTTP 跳转，443=caddy :443 伪装站，25822=SSH 加固后端口（如启用）
-  local sys_ports="80 443 25822"
+  #   v1.5.6: --no-caddy 模式下 caddy 不监听 80/443，故不保留这两个端口（让用户可自由用）
+  local sys_ports="25822"
+  [ "$NO_CADDY" = 0 ] && sys_ports="80 443 25822"
   local conf_ports=()
   for p in SS_PORT ANYTLS_PORT NAIVE_PORT PANEL_PORT; do
     port="${!p:-}"; [ -n "$port" ] || continue
@@ -423,8 +435,10 @@ do_docker_deploy(){
   hr "Docker 一体化部署（all-in-one 容器）"
   command -v docker >/dev/null 2>&1 || { log "安装 docker ..."; curl -fsSL https://get.docker.com | sh; }
 
-  # host 网络端口冲突预警
-  for p in 80 443 "$PANEL_PORT"; do
+  # host 网络端口冲突预警（v1.5.6: --no-caddy 模式下 80/443 不再预警，由 nginx 等接管）
+  WARN_PORTS="$PANEL_PORT"
+  [ "$NO_CADDY" = 0 ] && WARN_PORTS="80 443 $PANEL_PORT"
+  for p in $WARN_PORTS; do
     if command -v ss >/dev/null && ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ":$p$"; then
       warn "端口 $p 已被占用，host 网络下容器可能启动失败，请先停掉占用进程"
     fi
@@ -465,6 +479,7 @@ ANYTLS_PASS_IN=${ANYTLS_PASSWORD}
 ANYTLS_UUID_IN=${ANYTLS_UUID_IN}
 NAIVE_USER_IN=${NAIVE_USER_IN}
 NAIVE_PASS_IN=${NAIVE_PASSWORD}
+NO_CADDY=${NO_CADDY}
 EOF
   chmod 600 "$DIR/ansgo.env"
   log "已生成 $DIR/ansgo.env（含凭证，权限 600）"
@@ -478,7 +493,9 @@ EOF
     command -v git >/dev/null 2>&1 || apt-get install -y git
     rm -rf /tmp/ansgo-build
     if git clone --depth 1 https://github.com/${REPO} /tmp/ansgo-build 2>/dev/null; then
-      docker build -t ghcr.io/${REPO%/*}/ansgo:latest -f deploy/Dockerfile.allinone /tmp/ansgo-build \
+      # v1.5.6 修复：-f 必须用绝对路径，否则 docker 按 cwd（/etc/ansgo-docker）解析相对路径
+      docker build -t ghcr.io/${REPO%/*}/ansgo:latest \
+        -f /tmp/ansgo-build/deploy/Dockerfile.allinone /tmp/ansgo-build \
         || { err "本地构建失败，请检查网络/代理后重跑 install.sh --docker"; exit 6; }
     else
       err "git clone 失败。请手动：git clone https://github.com/${REPO} && docker build -f deploy/Dockerfile.allinone ."
@@ -622,6 +639,18 @@ if [ "$NONINT" = 0 ]; then
   ask "面板管理员用户名" "$PANEL_USER"; PANEL_USER="${ASK_VAL:-$PANEL_USER}"
   ask "直访伪装 :443 (proxy:<URL> 或 page)" "$DISGUISE_PANEL"; DISGUISE_PANEL="${ASK_VAL:-$DISGUISE_PANEL}"
   ask "Naive伪装 (代理端口, proxy:<URL> 或 page)" "$DISGUISE_NAIVE"; DISGUISE_NAIVE="${ASK_VAL:-$DISGUISE_NAIVE}"
+  # v1.5.6: 检测 80/443 占用，提示是否跳过 caddy（适配已有 nginx 的服务器）
+  if [ "$NO_CADDY" = 0 ] && command -v ss >/dev/null 2>&1; then
+    PORT_BUSY=""
+    for p in 80 443; do
+      ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ":$p$" && PORT_BUSY="$PORT_BUSY $p"
+    done
+    if [ -n "$PORT_BUSY" ]; then
+      warn "检测到端口$PORT_BUSY 已被占用（可能已有 nginx/Caddy/宝塔等 web 服务器）"
+      ask "是否跳过 caddy 部署让现有 web 服务器接管 80/443？(y/n)" "y"
+      [ "${ASK_VAL:-y}" = "y" ] && NO_CADDY=1
+    fi
+  fi
 fi
 echo "----------------------------------------"
 printf "  域名        : %s\n" "$DOMAIN"
@@ -634,6 +663,7 @@ else
   printf "  证书来源    : acme（Dynu %s）\n" "${DYNU_KEY:+路径A(API Key)}${DYNU_KEY:-${DYNU_CID:+路径B(OAuth)}}"
 fi
 printf "  面板模式    : %s\n" "$([ "$DOCKER" = 1 ] && echo Docker || echo 裸金属)"
+[ "$NO_CADDY" = 1 ] && printf "  caddy       : 跳过（--no-caddy，不监听 80/443，让现有 web 服务器接管）\n"
 echo "----------------------------------------"
 if [ "$NONINT" = 0 ]; then
   printf "确认开始部署？[Y/n] " >&2
@@ -646,12 +676,7 @@ if [ "$DOCKER" = 1 ]; then
   do_docker_deploy
 fi
 
-# ---- 下载助手（优先 curl）----
-dl(){ # URL DEST
-  if command -v curl >/dev/null; then curl -fsSL "$1" -o "$2"
-  else wget -qO "$2" "$1"; fi
-}
-dl_or_exit(){ dl "$1" "$2" || { err "下载失败: $1"; exit 3; }; }
+# ---- 下载助手已提前在文件顶部定义（line 112 附近，v1.5.6 修复）----
 
 hr "1/8 下载部署脚本（本仓库 raw）"
 mkdir -p /etc/ansgo /etc/ansgo-deploy
@@ -792,6 +817,7 @@ if [ ! -f /etc/ansgo/panel.json ]; then
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
   "svc_naive_enabled": "false",
+  "caddy_enable": "$([ "$NO_CADDY" = 1 ] && echo false || echo true)",
   "cert_mode": "${CERT_MODE}",
   "cert_dir": "/etc/ssl/ansgo",
   "cert_fullchain": "${CERT_FILE}",
@@ -853,8 +879,14 @@ for s in sing-box caddy; do
 done
 systemctl daemon-reload
 # caddy 启动（:443 伪装站 + :80 跳转 是域名直访体验的一部分，随面板一起起来）
-systemctl enable caddy >/dev/null 2>&1 || true
-systemctl restart caddy && log "caddy 已启动（:443 伪装站）"
+# v1.5.6: --no-caddy 模式下不启动 caddy（让现有 nginx 等 web 服务器接管 80/443）。
+#   caddy 二进制和 unit 仍安装（面板后续装 naive 时可手动 enable/restart caddy 只听 naive 端口）。
+if [ "$NO_CADDY" = 1 ]; then
+  log "跳过 caddy 启动（--no-caddy 模式；80/443 由现有 web 服务器接管）"
+else
+  systemctl enable caddy >/dev/null 2>&1 || true
+  systemctl restart caddy && log "caddy 已启动（:443 伪装站）"
+fi
 # sing-box 暂不启动（无代理服务安装前不需要）
 
 hr "7/7 部署 Web 管理面板"
