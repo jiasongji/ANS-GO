@@ -34,14 +34,31 @@
   .login-err{color:var(--err);font-size:12px;margin-top:8px;min-height:16px;text-align:center}
   .forgot{margin-top:14px;font-size:12px;color:var(--mut);text-align:center}
   .forgot code{background:var(--card2);padding:2px 6px;border-radius:4px;color:var(--warn)}
-  /* app layout */
-  #app{display:none;min-height:100vh}
-  .topbar{background:var(--card);border-bottom:1px solid var(--bd);padding:10px 18px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+  /* app layout: topbar + (sidebar + content) */
+  #app{display:none;flex-direction:column;min-height:100vh}
+  .topbar{background:var(--card);border-bottom:1px solid var(--bd);padding:10px 18px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:30;flex-shrink:0}
+  .topbar-left{display:flex;align-items:center;gap:10px}
   .topbar .brand{font-weight:600;font-size:15px}
-  .nav{display:flex;gap:4px;flex-wrap:wrap;padding:10px 18px 0;background:var(--card);border-bottom:1px solid var(--bd)}
-  .nav button{background:transparent;border-radius:6px 6px 0 0;padding:8px 14px;color:var(--mut)}
-  .nav button.active{background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-bottom:1px solid var(--bg)}
-  .content{padding:18px;max-width:1100px;margin:0 auto}
+  .menu-btn{display:none;background:transparent;font-size:18px;padding:6px 9px;line-height:1}
+  .main-wrap{display:flex;flex:1;min-height:0}
+  .sidebar{width:200px;background:var(--card);border-right:1px solid var(--bd);flex-shrink:0;display:flex;flex-direction:column;padding:8px 0 12px;overflow:hidden hidden;transition:width .2s ease}
+  .sidebar.collapsed{width:58px}
+  .collapse-btn{margin:0 10px 8px;background:transparent;color:var(--mut);padding:7px;border-radius:6px;text-align:center;font-size:13px}
+  .collapse-btn:hover{background:var(--hover);color:var(--txt)}
+  .nav{display:flex;flex-direction:column;gap:2px;padding:0 8px;overflow-y:auto;overflow-x:hidden;flex:1}
+  .nav button{display:flex;align-items:center;gap:10px;background:transparent;border:none;border-radius:6px;padding:9px 12px;color:var(--mut);text-align:left;width:100%;font-size:13px;transition:.15s}
+  .nav button:hover{background:var(--hover);color:var(--txt)}
+  .nav button .ico{font-size:15px;flex-shrink:0;width:22px;text-align:center;line-height:1}
+  .nav button .label{flex:1;white-space:nowrap;overflow:hidden}
+  .nav button.active{background:var(--acc);color:#fff}
+  .nav button.active:hover{background:var(--acc);color:#fff;opacity:.92}
+  .sidebar.collapsed .nav button{justify-content:center;padding:9px 0}
+  .sidebar.collapsed .nav button .label,.sidebar.collapsed .collapse-btn .lbl{display:none}
+  .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:25}
+  .content{flex:1;padding:18px;overflow:auto;max-width:1100px;margin:0 auto;width:100%}
+  /* 滚动条美化（侧边栏长导航） */
+  .nav::-webkit-scrollbar{width:6px}
+  .nav::-webkit-scrollbar-thumb{background:var(--bd);border-radius:3px}
   .grid{display:grid;gap:12px}
   .grid.g4{grid-template-columns:repeat(4,1fr)}
   .grid.g3{grid-template-columns:repeat(3,1fr)}
@@ -64,21 +81,31 @@
   .node-card .info{flex:1;min-width:240px}
   .node-card .qr{width:150px;text-align:center}
   .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--bd);padding:10px 18px;border-radius:8px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,.4);display:none}
-  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:200}
-  .overlay .box{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:30px;text-align:center;max-width:420px}
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:200}
+  .overlay .box{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:30px;text-align:center;max-width:420px;box-shadow:0 12px 40px rgba(0,0,0,.3)}
   .overlay .box h2{margin-bottom:10px}
   .overlay .count{font-size:48px;font-weight:700;color:var(--acc);margin:14px 0}
   .help{font-size:11px;color:var(--mut);margin-top:6px}
   .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--card2);color:var(--mut)}
-  .logs{background:#0a0e12;border:1px solid var(--bd);border-radius:6px;padding:10px;font-family:monospace;font-size:11px;max-height:480px;overflow:auto;white-space:pre-wrap;color:#9fb3c8}
+  code{color:var(--txt);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  /* 日志区：始终深底浅字（日志终端风格，双主题统一） */
+  .logs{background:#0a0e12;border:1px solid var(--bd);border-radius:6px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;max-height:480px;overflow:auto;white-space:pre-wrap;color:#9fb3c8}
   /* ===== 响应式（必须置于所有基础规则之后，否则同特异性会被后面的基础规则覆盖） ===== */
   @media(max-width:760px){
     html,body{-webkit-text-size-adjust:100%}
     .topbar{padding:8px 12px;flex-wrap:wrap;gap:6px}
     .topbar .brand{font-size:14px}
+    .menu-btn{display:inline-block}
+    .main-wrap{position:relative}
+    /* 移动端：侧边栏变抽屉，默认收起 */
+    .sidebar{position:fixed;top:0;left:0;bottom:0;width:220px;z-index:40;transform:translateX(-100%);transition:transform .22s ease;box-shadow:2px 0 12px rgba(0,0,0,.3)}
+    .sidebar.open{transform:translateX(0)}
+    .sidebar.collapsed{width:220px}
+    .sidebar.collapsed .nav button .label,.sidebar.collapsed .collapse-btn .lbl{display:inline}
+    .sidebar.collapsed .nav button{justify-content:flex-start;padding:9px 12px}
+    .sidebar-overlay.show{display:block}
+    .collapse-btn{display:none}
     .content{padding:12px 10px;max-width:100%}
-    .nav{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:8px 10px 0;scrollbar-width:thin}
-    .nav button{flex-shrink:0;white-space:nowrap;padding:8px 12px}
     .row{flex-wrap:wrap}
     .row label{flex:1 0 100%;margin-bottom:4px}
     .row>button{margin-top:6px}
@@ -120,23 +147,32 @@
 <!-- 应用 -->
 <div id="app">
   <div class="topbar">
-    <div class="brand">⚡ ANS-GO 管理面板</div>
+    <div class="topbar-left">
+      <button class="menu-btn" onclick="toggleSidebar()" title="菜单">☰</button>
+      <div class="brand">⚡ ANS-GO 管理面板</div>
+    </div>
     <div><span class="mut" id="topuser"></span> <button id="themeBtn" onclick="toggleTheme()" title="切换主题">🌙</button> <button onclick="doLogout()">退出</button></div>
   </div>
-  <div class="nav" id="nav">
-    <button data-t="dash" class="active" onclick="showTab('dash')">仪表盘</button>
-    <button data-t="node" onclick="showTab('node')">节点信息</button>
-    <button data-t="svc" onclick="showTab('svc')">服务控制</button>
-    <button data-t="install" onclick="showTab('install')">服务安装</button>
-    <button data-t="port" onclick="showTab('port')">端口管理</button>
-    <button data-t="key" onclick="showTab('key')">密钥管理</button>
-    <button data-t="g2" onclick="showTab('g2')">第二组服务</button>
-    <button data-t="landing" onclick="showTab('landing')">出口落地</button>
-    <button data-t="cert" onclick="showTab('cert')">证书管理</button>
-    <button data-t="set" onclick="showTab('set')">面板设置</button>
-    <button data-t="log" onclick="showTab('log')">日志</button>
+  <div class="main-wrap">
+    <aside class="sidebar" id="sidebar">
+      <button class="collapse-btn" onclick="toggleCollapse()" title="折叠/展开"><span id="collapseIco">◀</span> <span class="lbl" id="collapseLbl">折叠</span></button>
+      <nav class="nav" id="nav">
+        <button data-t="dash" class="active" onclick="showTab('dash')"><span class="ico">📊</span><span class="label">仪表盘</span></button>
+        <button data-t="node" onclick="showTab('node')"><span class="ico">🌐</span><span class="label">节点信息</span></button>
+        <button data-t="svc" onclick="showTab('svc')"><span class="ico">🎛️</span><span class="label">服务控制</span></button>
+        <button data-t="install" onclick="showTab('install')"><span class="ico">📦</span><span class="label">服务安装</span></button>
+        <button data-t="port" onclick="showTab('port')"><span class="ico">🔧</span><span class="label">端口管理</span></button>
+        <button data-t="key" onclick="showTab('key')"><span class="ico">🔑</span><span class="label">密钥管理</span></button>
+        <button data-t="g2" onclick="showTab('g2')"><span class="ico">🔀</span><span class="label">第二组服务</span></button>
+        <button data-t="landing" onclick="showTab('landing')"><span class="ico">🛬</span><span class="label">出口落地</span></button>
+        <button data-t="cert" onclick="showTab('cert')"><span class="ico">📜</span><span class="label">证书管理</span></button>
+        <button data-t="set" onclick="showTab('set')"><span class="ico">⚙️</span><span class="label">面板设置</span></button>
+        <button data-t="log" onclick="showTab('log')"><span class="ico">📃</span><span class="label">日志</span></button>
+      </nav>
+    </aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+    <main class="content" id="content"></main>
   </div>
-  <div class="content" id="content"></div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -168,9 +204,23 @@ async function doLogin(){
   }catch(e){$('#lerr').style.color='var(--err)';$('#lerr').textContent='登录异常: '+e.message;console.error(e)}
 }
 async function doLogout(){await api('api/logout',{method:'POST'});location.reload()}
-function showApp(){$('#login').style.display='none';$('#app').style.display='block'}
+function showApp(){$('#login').style.display='none';$('#app').style.display='flex'}
 function showTab(t){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.t===t));
-  ({dash:loadDash,node:loadNode,svc:loadSvc,install:loadInstall,port:loadPort,key:loadKey,g2:loadG2,landing:loadLanding,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)()}
+  ({dash:loadDash,node:loadNode,svc:loadSvc,install:loadInstall,port:loadPort,key:loadKey,g2:loadG2,landing:loadLanding,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)();
+  closeSidebar()  // 移动端选页后收起抽屉（桌面端 no-op）
+}
+// 侧边栏：桌面端折叠/展开（记忆），移动端开关抽屉
+function isMobile(){return window.matchMedia('(max-width:760px)').matches}
+function toggleSidebar(){const s=$('#sidebar');s.classList.toggle('open');$('#sidebarOverlay').classList.toggle('show',s.classList.contains('open'))}
+function closeSidebar(){const s=$('#sidebar');s.classList.remove('open');$('#sidebarOverlay').classList.remove('show')}
+function toggleCollapse(){
+  if(isMobile())return;  // 移动端不折叠（走抽屉）
+  const s=$('#sidebar');s.classList.toggle('collapsed');
+  const c=s.classList.contains('collapsed');
+  $('#collapseIco').textContent=c?'▶':'◀';
+  $('#collapseLbl').textContent=c?'展开':'折叠';
+  localStorage.setItem('ansgo_sidebar',c?'collapsed':'expanded')
+}
 
 // 仪表盘
 async function loadDash(){
@@ -444,6 +494,8 @@ checkAuth();
 function applyTheme(t){document.documentElement.setAttribute('data-theme',t);const b=$('#themeBtn');if(b)b.textContent=t==='light'?'☀️':'🌙'}
 function toggleTheme(){const cur=document.documentElement.getAttribute('data-theme')||'dark';const nw=cur==='dark'?'light':'dark';localStorage.setItem('ansgo_theme',nw);applyTheme(nw)}
 applyTheme(localStorage.getItem('ansgo_theme')||'dark');
+// 恢复侧边栏折叠状态（仅桌面端）
+(function(){const v=localStorage.getItem('ansgo_sidebar');if(v==='collapsed'&&!isMobile()){const s=$('#sidebar');s.classList.add('collapsed');$('#collapseIco').textContent='▶';$('#collapseLbl').textContent='展开'}})();
 </script>
 </body>
 </html>
