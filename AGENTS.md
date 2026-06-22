@@ -5,8 +5,9 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.4.2**。版本历史见 GitHub Releases。
+> **当前版本：v1.4.3**。版本历史见 GitHub Releases。
 >
+> - **v1.4.3**：面板导航改左侧可折叠侧边栏（桌面可折叠 + 移动端抽屉式，localStorage 记忆）+ 修复白天模式下字体不可读（active 项改蓝底白字 / `<code>` 显式着色 / overlay 阴影双主题适配 / `.logs` 终端风格双主题统一）
 > - **v1.4.2**：新增 `--uninstall` / `--purge` 彻底卸载（自动检测 Docker/裸金属，两级清理：默认保留配置/卷，`--purge` 全删）
 > - **v1.4.1**：修复 install.sh 架构判断 `x86_64: unbound variable` + 补全 release 二进制（sing-box/caddy-naive/panel 双架构）
 > - **v1.4.0**：移动端自适应 + 白天主题文字修复 + Docker all-in-one 一体化镜像
@@ -26,7 +27,7 @@
 - **三协议代理**（按需）：NaiveProxy + AnyTLS + Shadowsocks（2022）
 - **第二组服务 + 链式出站**：可选额外 anytls-2 + naive-2，出口经 SS 走另一台落地服务器
 - **真实域名证书**：`your-domain.com`（Let's Encrypt），面板与各服务共享
-- **Web 管理面板**：中文、暗黑/白天双主题、**移动端自适应**（导航横向滚动 / 表单 label 上置 / 网格单列）、可管全部协议参数 + 证书 + 服务安装/卸载 + 自身配置
+- **Web 管理面板**：中文、暗黑/白天双主题、**移动端自适应**（侧边栏抽屉 / 表单 label 上置 / 网格单列）、**左侧可折叠导航**（桌面端折叠成图标条 + 移动端汉堡抽屉，localStorage 记忆）、可管全部协议参数 + 证书 + 服务安装/卸载 + 自身配置
 - **性能最大化**：网络内核调优、清理垃圾软件、内存占用最小
 - **可审计、可回滚、可离线管理**（SSH 兜底脚本）
 
@@ -211,7 +212,7 @@ https://your-domain.com:15608/<随机URL路径>/
 | 会话有效期 | 8 小时 | ✅ 面板内改 |
 | 忘记密码 | Web「忘记密码？」页显示 `SSH 执行: ansgo-admin panel-pass` 提示；命令打印新密码 | — |
 
-### 6.4 功能模块（中文 UI，支持暗黑/白天双主题切换 + 移动端自适应，localStorage 记忆）
+### 6.4 功能模块（中文 UI，支持暗黑/白天双主题切换 + 移动端自适应 + 左侧可折叠导航，localStorage 记忆）
 1. **登录页**（含「忘记密码？」命令提示）
 2. **仪表盘**：各服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时
 3. **节点信息**：各启用服务连接参数 + URI 一键复制 + 客户端二维码（启用第二组时额外显示 anytls-2/naive-2）
@@ -429,7 +430,7 @@ SSH:                22
 | 服务安装后面板显示未生效 | ansgo-panel HTML 经 `//go:embed` 编译，改前端必须重新编译上传（stop→rm→scp→md5→start）+ 硬刷新 |
 | Docker 容器 systemd 起不来 | 必须 `privileged: true` + `cgroup: host` + tmpfs `/run`；host 网络下端口与宿主冲突需先释放 |
 | 容器改前端/二进制不生效 | 改 `web/index.html` 需重 build 镜像（`docker build -f deploy/Dockerfile.allinone .`）后 `docker compose up -d --build` |
-| 移动端/白天主题显示异常 | v1.4.0 已全面适配（导航横向滚动 / label 上置 / 网格单列 / 白天文字 `var(--txt)`）；若仍异常，硬刷新清浏览器缓存 |
+| 移动端/白天主题显示异常 | v1.4.0 全面适配（侧边栏抽屉 / label 上置 / 网格单列 / 白天文字 `var(--txt)`）；v1.4.3 进一步修复 active 项白字（改蓝底白字）、`<code>` 显式着色、overlay 阴影双主题适配。若仍异常，硬刷新清浏览器缓存 |
 | 卸载不干净（Docker 卷/镜像残留）| v1.4.2 `--uninstall` 用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配(`*_ansgo_(etc\|ssl\|caddy\|sb\|acme)`)兑底删卷；先删容器再删镜像避免 “image is being used” 错误 |
 | install.sh 首行报 `x86_64: unbound variable` | 旧版 `ARCH_MAP=( [x86_64]=amd64 )` 缺 `declare -A`，bash 把它当索引数组，`x86_64` 在算术上下文求值 + `set -u` 触发报错；v1.4.1 改用 `case` 写法（零关联数组）。⚠️ `bash -n` 只查语法不执行，查不出此类运行时变量错误，改完务必**实际执行**开头几行验证 |
 

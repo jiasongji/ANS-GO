@@ -115,5 +115,6 @@ systemctl daemon-reload && systemctl enable --now ansgo-panel
 5. **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
 6. **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`，失败 `ansgo-admin restore` 回滚。
 7. **Docker 一体化已完整支持**（v1.4.0+）：`--docker` 用 all-in-one 镜像（`ghcr.io/jiasongji/ansgo`），容器内 systemd 作 PID 1，systemctl/journalctl/ansgo-admin 原生可用，面板 0 改动。需 `privileged` + `cgroup: host` + host 网络。LXC 低配（256MB）仍推荐裸金属（内存占用最小）。
-8. **移动端 / 白天主题**（v1.4.0+）：面板已全面适配移动端（导航横向滚动 / 表单 label 上置 / 网格单列）并修复白天模式下白字不可见问题。响应式 `@media` 块必须置于 `<style>` 末尾（所有基础规则之后），否则同特异性会被后面的基础规则覆盖。
+8. **移动端 / 白天主题**（v1.4.0+，v1.4.3 增强）：面板已全面适配移动端（侧边栏抽屉 / 表单 label 上置 / 网格单列）并修复白天模式下白字不可见问题。v1.4.3 进一步把导航改为**左侧可折叠侧边栏**（桌面端可折叠为图标条 + 移动端汉堡抽屉，localStorage 记忆状态）并统一双主题配色（active 项蓝底白字 / `<code>` 显式着色 / overlay 阴影双主题适配）。响应式 `@media` 块必须置于 `<style>` 末尾（所有基础规则之后），否则同特异性会被后面的基础规则覆盖。
 9. **彻底卸载**（v1.4.2+）：`install.sh --uninstall --purge` 自动检测 Docker/裸金属并彻底清理（含 docker 卷/镜像）；Docker 分支必须先删容器再删镜像，否则报 “image is being used”。`bash -n` 只查语法不执行，改完脚本务必实际执行关键路径验证。
+10. **前端改动后必须重新编译上传**（v1.4.3+）：HTML 经 `//go:embed` 编译进二进制，改 `web/index.html` 必须重新 `go build` 上传并硬刷新浏览器。改前端后建议用 headless Chrome 截图多主题（暗黑/白天）× 多视口（桌面/移动）× 状态（展开/折叠/抽屉）交叉验证，避免静默 CSS 回归。
