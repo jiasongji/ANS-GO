@@ -176,6 +176,30 @@ if [ "$NO_CADDY_MODE" = 1 ]; then
     systemctl disable caddy.service 2>/dev/null || true
     systemctl stop caddy.service 2>/dev/null || true
   fi
+else
+  # 非 --no-caddy 模式：caddy 始终启用（:443 伪装站是域名基础设施）
+  # v1.5.17: 容器重建后 systemd 是全新状态，caddy 之前可能被 disable，需显式 enable
+  log "默认模式：启用 caddy（:443 伪装站）"
+  systemctl enable caddy.service 2>/dev/null || true
+fi
+
+# v1.5.17: sing-box 自动启停逻辑（修复容器重建后代理服务不自动恢复）
+#   容器重建（docker compose up -d）后 systemd 是全新状态，sing-box.service 默认 disabled，
+#   即使 panel.json 里 svc_*_enabled=true 也不会被拉起 → 用户拉新镜像后代理全断。
+#   genconf 已据 svc 开关生成对应 inbound，此处按"是否有启用的 sing-box 服务"决定启停。
+#   判断条件与 Go 端 landingHandler/group2Handler 的 needSB 一致：
+#     ss/anytls/socks 任一启用 或 group2(anytls-2) 启用 → 需要 sing-box
+SB_NEED=0
+for K in svc_ss_enabled svc_anytls_enabled svc_socks_enabled group2_enabled; do
+  V=$(grep -o "\"$K\": *\"[^\"]*\"" "$CONF" 2>/dev/null | grep -o '"[^"]*"$' | tr -d '"')
+  [ "$V" = "true" ] && SB_NEED=1
+done
+if [ "$SB_NEED" = 1 ]; then
+  log "检测到启用的 sing-box 服务：enable + restart sing-box"
+  systemctl enable sing-box.service 2>/dev/null || true
+  systemctl restart sing-box.service 2>/dev/null || true
+else
+  log "无启用的 sing-box 服务：sing-box 保持 disabled（面板内按需安装时再起）"
 fi
 
 # 后台签发真实证书（acme 模式且当前非 LE 且提供了 Dynu 凭证；manual 模式跳过）
