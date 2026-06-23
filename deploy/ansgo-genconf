@@ -126,6 +126,46 @@ if GROUP2_ENABLED:
             sys.exit(2)
 
 # ===================== 生成 sing-box config =====================
+# v1.5.14: 端口冲突预检测——naive/naive2 同走 caddy，anytls/anytls2/ss 同走 sing-box，
+#   两服务端口撞了会导致生成的配置语法/语义错误（caddy "ambiguous site definition" 或
+#   sing-box 同进程 bind 同端口失败），服务进入重启循环。genconf 在生成前必须显式拒绝。
+def check_port_conflicts():
+    # caddy 承载的端口 -> 服务名列表（同端口多个服务名 = 冲突）
+    caddy_ports = {}
+    def add_caddy(port, name):
+        caddy_ports.setdefault(port, []).append(name)
+    # sing-box 承载的端口 -> 服务名列表
+    sb_ports = {}
+    def add_sb(port, name):
+        sb_ports.setdefault(port, []).append(name)
+
+    if CADDY_ENABLE:
+        add_caddy(443, ":443 伪装站")
+    if SVC_NAIVE:
+        add_caddy(NAIVE_PORT, "naive")
+    if GROUP2_ENABLED and NAIVE2_PORT:
+        add_caddy(NAIVE2_PORT, "naive2")
+    if SVC_SS:
+        add_sb(SS_PORT, "ss")
+    if SVC_ANYTLS:
+        add_sb(ANYTLS_PORT, "anytls")
+    if GROUP2_ENABLED and ANYTLS2_PORT:
+        add_sb(ANYTLS2_PORT, "anytls2")
+
+    errors = []
+    for port, names in caddy_ports.items():
+        if len(names) > 1:
+            errors.append(f"caddy 端口 {port} 被 {'+'.join(names)} 同时占用（Caddyfile 会报 ambiguous site definition）")
+    for port, names in sb_ports.items():
+        if len(names) > 1:
+            errors.append(f"sing-box 端口 {port} 被 {'+'.join(names)} 同时占用（同进程无法 bind 相同端口）")
+    if errors:
+        print("ansgo-genconf: 检测到端口冲突，拒绝生成配置：", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        print("请在面板修改冲突端口后重试（不同服务必须使用不同端口）。", file=sys.stderr)
+        sys.exit(3)
+
 def gen_singbox():
     inbounds = []
     # SS inbound（按开关）
@@ -271,6 +311,8 @@ def do_validate():
     print("=== caddy validate ===")
     subprocess.run(["/usr/local/bin/caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"])
 
+if mode in ("sing-box", "caddy", "all"):
+    check_port_conflicts()
 if mode in ("sing-box", "all"):
     gen_singbox()
 if mode in ("caddy", "all"):
