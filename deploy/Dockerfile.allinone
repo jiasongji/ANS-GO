@@ -20,13 +20,16 @@
 # =============================================================================
 
 # ---- Stage 1: 编译 ansgo-panel（CGO-free 纯静态）----
+# 注意：与 release 二进制保持一致，version 用 -ldflags -X 注入（v1.5.14 起，
+# 不再依赖 main.go 硬编码默认值）。改版本号只需改此处 ARG。
 FROM golang:1.26-alpine AS panel
 WORKDIR /src
 COPY deploy/panel/go.mod deploy/panel/go.sum ./
 RUN go mod download
 COPY deploy/panel/ .
+ARG PANEL_VERSION=v1.5.15
 RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux \
-    go build -trimpath -ldflags "-s -w" -o /out/ansgo-panel .
+    go build -trimpath -ldflags "-s -w -X main.version=${PANEL_VERSION}" -o /out/ansgo-panel .
 
 # ---- Stage 2: xcaddy 编译 caddy-naive（forwardproxy naive 分支）----
 # klzgrad/forwardproxy 只发源码，且 naive 分支 go.mod 的 module path 仍为
