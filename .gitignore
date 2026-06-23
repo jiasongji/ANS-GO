@@ -1,7 +1,7 @@
 # ===== 敏感凭证（永不入库）=====
 .secrets.local
 
-# ===== 本地构建产物 / 临时文件 =====
+# ===== 本地构建产物 / 临时文件 / 归档 =====
 /.build/
 /bin/
 *.local
@@ -9,9 +9,8 @@
 *.tmp
 
 # ===== Go 面板编译产物 / 测试数据库 =====
-# 交叉编译临时输出目录（release asset 走 gh release，不入库）
-/deploy/panel/bv-panel
-/bv-panel
+# 交叉编译临时输出（release asset 走 gh release，不入库）
+/deploy/panel/ansgo-panel
 /deploy/panel/ansgo-panel-linux-*
 /deploy/panel/out/
 *.db
@@ -29,5 +28,6 @@ Thumbs.db
 *.swp
 
 # ===== 本地任务提示词（含服务器敏感信息，不入库）=====
+/*-task-prompt.md
 .merge-menu-task-prompt.md
 .debug-task-prompt.md

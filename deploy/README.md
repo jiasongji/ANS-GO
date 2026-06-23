@@ -6,6 +6,8 @@
 > 本文档面向**手动部署 / 复现 / 二次开发 / 二进制构建**。完整方案见上级 [`AGENTS.md`](../AGENTS.md)（唯一事实来源）。
 >
 > 📌 **所有命令默认以 `root` 用户执行**。
+>
+> 开发中变更：当前源码已加入 SOCKS5（sing-box inbound，强制用户名/密码）与面板自定义网页标题；NaiveProxy 保留普通可选部署但不参与落地，落地服务仅保留 AnyTLS-2 → 远端 SS。
 
 ---
 
@@ -152,7 +154,7 @@ curl -fsSL https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sin
 install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
 
 # caddy-naive：本项目 release 预编译产物（推荐）
-VER=v1.5.15
+VER=v1.5.16
 curl -fsSL https://github.com/jiasongji/ANS-GO/releases/download/${VER}/caddy-naive-linux-${ARCH} -o /usr/local/bin/caddy
 chmod 0755 /usr/local/bin/caddy
 # 失败则现场 xcaddy 编译（需 Go 1.22+ + git，约 3-5 分钟）：
@@ -167,6 +169,7 @@ chmod 0755 /usr/local/bin/caddy
 # secrets.env（v1.5.12 起随机端口）
 SS_PORT=$(shuf -i 10000-65535 -n 1)
 ANYTLS_PORT=$(shuf -i 10000-65535 -n 1)
+SOCKS_PORT=$(shuf -i 10000-65535 -n 1)
 NAIVE_PORT=$(shuf -i 10000-65535 -n 1)
 PANEL_PORT=$(shuf -i 10000-65535 -n 1)
 URLPATH="/$(openssl rand -hex 4)/"
@@ -176,6 +179,8 @@ SS_METHOD=2022-blake3-aes-128-gcm
 SS_KEY=$(openssl rand -base64 16)
 ANYTLS_PASS=$(openssl rand -hex 16)
 ANYTLS_UUID=$(cat /proc/sys/kernel/random/uuid)
+SOCKS_USER=$(openssl rand -hex 6)
+SOCKS_PASS=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
 NAIVE_USER=$(openssl rand -hex 6)
 NAIVE_PASS=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
 EOF
@@ -185,6 +190,7 @@ cat > /etc/ansgo/panel.json <<EOF
 {
   "domain": "your-domain.com",
   "panel_port": ${PANEL_PORT},
+  "panel_title": "ANS-GO 管理面板",
   "url_path": "${URLPATH}",
   "admin_user": "admin",
   "admin_pass_hash": "PLACEHOLDER",
@@ -194,11 +200,13 @@ cat > /etc/ansgo/panel.json <<EOF
   "ss_port": ${SS_PORT},
   "ss_method": "2022-blake3-aes-128-gcm",
   "anytls_port": ${ANYTLS_PORT},
+  "socks_port": ${SOCKS_PORT},
   "naive_port": ${NAIVE_PORT},
   "disguise_panel": "proxy:https://soft.xiaoz.org",
   "disguise_naive": "proxy:https://soft.xiaoz.org",
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
+  "svc_socks_enabled": "false",
   "svc_naive_enabled": "false",
   "caddy_enable": "true",
   "cert_mode": "acme",
@@ -207,7 +215,7 @@ cat > /etc/ansgo/panel.json <<EOF
 }
 EOF
 chmod 600 /etc/ansgo/panel.json
-echo "⚠️ 随机端口：ss=${SS_PORT} anytls=${ANYTLS_PORT} naive=${NAIVE_PORT} panel=${PANEL_PORT}"
+echo "⚠️ 随机端口：ss=${SS_PORT} anytls=${ANYTLS_PORT} socks=${SOCKS_PORT} naive=${NAIVE_PORT} panel=${PANEL_PORT}"
 ```
 
 ### 步骤 4：签发证书
@@ -334,7 +342,7 @@ docker buildx build --builder ansgo-builder \
   --build-arg HTTP_PROXY=http://host.docker.internal:1666 \
   --build-arg HTTPS_PROXY=http://host.docker.internal:1666 \
   -t ghcr.io/jiasongji/ansgo:latest \
-  -t ghcr.io/jiasongji/ansgo:v1.5.15 \
+  -t ghcr.io/jiasongji/ansgo:v1.5.16 \
   -f deploy/Dockerfile.allinone . --push
 ```
 
@@ -428,7 +436,7 @@ bash install.sh --uninstall --purge
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
 - sing-box：**SagerNet 官方 release**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/...`），本项目 release vendored 兜底
 - caddy-naive：本项目 release 预编译产物（双架构），失败回退 xcaddy 现场编译
-- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/v1.5.15/ansgo-panel-linux-<arch>`
+- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/v1.5.16/ansgo-panel-linux-<arch>`
 - acme.sh：本仓库 vendored 快照（可选），或官方 `https://get.acme.sh`
 - 面板镜像：`ghcr.io/jiasongji/ansgo:latest`（all-in-one）/ `ghcr.io/jiasongji/ansgo-panel:latest`（面板单镜像）
 

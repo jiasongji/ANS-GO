@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"golang.org/x/crypto/bcrypt"
+	_ "modernc.org/sqlite"
 )
 
 // ===================== 配置 =====================
@@ -32,6 +32,7 @@ const (
 type Config struct {
 	Domain             string `json:"domain"`
 	PanelPort          int    `json:"panel_port"`
+	PanelTitle         string `json:"panel_title"`
 	URLPath            string `json:"url_path"`
 	AdminUser          string `json:"admin_user"`
 	AdminPassHash      string `json:"admin_pass_hash"`
@@ -41,41 +42,43 @@ type Config struct {
 	SSPort             int    `json:"ss_port"`
 	SSMethod           string `json:"ss_method"`
 	AnyTLSPort         int    `json:"anytls_port"`
+	SocksPort          int    `json:"socks_port"`
 	NaivePort          int    `json:"naive_port"`
 	DisguisePanel      string `json:"disguise_panel"`
 	DisguiseNaive      string `json:"disguise_naive"`
 	DisguiseNaive2     string `json:"disguise_naive2"`
 	// 服务开关（面板内按需安装；"true"/"false" 字符串兼容 genconf）
-	SvcSSEnabled       string `json:"svc_ss_enabled"`
-	SvcAnyTLSEnabled   string `json:"svc_anytls_enabled"`
-	SvcNaiveEnabled    string `json:"svc_naive_enabled"`
+	SvcSSEnabled     string `json:"svc_ss_enabled"`
+	SvcAnyTLSEnabled string `json:"svc_anytls_enabled"`
+	SvcSocksEnabled  string `json:"svc_socks_enabled"`
+	SvcNaiveEnabled  string `json:"svc_naive_enabled"`
 	// v1.5.10: caddy_enable=false 表示 --no-caddy 模式（caddy 不跑 80/443 伪装站）
 	//   空字符串视为 true（兼容旧部署）
-	CaddyEnable        string `json:"caddy_enable"`
+	CaddyEnable string `json:"caddy_enable"`
 	// 第2组额外服务（用字符串 "true"/"false" 以兼容 genconf 的宽松判断）
-	Group2Enabled      string `json:"group2_enabled"`
-	AnyTLS2Port        int    `json:"anytls2_port"`
-	Naive2Port         int    `json:"naive2_port"`
+	Group2Enabled string `json:"group2_enabled"`
+	AnyTLS2Port   int    `json:"anytls2_port"`
+	Naive2Port    int    `json:"naive2_port"` // legacy: no longer used for landing
 	// 落地 SS 出口（第2组流量走这里）
-	SSLandingEnabled   string `json:"ss_landing_enabled"`
-	SSLandingHost      string `json:"ss_landing_host"`
-	SSLandingPort      int    `json:"ss_landing_port"`
-	SSLandingMethod    string `json:"ss_landing_method"`
-	SSLandingPassword  string `json:"ss_landing_password"`
+	SSLandingEnabled  string `json:"ss_landing_enabled"`
+	SSLandingHost     string `json:"ss_landing_host"`
+	SSLandingPort     int    `json:"ss_landing_port"`
+	SSLandingMethod   string `json:"ss_landing_method"`
+	SSLandingPassword string `json:"ss_landing_password"`
 	// 证书来源：cert_mode="acme"(默认) 走 cert_dir/fullchain.pem+privkey.pem；
 	// "manual" 用 cert_fullchain/cert_privkey 两个绝对路径（与 acme 二选一）
-	CertMode           string `json:"cert_mode"`
-	CertDir            string `json:"cert_dir"`
-	CertFullchain      string `json:"cert_fullchain"`
-	CertPrivkey        string `json:"cert_privkey"`
-	DBPath             string `json:"db_path"`
+	CertMode      string `json:"cert_mode"`
+	CertDir       string `json:"cert_dir"`
+	CertFullchain string `json:"cert_fullchain"`
+	CertPrivkey   string `json:"cert_privkey"`
+	DBPath        string `json:"db_path"`
 }
 
 var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.15"
+	version = "1.5.16"
 )
 
 func loadConfig() (Config, error) {
@@ -88,6 +91,15 @@ func loadConfig() (Config, error) {
 		return c, err
 	}
 	// 默认值兜底
+	if c.PanelTitle == "" {
+		c.PanelTitle = "ANS-GO 管理面板"
+	}
+	if c.SocksPort <= 0 {
+		c.SocksPort = 10808
+	}
+	if c.SvcSocksEnabled == "" {
+		c.SvcSocksEnabled = "false"
+	}
 	if c.SessionHours <= 0 {
 		c.SessionHours = 8
 	}

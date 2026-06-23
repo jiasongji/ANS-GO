@@ -294,15 +294,14 @@ async function loadNode(){
   let html='';
   let qrs=[];
   // 第一组：按 enabled 过滤显示
-  [['Shadowsocks','🔐',j.ss],['AnyTLS','🛡️',j.anytls],['NaiveProxy','🌀',j.naive]].forEach(([t,i,n])=>{
+  [['Shadowsocks','🔐',j.ss],['AnyTLS','🛡️',j.anytls],['SOCKS5','🧦',j.socks],['NaiveProxy','🌀',j.naive]].forEach(([t,i,n])=>{
     if(n&&n.enabled&&n.uri){html+=card(t,i,n);qrs.push([t,n.uri])}
   });
   // 落地服务（启用时显示，标注出口方式）
   if(j.group2_enabled){
     html+='<div class="card"><h3>🛬 落地服务 <span class="tag" style="background:var(--ok);color:#fff">已启用</span></h3>'
-      +'<div class="help">⚠️ 架构约束：AnyTLS-2 经 SS 落地（隐藏中转 IP），NaiveProxy-2 走 direct（caddy 无法经 sing-box ss-out 转发，直连目标站点）。</div></div>';
-    [['AnyTLS-2','🔀',j.anytls2,'<span class="tag" style="background:var(--ok);color:#fff">出口经 SS 落地</span>'],
-     ['NaiveProxy-2','🔀',j.naive2,'<span class="tag" style="background:var(--warn);color:#fff">出口走 direct</span>']].forEach(([t,i,n,e])=>{
+      +'<div class="help">落地服务仅 AnyTLS-2 经远端 SS 出口；NaiveProxy 不参与任何落地。</div></div>';
+    [['AnyTLS-2','🔀',j.anytls2,'<span class="tag" style="background:var(--ok);color:#fff">出口经 SS 落地</span>']].forEach(([t,i,n,e])=>{
       if(n&&n.uri){html+=card(t,i,n,e);qrs.push([t,n.uri])}
     });
   }
@@ -324,8 +323,8 @@ async function loadMgmt(){
   const en=d.svc_enabled||{};
   const ports=d.ports||{};
   const st=d.services||{};
-  const ss=n.ss||{}, at=n.anytls||{}, nv=n.naive||{};
-  const at2=n.anytls2||{}, nv2=n.naive2||{};
+  const ss=n.ss||{}, at=n.anytls||{}, sk=n.socks||{}, nv=n.naive||{};
+  const at2=n.anytls2||{};
   const g2=n.group2_enabled;
   // 状态标签：未安装（灰色）/ 已安装·active（绿）/ 已安装·inactive（橙）
   const statusTag=(enabled,active)=>{
@@ -347,7 +346,7 @@ async function loadMgmt(){
     :'';
   $('#content').innerHTML=`
    <div class="card"><h3>🗂️ 服务管理</h3>
-     <div class="help">一站式管理各代理服务：安装/卸载、端口、密钥、启停。修改端口或密钥后对应服务会自动重启（断开现有连接）。落地服务（AnyTLS-2/NaiveProxy-2）在「落地服务」页启用后下方显示。</div></div>
+     <div class="help">一站式管理各代理服务：安装/卸载、端口、密钥、启停。修改端口或密钥后对应服务会自动重启（断开现有连接）。落地服务（AnyTLS-2）在「落地服务」页启用后下方显示。</div></div>
 
    <div class="card">
      <h3>🔐 Shadowsocks ${statusTag(en.ss,st.ss)}</h3>
@@ -377,6 +376,20 @@ async function loadMgmt(){
    </div>
 
    <div class="card">
+     <h3>🧦 SOCKS5 ${statusTag(en.socks,st.socks)}</h3>
+     <div class="row"><label>端口</label><div class="f"><input id="p_socks" type="number" value="${ports.socks||''}" placeholder="10000-65535"></div><button class="primary" onclick="setPort('socks')">应用</button></div>
+     <div class="row"><label>SOCKS 用户名</label><div class="f"><input id="k_sk_user" value="${sk.user||''}" placeholder="用户名"></div></div>
+     <div class="row"><label>SOCKS 密码</label><div class="f"><input id="k_sk_pass" value="${sk.pass||''}" placeholder="密码"></div></div>
+     <div style="margin-top:6px">
+       ${en.socks?'<button class="danger" onclick="svcInstall(\'socks\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\'socks\',\'install\')">安装</button>'}
+       ${en.socks?ctrlBtns('socks',st.socks):''}
+       <button class="mut" onclick="regen('socks')" style="margin-left:8px">🎲 随机</button>
+       <button class="primary" onclick="saveKey('socks')">💾 保存密钥</button>
+     </div>
+     ${healthBtn('socks',en.socks)}
+   </div>
+
+   <div class="card">
      <h3>🌀 NaiveProxy ${statusTag(en.naive,st.naive)}</h3>
      <div class="row"><label>端口</label><div class="f"><input id="p_naive" type="number" value="${ports.naive||''}" placeholder="10000-65535"></div><button class="primary" onclick="setPort('naive')">应用</button></div>
      <div class="row"><label>Naive 用户名</label><div class="f"><input id="k_nv_user" value="${nv.user||''}" placeholder="用户名"></div></div>
@@ -401,16 +414,8 @@ async function loadMgmt(){
      </div>
      ${healthBtn('anytls2',true)}
    </div>
-   <div class="card">
-     <h3>🔀 NaiveProxy-2 <span class="tag" style="background:var(--warn);color:#fff">出口走 direct（caddy 无法经 ss-out）</span></h3>
-     <div class="row"><label>Naive-2 用户名</label><div class="f"><input id="k_nv2_user" value="${nv2.user||''}" placeholder="用户名"></div></div>
-     <div class="row"><label>Naive-2 密码</label><div class="f"><input id="k_nv2_pass" value="${nv2.pass||''}" placeholder="密码"></div></div>
-     <div style="margin-top:6px">
-       <button class="primary" onclick="saveKey('naive2')">💾 保存</button>
-       <span class="mut" style="font-size:12px;margin-left:8px">用户名+密码一起保存；端口在「落地服务」页</span>
-     </div>
-     ${healthBtn('naive2',true)}
-   </div>`:''}
+   `:''}
+
 
    <div class="card">
      <h3>⚙️ 管理面板 <span class="tag" style="background:${st.panel==='active'?'var(--ok)':'var(--err)'};color:#fff">${st.panel==='active'?'运行中':'未运行'}</span></h3>
@@ -433,9 +438,10 @@ async function loadInstall(){
       <div class="help" style="margin-top:8px">${enabled?'卸载将停止该服务并移除其配置（密钥保留，可重装）。':'安装将生成配置并启动该服务。'}</div></div>`;
   };
   $('#content').innerHTML=`<div class="card"><h3>📦 代理服务安装</h3>
-     <div class="help" style="margin-bottom:6px">面板已就绪。以下三个代理服务可独立安装/卸载。安装后即对外提供代理，卸载则停止。落地服务在「落地服务」页。</div></div>`
+     <div class="help" style="margin-bottom:6px">面板已就绪。以下代理服务可独立安装/卸载。安装后即对外提供代理，卸载则停止。落地服务在「落地服务」页。</div></div>`
     +card('ss','Shadowsocks','sing-box shadowsocks-2022 inbound，加密 2022-blake3-aes-128-gcm。',en.ss,j.ports.ss)
     +card('anytls','AnyTLS','sing-box anytls inbound，TLS 用共享证书。',en.anytls,j.ports.anytls)
+    +card('socks','SOCKS5','sing-box socks inbound，强制用户名/密码鉴权。',en.socks,j.ports.socks)
     +card('naive','NaiveProxy','caddy forwardproxy-naive，含域名伪装反代。',en.naive,j.ports.naive);
 }
 async function svcInstall(name,act){
@@ -478,7 +484,7 @@ async function checkHealth(target,btn){
 // 服务控制
 async function loadSvc(){
   const j=await api('api/dashboard');
-  const items=[['NaiveProxy','naive',j.services.naive],['AnyTLS','anytls',j.services.anytls],['Shadowsocks','ss',j.services.ss],['管理面板','panel',j.services.panel]];
+  const items=[['NaiveProxy','naive',j.services.naive],['SOCKS5','socks',j.services.socks],['AnyTLS','anytls',j.services.anytls],['Shadowsocks','ss',j.services.ss],['管理面板','panel',j.services.panel]];
   $('#content').innerHTML=`<div class="card"><h3>🎛️ 服务控制</h3>
    <table><tr><th>服务</th><th>状态</th><th>操作</th></tr>${items.map(x=>`<tr><td>${x[0]}</td><td>${dot(x[2])}</td>
      <td><button class="ok" onclick="svc('${x[1]}','restart')">重启</button>
@@ -500,10 +506,11 @@ function loadPort(){
    <div class="help" style="margin-bottom:12px">修改后对应服务会自动重新生成配置并重启。改面板端口会重启面板（需用新端口重新登录）。</div>
    <div class="row"><label>Shadowsocks</label><div class="f"><input id="p_ss" type="number" placeholder="23456"></div><button class="primary" onclick="setPort('ss')">应用</button></div>
    <div class="row"><label>AnyTLS</label><div class="f"><input id="p_anytls" type="number" placeholder="8443"></div><button class="primary" onclick="setPort('anytls')">应用</button></div>
-   <div class="row"><label>NaiveProxy</label><div class="f"><input id="p_naive" type="number" placeholder="443"></div><button class="primary" onclick="setPort('naive')">应用</button></div>
+   <div class="row"><label>SOCKS5</label><div class="f"><input id="p_socks" type="number" placeholder="10808"></div><button class="primary" onclick="setPort('socks')">应用</button></div>
+   <div class="row"><label>NaiveProxy</label><div class="f"><input id="p_naive" type="number" placeholder="44333"></div><button class="primary" onclick="setPort('naive')">应用</button></div>
    <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
    <div class="row"><label>管理面板</label><div class="f"><input id="p_panel" type="number" placeholder="15608"></div><button class="danger" onclick="setPort('panel')">应用并重启</button></div></div>`;
-  api('api/settings').then(j=>{if(!j.error){['ss','anytls','naive','panel'].forEach(k=>{const e=$('#p_'+k);if(e)e.placeholder=j[k+'_port']})}});
+  api('api/settings').then(j=>{if(!j.error){['ss','anytls','socks','naive','panel'].forEach(k=>{const e=$('#p_'+k);if(e)e.placeholder=j[k+'_port']})}});
 }
 async function setPort(t){
   const v=parseInt($('#p_'+t).value);if(!v||v<1||v>65535)return toast('请输入有效端口');
@@ -517,7 +524,7 @@ async function setPort(t){
 async function loadKey(){
   const n=await api('api/node');
   const g2=n.group2_enabled;
-  const ss=n.ss||{}, at=n.anytls||{}, nv=n.naive||{}, at2=n.anytls2||{}, nv2=n.naive2||{};
+  const ss=n.ss||{}, at=n.anytls||{}, sk=n.socks||{}, nv=n.naive||{}, at2=n.anytls2||{};
   const row=(title,html)=>`<div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"><b>${title}</b></div>${html}`;
   $('#content').innerHTML=`<div class="card"><h3>🔑 密钥管理</h3>
    <div class="help" style="margin-bottom:12px">支持手动输入自定义密钥，或点 🎲 随机生成。保存后旧密钥立即失效，所有客户端需更新；服务会自动重启（断开现有连接）。</div>
@@ -528,6 +535,10 @@ async function loadKey(){
    ${row('AnyTLS',
      `<div class="row"><label>AnyTLS 密码</label><div class="f"><input id="k_at_pass" value="${at.password||''}" placeholder="任意字符串"></div></div>
       <div style="margin-top:6px"><button class="mut" onclick="regen('anytls')">🎲 随机生成</button> <button class="primary" onclick="saveKey('anytls')">💾 保存</button></div>`)}
+   ${row('SOCKS5',
+     `<div class="row"><label>SOCKS 用户名</label><div class="f"><input id="k_sk_user" value="${sk.user||''}" placeholder="用户名"></div></div>
+      <div class="row"><label>SOCKS 密码</label><div class="f"><input id="k_sk_pass" value="${sk.pass||''}" placeholder="密码"></div></div>
+      <div style="margin-top:6px"><button class="mut" onclick="regen('socks')">🎲 随机生成</button> <button class="primary" onclick="saveKey('socks')">💾 保存</button></div>`)}
    ${row('NaiveProxy',
      `<div class="row"><label>Naive 用户名</label><div class="f"><input id="k_nv_user" value="${nv.user||''}" placeholder="用户名"></div></div>
       <div class="row"><label>Naive 密码</label><div class="f"><input id="k_nv_pass" value="${nv.pass||''}" placeholder="密码"></div></div>
@@ -535,14 +546,11 @@ async function loadKey(){
    ${row('AnyTLS-2（第2组'+(g2?'':'，未启用')+'）',
      `<div class="row"><label>AnyTLS-2 密码</label><div class="f"><input id="k_at2_pass" value="${at2.password||''}" placeholder="第2组未生成时可手动填"></div></div>
       <div style="margin-top:6px"><button class="mut" onclick="regen('g2')">🎲 随机生成全部第2组</button> <button class="primary" onclick="saveKey('anytls2')">💾 保存</button></div>`)}
-   ${row('NaiveProxy-2（第2组'+(g2?'':'，未启用')+'）',
-     `<div class="row"><label>Naive-2 用户名</label><div class="f"><input id="k_nv2_user" value="${nv2.user||''}" placeholder="用户名"></div></div>
-      <div class="row"><label>Naive-2 密码</label><div class="f"><input id="k_nv2_pass" value="${nv2.pass||''}" placeholder="密码"></div></div>
-      <div style="margin-top:6px"><button class="primary" onclick="saveKey('naive2')">💾 保存</button> <span class="mut" style="font-size:12px;margin-left:8px">用户名+密码一起保存</span></div>`)}
+
    </div>`;
 }
 async function regen(t){
-  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',naive:'NaiveProxy',g2:'第2组全部'}[t]||t;
+  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy',g2:'AnyTLS-2'}[t]||t;
   if(!confirm(`⚠️ 确认随机重新生成 ${lbl} 的密钥？\n\n此操作会：\n• 备份当前配置\n• 生成新密钥\n• 重启该服务（断开现有连接）\n• 旧密钥立即失效`))return;
   toast('正在生成新密钥…');
   const j=await api('api/regen',{method:'POST',body:JSON.stringify({target:t})});
@@ -550,13 +558,13 @@ async function regen(t){
   else toast(j.error||'失败');
 }
 async function saveKey(t){
-  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',naive:'NaiveProxy',anytls2:'AnyTLS-2',naive2:'NaiveProxy-2'}[t]||t;
+  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy',anytls2:'AnyTLS-2'}[t]||t;
   let body={target:t};
   if(t==='ss'){body.method=$('#k_ss_method').value;body.key=$('#k_ss_key').value}
   else if(t==='anytls'){body.pass=$('#k_at_pass').value}
+  else if(t==='socks'){body.user=$('#k_sk_user').value;body.pass=$('#k_sk_pass').value}
   else if(t==='naive'){body.user=$('#k_nv_user').value;body.pass=$('#k_nv_pass').value}
   else if(t==='anytls2'){body.pass=$('#k_at2_pass').value}
-  else if(t==='naive2'){body.user=$('#k_nv2_user').value;body.pass=$('#k_nv2_pass').value}
   if(!confirm(`⚠️ 确认手动保存 ${lbl} 的密钥？\n\n保存后旧密钥立即失效，所有客户端需更新；对应服务会自动重启。`))return;
   toast('正在保存…');
   const j=await api('api/key',{method:'POST',body:JSON.stringify(body)});
@@ -565,7 +573,7 @@ async function saveKey(t){
 }
 
 // 落地服务（v1.5.12 合并页：原「第二组服务」+「出口落地」）
-//   上半部分：AnyTLS-2 / NaiveProxy-2 启用 + 端口（落地代理服务）
+//   上半部分：AnyTLS-2 启用 + 端口（落地代理服务）
 //   下半部分：远端 SS 落地服务器（host/port/method/password）
 // 启用时若密钥未生成，后端会自动调 ansgo-admin regen2 生成（无需用户先点「生成」）
 async function loadLanding(){
@@ -577,19 +585,16 @@ async function loadLanding(){
   const landStat=l.enabled?'<span style="color:var(--ok)">已启用</span>':'<span style="color:var(--warn)">未启用（anytls-2 走 direct）</span>';
   $('#content').innerHTML=`
    <div class="card"><h3>🛬 落地服务</h3>
-     <div class="help" style="margin-bottom:12px">在原服务基础上额外部署 AnyTLS-2 + NaiveProxy-2（独立端口/凭证），由中转→远端落地 SS→目标站点。
-     <br>⚠️ <b>架构约束</b>：只有 AnyTLS-2 能经 SS 落地（隐藏中转 IP）；NaiveProxy-2 在 caddy 中，<b>走 direct 出口</b>（caddy 无法经 sing-box ss-out 转发，这是 caddy/sing-box 分离架构的固有约束）。</div>
+     <div class="help" style="margin-bottom:12px">在原服务基础上额外部署 AnyTLS-2（独立端口/凭证），由中转→远端落地 SS→目标站点。NaiveProxy 保留为普通服务，但不参与任何落地。</div>
      <table>
        <tr><th>落地代理服务</th><td>${g2En} <span class="mut">·</span> 密钥 ${keyStat}</td></tr>
        <tr><th>远端 SS 落地</th><td>${landStat}</td></tr>
      </table>
    </div>
 
-   <div class="card"><h3>🔀 落地代理服务（AnyTLS-2 + NaiveProxy-2）</h3>
+   <div class="card"><h3>🔀 落地代理服务（AnyTLS-2）</h3>
      <div class="row"><label>启用</label><div class="f"><select id="g2_en"><option value="false" ${!g.enabled?'selected':''}>关闭</option><option value="true" ${g.enabled?'selected':''}>启用</option></select></div></div>
      <div class="row"><label>AnyTLS-2 端口</label><div class="f"><input id="g2_anytls" type="number" value="${g.anytls2_port||''}" placeholder="10000-65535 随机"></div></div>
-     <div class="row"><label>NaiveProxy-2 端口</label><div class="f"><input id="g2_naive" type="number" value="${g.naive2_port||''}" placeholder="10000-65535 随机"></div></div>
-     <div class="row"><label>Naive-2 伪装</label><div class="f"><input id="g2_disg" value="${g.disguise_naive2||'proxy:https://soft.xiaoz.org'}" placeholder="proxy:https://soft.xiaoz.org"></div></div>
      <div style="margin-top:8px">
        <button class="mut" onclick="genG2Keys()">🎲 重新生成密钥</button>
        <button class="primary" onclick="saveG2()">💾 保存并应用</button>
@@ -609,7 +614,7 @@ async function loadLanding(){
    </div>`;
 }
 async function genG2Keys(){
-  if(!confirm('重新生成落地服务密钥？（现有 AnyTLS-2/NaiveProxy-2 密钥将失效）'))return;
+  if(!confirm('重新生成落地服务密钥？（现有 AnyTLS-2 密钥将失效）'))return;
   toast('正在生成密钥…');
   const j=await api('api/regen',{method:'POST',body:JSON.stringify({target:'g2'})});
   if(j.ok){toast('密钥已生成，可在「服务管理」页查看')}
@@ -619,9 +624,8 @@ async function genG2Keys(){
 async function saveG2(){
   // 端口留空 -> 后端 / group2 接口接收 NaN 时不应崩溃，这里前端兜底转 0
   const anytls2Port=parseInt($('#g2_anytls').value)||0;
-  const naive2Port=parseInt($('#g2_naive').value)||0;
-  const body={enabled:$('#g2_en').value==='true',anytls2_port:anytls2Port,naive2_port:naive2Port,disguise_naive2:$('#g2_disg').value};
-  toast('正在应用…（启用时自动生成密钥；sing-box + caddy 将重启，约 3-5 秒）');
+  const body={enabled:$('#g2_en').value==='true',anytls2_port:anytls2Port};
+  toast('正在应用…（启用时自动生成密钥；sing-box 将重启，约 3-5 秒）');
   const j=await api('api/group2',{method:'POST',body:JSON.stringify(body)});
   if(j.ok){toast('已保存，服务正在后台重启')}
   else toast(j.error||'失败');
@@ -693,6 +697,7 @@ async function loadSet(){
   if(j.error)return $('#content').innerHTML=j.error;
   const f=(id,lbl,val,ph='',type='text')=>`<div class="row"><label>${lbl}</label><div class="f"><input id="s_${id}" type="${type}" value="${val??''}" placeholder="${ph}"></div></div>`;
   $('#content').innerHTML=`<div class="card"><h3>⚙️ 面板设置</h3>
+   ${f('panel_title','网页标题',j.panel_title,'ANS-GO 管理面板')}
    ${f('url_path','URL 路径',j.url_path,'/xxxx/')}
    ${f('admin_user','管理员用户名',j.admin_user,'')}
    ${f('admin_pass','新密码(留空不改)','','留空表示不修改','password')}
@@ -706,24 +711,24 @@ async function loadSet(){
    ${f('disguise_naive','Naive伪装(代理端口)',j.disguise_naive,'proxy:https://soft.xiaoz.org')}
    <div style="margin-top:6px"><button class="primary" onclick="saveSet()">💾 保存设置</button>
    <span class="mut" style="font-size:12px;margin-left:8px">改 URL 路径或面板端口会重启面板；改伪装站点会重载 caddy。</span></div>
-   <div class="help" style="margin-top:12px">当前协议端口 — SS: ${j.ss_port} / AnyTLS: ${j.anytls_port} / Naive: ${j.naive_port}（在"端口管理"修改）</div></div>`;
+   <div class="help" style="margin-top:12px">当前协议端口 — SS: ${j.ss_port} / AnyTLS: ${j.anytls_port} / SOCKS5: ${j.socks_port} / Naive: ${j.naive_port}（在"端口管理"修改）</div></div>`;
 }
 async function saveSet(){
   const g=id=>$('#s_'+id).value;
-  const body={url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive')};
+  const body={panel_title:g('panel_title'),url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive')};
   if(g('admin_pass'))body.admin_pass=g('admin_pass');
   // 只传发生变化的字段由后端处理；这里全传，后端按指针判断（空串/0 会触发改动）
   const j=await api('api/settings',{method:'POST',body:JSON.stringify(body)});
   if(j.ok){
     if(j.new_url){showRestartOverlay(j.msg||'面板即将重启',j.new_url,3);return}
-    toast('设置已保存');
+    document.title=body.panel_title||'ANS-GO 管理面板';toast('设置已保存');
   }else toast(j.error||'保存失败');
 }
 
 // 日志
 function loadLog(){
   $('#content').innerHTML=`<div class="card"><h3>📃 日志查看</h3>
-   <div class="row"><label>服务</label><div class="f"><select id="log_svc"><option value="naive">NaiveProxy(caddy)</option><option value="ss">SS/AnyTLS(sing-box)</option><option value="panel">面板(ansgo-panel)</option></select></div>
+   <div class="row"><label>服务</label><div class="f"><select id="log_svc"><option value="naive">NaiveProxy(caddy)</option><option value="socks">SOCKS5(sing-box)</option><option value="ss">SS/AnyTLS(sing-box)</option><option value="panel">面板(ansgo-panel)</option></select></div>
    <button class="primary" onclick="loadLogData()">刷新</button></div>
    <div class="logs" id="logbox">请选择服务并刷新</div></div>`;
 }

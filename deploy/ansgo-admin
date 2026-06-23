@@ -4,7 +4,7 @@
 #
 # 面板全挂也能用 SSH 管理一切。配置源头：
 #   /etc/ansgo/panel.json   端口+面板设置+域名 (JSON)
-#   /etc/ansgo/secrets.env      SS_KEY/ANYTLS_*/NAIVE_* (shell 可 source)
+#   /etc/ansgo/secrets.env      SS_KEY/ANYTLS_*/SOCKS_*/NAIVE_* (shell 可 source)
 #
 # 用法见末尾 usage() 或 README。
 # =============================================================================
@@ -44,7 +44,7 @@ DOMAIN(){ local d; d="$(_conf domain)"; echo "${d:-$DOMAIN_DEF}"; }
 
 # ---------- 服务映射 ----------
 # ss / anytls 都由 sing-box 承载；naive 由 caddy 承载；panel 独立
-svc_of(){ case "$1" in ss|anytls) echo sing-box;; naive|caddy) echo caddy;; panel) echo ansgo-panel;; *) echo "$1";; esac; }
+svc_of(){ case "$1" in ss|anytls|socks) echo sing-box;; naive|caddy) echo caddy;; panel) echo ansgo-panel;; *) echo "$1";; esac; }
 
 restart_svc(){ local s="$1"; systemctl restart "$s" 2>/dev/null && ok "已 restart $s" || err "restart $s 失败"; }
 stop_svc(){ local s="$1"; systemctl stop "$s" 2>/dev/null && ok "已 stop $s" || err "stop $s 失败"; }
@@ -70,33 +70,33 @@ gen_ss_key(){ openssl rand -base64 16; }
 gen_anytls_pass(){ openssl rand -hex 16; }
 gen_naive_user(){ openssl rand -hex 6; }
 gen_naive_pass(){ openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20; }
+gen_socks_user(){ openssl rand -hex 6; }
+gen_socks_pass(){ openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20; }
 gen_panel_pass(){ openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 22; }
 
 # ---------- URI 生成 ----------
 print_uris(){
   _loadsecrets
   local domain; domain="$(DOMAIN)"
-  local ss_port anytls_port naive_port
-  ss_port="$(_conf ss_port)"; anytls_port="$(_conf anytls_port)"; naive_port="$(_conf naive_port)"
-  python3 - "$domain" "${ss_port:-23456}" "${anytls_port:-8443}" "${naive_port:-44333}" \
-          "${SS_METHOD:-2022-blake3-aes-128-gcm}" "${SS_KEY:-}" "${ANYTLS_PASS:-}" "${NAIVE_USER:-}" "${NAIVE_PASS:-}" <<'PY'
+  local ss_port anytls_port socks_port naive_port
+  ss_port="$(_conf ss_port)"; anytls_port="$(_conf anytls_port)"; socks_port="$(_conf socks_port)"; naive_port="$(_conf naive_port)"
+  python3 - "$domain" "${ss_port:-23456}" "${anytls_port:-8443}" "${socks_port:-10808}" "${naive_port:-44333}" \
+          "${SS_METHOD:-2022-blake3-aes-128-gcm}" "${SS_KEY:-}" "${ANYTLS_PASS:-}" "${SOCKS_USER:-}" "${SOCKS_PASS:-}" "${NAIVE_USER:-}" "${NAIVE_PASS:-}" <<'PY'
 import sys,base64,urllib.parse
-domain,ssp,atp,nvp,method,ssk,atp_pass,nu,np=sys.argv[1:10]
+domain,ssp,atp,sop,nvp,method,ssk,atp_pass,su,sp,nu,np=sys.argv[1:13]
 def b64u(s): return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
 print("=== 客户端连接 URI ===")
-# SS2022: ss://base64url(method:password)@host:port#tag
 if ssk:
     ui=b64u(f"{method}:{ssk}")
     print(f"[1] Shadowsocks : ss://{ui}@{domain}:{ssp}#BV-LA-SS")
-# AnyTLS: anytls://password@host:port/?sni=domain#tag
 if atp_pass:
     print(f"[2] AnyTLS      : anytls://{urllib.parse.quote(atp_pass,safe='')}@{domain}:{atp}/?sni={domain}#BV-LA-AnyTLS")
-# NaiveProxy: naive+https://user:pass@host:port#tag
+if su and sp:
+    print(f"[3] SOCKS5      : socks5://{urllib.parse.quote(su,safe='')}:{urllib.parse.quote(sp,safe='')}@{domain}:{sop}#BV-LA-SOCKS5")
 if nu and np:
-    print(f"[3] NaiveProxy  : naive+https://{urllib.parse.quote(nu,safe='')}:{urllib.parse.quote(np,safe='')}@{domain}:{nvp}#BV-LA-Naive")
+    print(f"[4] NaiveProxy  : naive+https://{urllib.parse.quote(nu,safe='')}:{urllib.parse.quote(np,safe='')}@{domain}:{nvp}#BV-LA-Naive")
 PY
 }
-
 # ---------- 命令实现 ----------
 cmd_status(){
   hr "服务状态"
@@ -119,18 +119,18 @@ cmd_info(){ _loadsecrets; hr "节点信息"; echo "  域名: $(DOMAIN)"; print_u
 cmd_restart(){
   local t="${1:-all}"
   case "$t" in
-    ss|anytls) restart_svc sing-box;;
+    ss|anytls|socks) restart_svc sing-box;;
     naive|caddy) restart_svc caddy;;
     panel|ansgo-panel) restart_svc ansgo-panel;;
     all) restart_svc caddy; restart_svc sing-box; restart_svc ansgo-panel;;
-    *) err "未知目标: $t (可用: ss anytls naive panel all)"; return 1;;
+    *) err "未知目标: $t (可用: ss anytls socks naive panel all)"; return 1;;
   esac
 }
-cmd_stop(){ local t="${1:-}"; [ -z "$t" ] && { err "用法: ansgo-admin stop [ss|anytls|naive|panel]"; return 1; }; stop_svc "$(svc_of "$t")"; }
-cmd_logs(){ local t="${1:-all}"; case "$t" in ss|anytls|sing-box) journalctl -u sing-box -n 50 --no-pager;; naive|caddy) journalctl -u caddy -n 50 --no-pager;; panel|ansgo-panel) journalctl -u ansgo-panel -n 50 --no-pager;; all) journalctl -u caddy -u sing-box -u ansgo-panel -n 30 --no-pager;; *) err "未知目标: $t";; esac; }
+cmd_stop(){ local t="${1:-}"; [ -z "$t" ] && { err "用法: ansgo-admin stop [ss|anytls|socks|naive|panel]"; return 1; }; stop_svc "$(svc_of "$t")"; }
+cmd_logs(){ local t="${1:-all}"; case "$t" in ss|anytls|socks|sing-box) journalctl -u sing-box -n 50 --no-pager;; naive|caddy) journalctl -u caddy -n 50 --no-pager;; panel|ansgo-panel) journalctl -u ansgo-panel -n 50 --no-pager;; all) journalctl -u caddy -u sing-box -u ansgo-panel -n 30 --no-pager;; *) err "未知目标: $t";; esac; }
 
 cmd_regen(){
-  local t="${1:-}"; [ -z "$t" ] && { err "用法: ansgo-admin regen [ss|anytls|naive]"; return 1; }
+  local t="${1:-}"; [ -z "$t" ] && { err "用法: ansgo-admin regen [ss|anytls|socks|naive]"; return 1; }
   do_backup >/dev/null
   _loadsecrets
   case "$t" in
@@ -142,59 +142,56 @@ cmd_regen(){
       local p; p="$(gen_anytls_pass)"; _setsecret ANYTLS_PASS "$p"
       warn "已重置 AnyTLS 密码，将重启 sing-box。"
       ansgo-genconf sing-box && restart_svc sing-box && print_uris;;
+    socks)
+      local u pw; u="$(gen_socks_user)"; pw="$(gen_socks_pass)"; _setsecret SOCKS_USER "$u"; _setsecret SOCKS_PASS "$pw"
+      warn "已重置 SOCKS5 账号，将重启 sing-box。"
+      ansgo-genconf sing-box && restart_svc sing-box && print_uris;;
     naive)
       local u pw; u="$(gen_naive_user)"; pw="$(gen_naive_pass)"; _setsecret NAIVE_USER "$u"; _setsecret NAIVE_PASS "$pw"
       warn "已重置 NaiveProxy 账号，将重启 caddy。"
       ansgo-genconf caddy && restart_svc caddy && print_uris;;
-    *) err "未知目标: $t (可用: ss anytls naive)"; return 1;;
+    *) err "未知目标: $t (可用: ss anytls socks naive)"; return 1;;
   esac
 }
 
 cmd_regen2(){
-  # 生成第二组密钥（不自动启用，需面板/ansgo-admin 开启 group2_enabled）
+  # 生成 AnyTLS-2 落地服务密钥（Naive 不参与落地）
   do_backup >/dev/null
-  local u1 p1 u2 pw2
+  local u1 p1
   p1="$(gen_anytls_pass)"; u1="$(cat /proc/sys/kernel/random/uuid)"
-  u2="$(gen_naive_user)"; pw2="$(gen_naive_pass)"
   _setsecret ANYTLS2_PASS "$p1"; _setsecret ANYTLS2_UUID "$u1"
-  _setsecret NAIVE2_USER "$u2"; _setsecret NAIVE2_PASS "$pw2"
-  ok "已生成第2组密钥（ANYTLS2_* / NAIVE2_*）"
+  ok "已生成 AnyTLS-2 密钥（ANYTLS2_*）"
   echo "  ANYTLS2: user=$u1 pass=$p1"
-  echo "  NAIVE2:  user=$u2 pass=$pw2"
-  warn "如需启用：ansgo-admin group2 enable（或面板「第二组服务」页开启）"
+  warn "如需启用：ansgo-admin group2 enable [anytls2_port]（或面板「落地服务」页开启）"
 }
 
 cmd_group2(){
-  # ansgo-admin group2 [enable|disable] [anytls2_port] [naive2_port]
+  # ansgo-admin group2 [enable|disable] [anytls2_port]
   local act="${1:-status}"
   _loadsecrets
   if [ "$act" = "status" ]; then
     echo "group2_enabled=$(_conf group2_enabled)"
-    echo "anytls2_port=$(_conf anytls2_port)  naive2_port=$(_conf naive2_port)"
+    echo "anytls2_port=$(_conf anytls2_port)"
     echo "ANYTLS2_PASS=${ANYTLS2_PASS:-未生成}"
     return
   fi
   do_backup >/dev/null
-  local a2="${2:-}" n2="${3:-}"
+  local a2="${2:-}"
   case "$act" in
     enable)
-      # 校验密钥
-      [ -n "${ANYTLS2_PASS:-}" ] || { err "第2组密钥未生成，先执行 ansgo-admin regen2"; return 1; }
+      [ -n "${ANYTLS2_PASS:-}" ] || { err "AnyTLS-2 密钥未生成，先执行 ansgo-admin regen2"; return 1; }
       [ -n "$a2" ] || a2=21112
-      [ -n "$n2" ] || n2=44334
       _setconf group2_enabled true
       _setconf anytls2_port "$a2"
-      _setconf naive2_port "$n2"
-      ansgo-genconf all && restart_svc sing-box && restart_svc caddy
-      ok "第2组已启用 (anytls2=$a2, naive2=$n2)";;
+      ansgo-genconf sing-box && restart_svc sing-box
+      ok "AnyTLS-2 落地服务已启用 (anytls2=$a2)";;
     disable)
       _setconf group2_enabled false
-      ansgo-genconf all && restart_svc sing-box && restart_svc caddy
-      ok "第2组已关闭";;
-    *) err "用法: ansgo-admin group2 [enable|disable|status] [anytls2_port] [naive2_port]";;
+      ansgo-genconf sing-box && restart_svc sing-box
+      ok "AnyTLS-2 落地服务已关闭";;
+    *) err "用法: ansgo-admin group2 [enable|disable|status] [anytls2_port]";;
   esac
 }
-
 cmd_cert_status(){
   local cf="${CERTDIR}/fullchain.pem"
   [ -f "$cf" ] || { err "证书文件不存在: $cf"; return 1; }
@@ -282,12 +279,12 @@ cmd_uninstall(){
 usage(){
   cat <<'EOF'
 ansgo-admin —— BV-LA 离线管理
-  status                      三协议+面板状态 / 端口 / 资源 / 证书
+  status                      多协议+面板状态 / 端口 / 资源 / 证书
   info                        节点连接参数 + URI + 面板信息
-  restart [ss|anytls|naive|panel|all]
-  stop    [ss|anytls|naive|panel]
-  logs    [ss|anytls|naive|panel|all]
-  regen   [ss|anytls|naive]   重置密钥（自动备份+重启+打印新URI）
+  restart [ss|anytls|socks|naive|panel|all]
+  stop    [ss|anytls|socks|naive|panel]
+  logs    [ss|anytls|socks|naive|panel|all]
+  regen   [ss|anytls|socks|naive]   重置密钥（自动备份+重启+打印新URI）
   cert status | renew         证书到期 / 手动续期
   panel-pass                  重置面板密码（打印新密码）
   panel-path                  重置面板 URL 路径（兜底）
