@@ -1,10 +1,12 @@
 # ANS-GO
 
-> 在低配 VPS（LXC 或 KVM）上部署 **NaiveProxy + AnyTLS + Shadowsocks** 三协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
+> 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.15-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.16-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
+>
+> ℹ️ 当前开发版变更：新增 SOCKS5（sing-box inbound，强制用户名/密码）、面板自定义网页标题；NaiveProxy 保留为普通可选服务，但不参与任何远端落地，落地服务仅支持 AnyTLS-2 → 远端 SS。
 
 ---
 
@@ -252,7 +254,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 落地机 SS 信息（host / port / method / password）随后填入中转机面板**「落地服务」页**下半部分的「远端 SS 落地服务器」。
 
-> ⚠️ **架构约束**（v1.5.12 明确告知）：只有 **AnyTLS-2** 经 SS 落地（隐藏中转 IP）；**NaiveProxy-2 走 direct**（caddy 与 sing-box 是两个独立进程，跨进程路由不可行）。
+> ℹ️ **落地服务仅支持 AnyTLS-2 → 远端 SS**（隐藏中转 IP）。NaiveProxy 保留为普通可选代理服务，但**不参与任何远端落地**（caddy 与 sing-box 是两个独立进程，跨进程路由不可行）。
 
 ---
 
@@ -267,6 +269,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 | `--email` | `admin@<域名>` | ACME 注册邮箱 |
 | `--ss-port` | **随机** ⭐ v1.5.12 | Shadowsocks 端口（10000-65535）|
 | `--anytls-port` | **随机** ⭐ v1.5.12 | AnyTLS 端口 |
+| `--socks-port` | **随机** ⭐ 开发版 | SOCKS5 端口（sing-box inbound，强制用户名/密码）|
 | `--naive-port` | **随机** ⭐ v1.5.12 | NaiveProxy 端口（**勿用 443**，443 是 caddy 伪装站）|
 | `--panel-port` | **随机** ⭐ v1.5.12 | 面板端口 |
 | `--panel-user` | `admin` | 面板管理员用户名 |
@@ -275,6 +278,8 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 | `--ss-password` | 随机 | Shadowsocks 密钥（须 base64(16字节)，`openssl rand -base64 16` 生成）⭐ v1.5.5 |
 | `--anytls-password` | 随机 | AnyTLS 密码（非空即可）⭐ v1.5.5 |
 | `--anytls-uuid` | 随机 | AnyTLS 用户 UUID（标准格式）⭐ v1.5.5 |
+| `--socks-user` | 随机 | SOCKS5 用户名（不含冒号和空白）⭐ 开发版 |
+| `--socks-password` | 随机 | SOCKS5 密码（不含冒号和空白）⭐ 开发版 |
 | `--naive-user` | 随机 | NaiveProxy 用户名（不含冒号和空白）⭐ v1.5.5 |
 | `--naive-password` | 随机 | NaiveProxy 密码（不含冒号和空白）⭐ v1.5.5 |
 | `--disguise-panel` | `proxy:https://example.com` | `:443` 直访伪装站点（`proxy:<URL>` / `page`）|
@@ -515,12 +520,12 @@ cat /etc/ansgo/panel.json | python3 -c 'import json,sys;d=json.load(sys.stdin);p
 
 ### 启用落地服务（中转→落地架构）
 
-「**落地服务**」页（v1.5.12 起由原「第二组服务」+「出口落地」合并）：
-1. **上半部分**：勾选启用 → 填 anytls-2 / naive-2 端口 → 保存（密钥未生成时**自动生成**，无需手动点按钮）
+「**落地服务**」页：
+1. **上半部分**：勾选启用 → 填 anytls-2 端口 → 保存（密钥未生成时**自动生成**，无需手动点按钮）
 2. **下半部分**：填远端 SS 落地服务器（host/port/method/password）→ 保存
-3. 生成的密钥可在「服务管理」页底部 AnyTLS-2 / NaiveProxy-2 卡片查看/修改
+3. 生成的 AnyTLS-2 密钥可在「服务管理」页底部卡片查看/修改
 
-> ⚠️ **架构约束**：只有 AnyTLS-2 经 SS 落地（隐藏中转 IP）；NaiveProxy-2 走 direct（caddy/sing-box 跨进程不可路由）。
+> ℹ️ **落地服务仅 AnyTLS-2 经远端 SS 出口**（隐藏中转 IP）。NaiveProxy / SOCKS5 / 第一组 SS+AnyTLS 均走 direct，不参与落地。
 
 ### 离线管理（面板全挂也能用）
 
@@ -529,14 +534,14 @@ cat /etc/ansgo/panel.json | python3 -c 'import json,sys;d=json.load(sys.stdin);p
 ```bash
 ansgo-admin status                # 服务状态 / 端口 / 资源 / 证书
 ansgo-admin info                  # 节点连接参数 + URI + 面板信息
-ansgo-admin restart [ss|anytls|naive|panel|all]
+ansgo-admin restart [ss|anytls|socks|naive|panel|all]
 ansgo-admin stop    [服务]
 ansgo-admin logs    [服务]
-ansgo-admin regen   [ss|anytls|naive]   # 重置密钥
-ansgo-admin regen2                        # 重新生成落地服务密钥
-ansgo-admin cert status | renew          # 证书状态 / 手动续期
-ansgo-admin panel-pass                    # 重置面板密码
-ansgo-admin panel-path                    # 重置面板 URL 路径
+ansgo-admin regen   [ss|anytls|socks|naive]   # 重置密钥
+ansgo-admin regen2                          # 重新生成落地服务密钥（AnyTLS-2）
+ansgo-admin cert status | renew            # 证书状态 / 手动续期
+ansgo-admin panel-pass                      # 重置面板密码
+ansgo-admin panel-path                      # 重置面板 URL 路径
 ansgo-admin panel-port [PORT]             # 重置面板端口
 ansgo-admin firewall [list|open PORT|close PORT]
 ansgo-admin backup                        # 备份所有配置
@@ -568,13 +573,16 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ## ✨ 特性
 
-### v1.5.15 最新特性 ⭐
+### v1.5.16 最新特性 ⭐
 
-- **【Bug修复】节点信息页「加载中」根治**：前端 `row()` 对 `n.port`（number）调 `.replace` 抛 TypeError，中断整个 async `loadNode`，DOM 停在「加载中…」占位符。修复：`String()` 强转后再调 string-only 方法。**几乎所有用户都中招**（默认部署后 SS/AnyTLS/Naive 全启用）
-- 详见上方 [⭐ 升级到 v1.5.15](#-升级到-v11515节点信息页加载中修复)
+- **【新功能】SOCKS5 支持**：sing-box 第三个 inbound，强制用户名/密码鉴权，面板可安装/卸载/改端口/改凭证/生成 URI/健康检测
+- **【新功能】面板自定义网页标题**：面板设置页可自定义浏览器标签标题，刷新后立即生效
+- **【架构】NaiveProxy 落地简化**：保留 NaiveProxy 普通代理，但移除 NaiveProxy-2；落地服务仅 AnyTLS-2 → 远端 SS（NaiveProxy/SOCKS5 不参与落地）
+- 详见 [v1.5.16 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.16)
 
-### v1.5.12 ~ v1.5.14 近期特性
+### v1.5.12 ~ v1.5.15 近期特性
 
+- **v1.5.15**：根治节点信息页「加载中」bug（前端 `row()` 对 number 调 `.replace` 抛 TypeError）
 - **v1.5.14**：落地服务端口冲突检测 + `svcActive` 状态修复（systemd 非 active 状态不再全报 unknown）+ xcaddy 磁盘预检 + caddy-naive 预编译产物补齐
 - **v1.5.13**：根治「重新部署后面板看不到」——ghcr.io 镜像二进制固化滞后问题；`main.go` version 改 `-ldflags` 构建时注入
 - **v1.5.12**：节点信息页重构（未启用不显示 + 分行复制）+ 落地服务合并页 + 端口全部随机生成 + 服务健康检测（systemd + 端口监听 + TCP 握手三合一）
@@ -582,11 +590,11 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ### 核心特性
 
 - **面板优先架构**：install.sh 只装面板 + 证书 + :443 伪装站；代理服务面板内按需启用（不装不占端口）
-- **三协议代理**：NaiveProxy（caddy forwardproxy-naive 分支）/ AnyTLS / Shadowsocks-2022（sing-box 双 inbound）
-- **Web 管理面板**：Go 单二进制（~15-20MB 运行内存），中文 UI，管全部协议参数 / 端口 / 证书 / 服务安装卸载 + 客户端二维码
+- **多协议代理**：Shadowsocks-2022 / AnyTLS / SOCKS5（sing-box 三 inbound）+ NaiveProxy（caddy forwardproxy-naive 分支），均可面板内安装/卸载
+- **Web 管理面板**：Go 单二进制（~15-20MB 运行内存），中文 UI，管全部协议参数 / 端口 / 证书 / 服务安装卸载 + 客户端二维码 + **自定义网页标题**
 - **一张证书共享**：acme.sh 自动签发 或 手动指定已有证书；caddy / sing-box / 面板三服务共享
 - **域名双伪装**：`:443` 纯反代伪装站 + naive 端口独立伪装；两个伪装站点均可在 Web 后台独立配置
-- **落地服务 + 链式出站**：AnyTLS-2 经 SS 走另一台落地服务器（隐藏中转 IP）
+- **落地服务 + 链式出站**：仅 AnyTLS-2 经 SS 走另一台落地服务器（隐藏中转 IP）；NaiveProxy / SOCKS5 不参与落地
 - **完全解耦**：caddy / sing-box / 面板三个独立进程、端口、systemd unit，**改协议端口永远不会断面板**
 - **离线兜底**：`ansgo-admin` bash 脚本零依赖，面板全挂也能 SSH 管理一切
 - **nginx 共存模式**：`--no-caddy` 让 caddy 不监听 80/443，已装 nginx/宝塔的服务器可共存
@@ -611,7 +619,8 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
       ▼                 ▼                     ▼
    caddy :443      sing-box :<随机>         面板(Go) :<随机>
    NaiveProxy      AnyTLS + Shadowsocks    Web 管理面板
-   + 域名伪装反代   + 落地 anytls-2         (含密钥/证书/检测)
+   + 域名伪装反代   + SOCKS5               (含密钥/证书/检测)
+                   + 落地 anytls-2 → SS
       ▲                 ▲                     ▲
       └─────── ansgo-admin (bash) ───────────┘   SSH 离线兜底
 ```
@@ -648,7 +657,7 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 | 文档 | 内容 |
 |------|------|
 | [README.md](README.md) | **用户教程入口**：安装 / 交互 / 带参数 / 更新 / 卸载 / 故障排查 |
-| [AGENTS.md](AGENTS.md) | **唯一事实来源**：项目目标、架构、端口、证书方案、三协议配置、面板设计、部署顺序、风险回滚、约束原则、版本历史 changelog |
+| [AGENTS.md](AGENTS.md) | **唯一事实来源**：项目目标、架构、端口、证书方案、多协议配置、面板设计、部署顺序、风险回滚、约束原则、版本历史 changelog |
 | [deploy/README.md](deploy/README.md) | 手动部署 / 复现指南：文件清单、各步骤命令、配置模板、实战注意事项 |
 
 ---

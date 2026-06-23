@@ -1,5 +1,5 @@
 [Unit]
-Description=sing-box (shadowsocks + anytls)
+Description=sing-box (shadowsocks + anytls + socks5)
 After=network-online.target nss-lookup.target
 Wants=network-online.target
 
