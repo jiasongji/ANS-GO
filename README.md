@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **NaiveProxy + AnyTLS + Shadowsocks** 三协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.12-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.15-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 
@@ -298,6 +298,8 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 ANS-GO 升级有三种场景，按需选用：
 
+> ⚠️ **v1.5.15 修复了「节点信息页一直加载中」的致命 bug**（默认部署后 SS/AnyTLS/Naive 全启用 → 几乎所有用户都中招）。**强烈建议所有已部署的服务器按下方「场景 1」或「场景 2」尽快更新面板二进制。** 详见 [v1.5.15 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.15)。
+
 ### 场景 1：重新部署（最简单，配置保留）
 
 重新跑 install.sh，**已存在的 `panel.json` / `secrets.env` 会被保留**（脚本检测到则跳过生成），仅刷新脚本/二进制：
@@ -312,6 +314,69 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 ```
 
 > 此方式会拉取最新 `install.sh`、最新二进制（若已装则跳过，加 `--force-bin` 强制重装）。
+
+### ⭐ 升级到 v1.5.15（节点信息页「加载中」修复）
+
+**只升级面板二进制即可**，配置/密钥/证书全部不动。两种方式任选其一：
+
+#### 方式 A：一键脚本（裸金属 + Docker 都适用）
+
+在**已部署的服务器**上执行：
+
+```bash
+# 裸金属（直装在系统里）
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+  | bash -s -- --force-bin --non-interactive   # 拉最新 install.sh + 强制刷新面板二进制
+
+# Docker（容器内）
+cd /etc/ansgo-docker
+docker compose pull && docker compose up -d    # 拉最新镜像并重建容器（配置在卷里不丢）
+```
+
+#### 方式 B：手动替换面板二进制（裸金属，最快）
+
+面板二进制从 [v1.5.15 release](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.15) 下载，**必须按 stop→rm→scp→md5→start 流程**（scp 覆盖运行中二进制会静默失败，§9 经验）：
+
+```bash
+# 1. SSH 进服务器（裸金属）
+ssh -p <SSH端口> root@<服务器IP>
+
+# 2. 备份 + 停止
+cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-pre-v1.5.15/
+systemctl stop ansgo-panel
+
+# 3. 下载新二进制（替换 <arch> 为 amd64 或 arm64，用 uname -m 查：x86_64→amd64 / aarch64→arm64）
+ARCH=amd64
+curl -fsSL -o /usr/local/bin/ansgo-panel \
+  https://github.com/jiasongji/ANS-GO/releases/download/v1.5.15/ansgo-panel-linux-${ARCH}
+chmod +x /usr/local/bin/ansgo-panel
+
+# 4. 校验 md5（应与 release 页公布的 md5 一致）
+md5sum /usr/local/bin/ansgo-panel
+# 期望：amd64 → d51adf1f2492be5ccf3b696b6e6f4630
+#       arm64 → 2f38c35606906f9849613c191eae6613
+
+# 5. 启动 + 验证
+systemctl start ansgo-panel
+systemctl is-active ansgo-panel    # 应输出 active
+```
+
+#### 方式 C：手动替换（Docker）
+
+```bash
+# 在宿主机
+docker cp <本地下载的 ansgo-panel-linux-amd64> ansgo:/usr/local/bin/ansgo-panel
+docker exec ansgo chmod +x /usr/local/bin/ansgo-panel
+docker exec ansgo systemctl restart ansgo-panel
+```
+
+> ⚠️ **方式 C 是临时修复**（容器重建会丢失）。永久固化需重建镜像——推荐用方式 A 的 `docker compose pull`。
+
+#### 验证修复生效
+
+打开浏览器访问面板 →「节点信息」页，应能看到 **SS / AnyTLS / NaiveProxy 三张服务卡**（含连接地址、端口、密钥、URI + 二维码），不再卡在「加载中…」。
+
+> ⚠️ **务必硬刷新浏览器**（Ctrl/Cmd+Shift+R）清缓存，否则可能仍加载旧 HTML。
 
 ### 场景 2：升级单个组件（面板 / sing-box / caddy）
 
@@ -490,6 +555,7 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 | 面板打不开 | `ansgo-admin status` 看 ansgo-panel 是否 active；检查防火墙 `ansgo-admin firewall list`；端口是否被占用 `ss -tln \| grep <端口>` |
 | 证书签发失败 | `cat /root/ansgo-cert-issue.log` 看详细日志；Dynu 凭证是否正确；DNS 是否已解析到本机 |
 | 代理服务连不上 | 面板「服务管理」点「🔍 检测」三合一诊断；`ansgo-admin logs <服务>` 看日志；密钥是否一致 |
+| **节点信息页一直「加载中…」** | **v1.5.15 已根治**。根因：前端 `row()` 对 `n.port`（number）调 `.replace` 抛 TypeError 中断整个 `loadNode`。修复方式：升级面板二进制到 v1.5.15（见上方「升级到 v1.5.15」）。临时验证：浏览器 Console 看 `TypeError: ...replace is not a function`；或硬刷新清缓存 |
 | 落地服务 anytls-2 走 direct（未走 SS 落地）| 确认「落地服务」页**远端 SS** 已启用且 host/port/password 正确；密钥长度校验（2022-blake3-aes-128 需 base64(16字节)）|
 | 改面板端口后失联 | SSH 进去 `ansgo-admin panel-port <新端口>` 重置；或改 `/etc/ansgo/panel.json` 后 `systemctl restart ansgo-panel` |
 | 改配置后服务起不来 | `ansgo-admin restore /etc/ansgo-backup-<最近的>/` 回滚；再 `ansgo-admin restart all` |
@@ -502,14 +568,16 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ## ✨ 特性
 
-### v1.5.12 最新特性 ⭐
+### v1.5.15 最新特性 ⭐
 
-- **节点信息页重构**：未启用服务不显示；每条信息分行 + 独立复制按钮
-- **落地服务合并页**：「第二组服务」+「出口落地」合并为单页
-- **端口全部随机生成**：10000-65535 自动避让，部署横幅醒目提示
-- **落地服务启用自动生成密钥**：无需手动点「生成密钥」按钮
-- **服务健康检测**：systemd + 端口监听 + TCP 握手三合一诊断
-- **【Bug修复】** 落地服务 4 个致命 bug 根治（路由规则引用不存在的 inbound / naive-2 架构约束 / 启用流程 / sing-box enable）
+- **【Bug修复】节点信息页「加载中」根治**：前端 `row()` 对 `n.port`（number）调 `.replace` 抛 TypeError，中断整个 async `loadNode`，DOM 停在「加载中…」占位符。修复：`String()` 强转后再调 string-only 方法。**几乎所有用户都中招**（默认部署后 SS/AnyTLS/Naive 全启用）
+- 详见上方 [⭐ 升级到 v1.5.15](#-升级到-v11515节点信息页加载中修复)
+
+### v1.5.12 ~ v1.5.14 近期特性
+
+- **v1.5.14**：落地服务端口冲突检测 + `svcActive` 状态修复（systemd 非 active 状态不再全报 unknown）+ xcaddy 磁盘预检 + caddy-naive 预编译产物补齐
+- **v1.5.13**：根治「重新部署后面板看不到」——ghcr.io 镜像二进制固化滞后问题；`main.go` version 改 `-ldflags` 构建时注入
+- **v1.5.12**：节点信息页重构（未启用不显示 + 分行复制）+ 落地服务合并页 + 端口全部随机生成 + 服务健康检测（systemd + 端口监听 + TCP 握手三合一）
 
 ### 核心特性
 
