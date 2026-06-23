@@ -261,11 +261,18 @@ async function loadNode(){
   if(j.error)return $('#content').innerHTML=j.error;
   const domain=j.domain||'';
   // 单条信息行（label + 值 + 复制按钮）
-  const row=(label,val,copyVal)=>val?`<div class="row" style="margin-bottom:6px">
+  // 注意：n.port 是 number、n.host 可能是 undefined，必须 String() 强转后再 .replace，
+  // 否则 (number).replace() 抛 TypeError 让整个 forEach 中断，content 卡在「加载中…」
+  const row=(label,val,copyVal)=>{
+    if(!val)return '';
+    const disp=String(val);
+    const cp=String(copyVal||val).replace(/`/g,'\\`');
+    return `<div class="row" style="margin-bottom:6px">
       <label style="width:110px">${label}</label>
-      <div class="f"><code style="word-break:break-all">${val}</code></div>
-      <button class="mut" style="flex-shrink:0;margin:0" onclick="copy(\`${(copyVal||val).replace(/`/g,'\\`')}\`)">📋</button>
-    </div>`:'';
+      <div class="f"><code style="word-break:break-all">${disp}</code></div>
+      <button class="mut" style="flex-shrink:0;margin:0" onclick="copy(\`${cp}\`)">📋</button>
+    </div>`;
+  };
   // 一张服务卡（含 URI + QR + 各字段行）
   const card=(title,icon,n,extra='')=>{
     if(!n||!n.uri)return '';  // 未启用/无 URI 不渲染

@@ -152,7 +152,7 @@ curl -fsSL https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sin
 install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
 
 # caddy-naive：本项目 release 预编译产物（推荐）
-VER=v1.5.12
+VER=v1.5.15
 curl -fsSL https://github.com/jiasongji/ANS-GO/releases/download/${VER}/caddy-naive-linux-${ARCH} -o /usr/local/bin/caddy
 chmod 0755 /usr/local/bin/caddy
 # 失败则现场 xcaddy 编译（需 Go 1.22+ + git，约 3-5 分钟）：
@@ -334,7 +334,7 @@ docker buildx build --builder ansgo-builder \
   --build-arg HTTP_PROXY=http://host.docker.internal:1666 \
   --build-arg HTTPS_PROXY=http://host.docker.internal:1666 \
   -t ghcr.io/jiasongji/ansgo:latest \
-  -t ghcr.io/jiasongji/ansgo:v1.5.12 \
+  -t ghcr.io/jiasongji/ansgo:v1.5.15 \
   -f deploy/Dockerfile.allinone . --push
 ```
 
@@ -345,6 +345,8 @@ docker buildx build --builder ansgo-builder \
 ---
 
 ## 更新升级
+
+> ⚠️ **v1.5.15 修复了「节点信息页一直加载中」致命 bug**（默认部署后 SS/AnyTLS/Naive 全启用 → 几乎所有用户都中招）。**强烈建议所有已部署服务器尽快更新面板二进制**——只升级面板二进制即可，配置/密钥/证书不动。详见 [README.md「升级到 v1.5.15」](README.md#-升级到-v11515节点信息页加载中修复)。
 
 ### 重新部署（最简单，配置保留）
 
@@ -358,6 +360,30 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/instal
 ```bash
 ansgo-admin update sing-box                          # 升级 sing-box（自动拉 SagerNet 最新版）
 # 面板/caddy 升级见上文「面板 Go 二进制构建」和「上传到服务器」
+```
+
+### 手动升级面板二进制到 v1.5.15（裸金属，最快）
+
+按 stop→rm→scp→md5→start 流程（scp 覆盖运行中二进制会静默失败）：
+
+```bash
+ssh -p <SSH端口> root@<服务器IP>
+# 备份 + 停止
+cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-pre-v1.5.15/
+systemctl stop ansgo-panel
+
+# 下载新二进制（amd64 / arm64 二选一，uname -m 查架构）
+ARCH=amd64   # x86_64 → amd64，aarch64 → arm64
+curl -fsSL -o /usr/local/bin/ansgo-panel \
+  https://github.com/jiasongji/ANS-GO/releases/download/v1.5.15/ansgo-panel-linux-${ARCH}
+chmod +x /usr/local/bin/ansgo-panel
+
+# md5 校验 + 启动
+md5sum /usr/local/bin/ansgo-panel
+# 期望：amd64 → d51adf1f2492be5ccf3b696b6e6f4630
+#       arm64 → 2f38c35606906f9849613c191eae6613
+systemctl start ansgo-panel
+systemctl is-active ansgo-panel                     # 应输出 active
 ```
 
 ### 升级 Docker 镜像
@@ -402,7 +428,7 @@ bash install.sh --uninstall --purge
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
 - sing-box：**SagerNet 官方 release**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/...`），本项目 release vendored 兜底
 - caddy-naive：本项目 release 预编译产物（双架构），失败回退 xcaddy 现场编译
-- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/v1.5.12/ansgo-panel-linux-<arch>`
+- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/v1.5.15/ansgo-panel-linux-<arch>`
 - acme.sh：本仓库 vendored 快照（可选），或官方 `https://get.acme.sh`
 - 面板镜像：`ghcr.io/jiasongji/ansgo:latest`（all-in-one）/ `ghcr.io/jiasongji/ansgo-panel:latest`（面板单镜像）
 
