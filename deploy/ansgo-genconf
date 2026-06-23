@@ -163,7 +163,11 @@ def gen_singbox():
 
     outbounds = [{"type": "direct", "tag": "direct"}]
 
-    # 落地 SS outbound（第2组走它）
+    # 落地 SS outbound（第2组 anytls-2 走它）
+    # ⚠️ v1.5.12 架构修正：只有 anytls-2 能经 ss-out 落地（它在 sing-box 里）。
+    #   naive-2 在 caddy 里（独立进程），物理上无法经 sing-box 的 ss-out 转发，
+    #   naive-2 永远走 caddy 的 direct 出口（中转机 IP）。这是 caddy forwardproxy
+    #   与 sing-box 分离架构的固有约束，文档/UI 都已明确告知。
     rules = []
     if LANDING_ENABLED and LANDING_HOST and LANDING_PORT and LANDING_PASS:
         outbounds.append({
@@ -171,16 +175,13 @@ def gen_singbox():
             "server": LANDING_HOST, "server_port": LANDING_PORT,
             "method": LANDING_METHOD, "password": LANDING_PASS,
         })
-        # 第2组流量路由到 ss-out
-        g2_inbounds = []
+        # 仅 anytls-2 inbound 路由到 ss-out（v1.5.12 修复：原代码错误地引用了
+        # naive-in2，但 NaiveProxy 由 caddy 承载，sing-box 里没有该 inbound tag，
+        # 导致 sing-box 校验失败/规则被丢弃，第二组流量全部走 direct）
         if GROUP2_ENABLED and ANYTLS2_PORT:
-            g2_inbounds.append("anytls-in2")
-        if GROUP2_ENABLED and NAIVE2_PORT:
-            g2_inbounds.append("naive-in2")
-        if g2_inbounds:
             rules.append({
-                "inbound": g2_inbounds,
-                "action": "route", "outbound": "ss-out",
+                "inbound": ["anytls-in2"],
+                "outbound": "ss-out",
             })
 
     config = {
@@ -205,8 +206,10 @@ def gen_singbox():
     note = f"ss={SS_PORT}, anytls={ANYTLS_PORT}"
     if GROUP2_ENABLED:
         note += f", anytls2={ANYTLS2_PORT}"
-        if LANDING_ENABLED:
+        if LANDING_ENABLED and ANYTLS2_PORT:
             note += f"->ss-landing({LANDING_HOST}:{LANDING_PORT})"
+        if NAIVE2_PORT:
+            note += f", naive2={NAIVE2_PORT}(走 direct, caddy 无法经 ss-out)"
     print(f"已生成 /etc/sing-box/config.json ({note}, sni={DOMAIN})")
 
 # ===================== 生成 Caddyfile =====================

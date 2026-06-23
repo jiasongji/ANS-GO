@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -89,6 +90,8 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		requireAuth(group2Handler)(w, r)
 	case rel == "api/svc-install":
 		requireAuth(svcInstallHandler)(w, r)
+	case rel == "api/health":
+		requireAuth(healthHandler)(w, r)
 	case rel == "api/logs":
 		requireAuth(logsHandler)(w, r)
 	default:
@@ -222,16 +225,19 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	s := readSecrets()
 	uris := buildURIs(c, s)
+	// v1.5.12: 每个服务对象加 enabled 字段，让前端据此决定是否渲染卡片
+	// （未启用的服务不显示在节点信息页，避免空 URI 误导用户）
 	resp := map[string]any{
 		"domain":  c.Domain,
-		"ss":      map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": s.SSKey},
-		"anytls":  map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": s.AnyTLSPass, "sni": c.Domain},
-		"naive":   map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": s.NaiveUser, "pass": s.NaivePass},
+		"ss":      map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": s.SSKey, "enabled": c.SvcSSEnabled == "true", "host": c.Domain},
+		"anytls":  map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": s.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": c.Domain},
+		"naive":   map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": s.NaiveUser, "pass": s.NaivePass, "enabled": c.SvcNaiveEnabled == "true", "host": c.Domain},
 		"group2_enabled": c.Group2Enabled == "true",
 	}
 	if c.Group2Enabled == "true" {
-		resp["anytls2"] = map[string]any{"uri": uris["anytls2"], "port": c.AnyTLS2Port, "password": s.AnyTLS2Pass, "sni": c.Domain, "via": "ss-landing"}
-		resp["naive2"] = map[string]any{"uri": uris["naive2"], "port": c.Naive2Port, "user": s.Naive2User, "pass": s.Naive2Pass, "via": "ss-landing"}
+		// naive2 走 direct（caddy 无法经 sing-box ss-out），anytls2 走 ss-out 落地（架构约束，v1.5.12）
+		resp["anytls2"] = map[string]any{"uri": uris["anytls2"], "port": c.AnyTLS2Port, "password": s.AnyTLS2Pass, "sni": c.Domain, "enabled": true, "host": c.Domain, "via": "ss-landing"}
+		resp["naive2"] = map[string]any{"uri": uris["naive2"], "port": c.Naive2Port, "user": s.Naive2User, "pass": s.Naive2Pass, "enabled": true, "host": c.Domain, "via": "direct"}
 	}
 	jwrite(w, 200, resp)
 }
@@ -875,6 +881,103 @@ func logsHandler(w http.ResponseWriter, r *http.Request) {
 	jwrite(w, 200, map[string]string{"logs": string(out)})
 }
 
+// ===================== 服务健康检测（v1.5.12）=====================
+
+// healthHandler 检测单个服务的运行状态：
+//   1. systemd 是否 active（systemctl is-active）
+//   2. 配置端口是否在 LISTEN（ss -tln）
+//   3. 本机 TCP 自连能否握手（net.DialTimeout）
+// POST {target: ss|anytls|naive|panel|caddy|group2}
+// 返回 {ok, target, enabled, active, port, port_listening, tcp_connect, tcp_ms, summary}
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	var b struct{ Target string `json:"target"` }
+	json.NewDecoder(r.Body).Decode(&b)
+	c := configGet()
+	// target -> (systemd 单元, 是否启用, 端口)
+	type svcInfo struct {
+		unit, port string
+		enabled    bool
+	}
+	info := svcInfo{}
+	caddyActive := c.CaddyEnable == "true" || c.SvcNaiveEnabled == "true" || c.Group2Enabled == "true"
+	switch b.Target {
+	case "ss":
+		info = svcInfo{"sing-box", strconv.Itoa(c.SSPort), c.SvcSSEnabled == "true"}
+	case "anytls":
+		info = svcInfo{"sing-box", strconv.Itoa(c.AnyTLSPort), c.SvcAnyTLSEnabled == "true"}
+	case "naive":
+		info = svcInfo{"caddy", strconv.Itoa(c.NaivePort), c.SvcNaiveEnabled == "true"}
+	case "panel":
+		info = svcInfo{"ansgo-panel", strconv.Itoa(c.PanelPort), true}
+	case "caddy":
+		info = svcInfo{"caddy", "443", caddyActive}
+	case "anytls2":
+		info = svcInfo{"sing-box", strconv.Itoa(c.AnyTLS2Port), c.Group2Enabled == "true"}
+	case "naive2":
+		info = svcInfo{"caddy", strconv.Itoa(c.Naive2Port), c.Group2Enabled == "true"}
+	default:
+		jerr(w, 400, "target 必须为 ss/anytls/naive/panel/caddy/anytls2/naive2")
+		return
+	}
+
+	// 1) systemd active
+	active := svcActive(info.unit)
+
+	// 2) 端口 LISTEN 检测（ss -tlnp，取第 4 列 local addr，匹配 :端口$）
+	portListening := "no"
+	if port := info.port; port != "" && port != "0" {
+		out, _ := exec.Command("sh", "-c", "ss -tln 2>/dev/null | awk 'NR>1{print $4}'").Output()
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasSuffix(strings.TrimSpace(line), ":"+port) {
+				portListening = "yes"
+				break
+			}
+		}
+	}
+
+	// 3) TCP 本机自连（127.0.0.1:port）握手
+	tcpConnect := "no"
+	tcpMs := int64(0)
+	if portListening == "yes" {
+		start := time.Now()
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+info.port, time.Second)
+		tcpMs = time.Since(start).Milliseconds()
+		if err == nil {
+			conn.Close()
+			tcpConnect = "yes"
+		}
+	}
+
+	// 综合诊断
+	summary := "正常"
+	if !info.enabled {
+		summary = "服务未启用（请先在服务管理页安装）"
+	} else if active != "active" {
+		summary = info.unit + " 服务未运行（systemctl 状态: " + active + "）"
+	} else if portListening != "yes" {
+		summary = "端口 " + info.port + " 未监听（检查服务日志）"
+	} else if tcpConnect != "yes" {
+		summary = "端口监听但 TCP 握手失败（防火墙或服务异常）"
+	}
+
+	jwrite(w, 200, map[string]any{
+		"ok":            true,
+		"target":        b.Target,
+		"unit":          info.unit,
+		"enabled":       info.enabled,
+		"active":        active,
+		"port":          info.port,
+		"port_listening": portListening,
+		"tcp_connect":   tcpConnect,
+		"tcp_ms":        tcpMs,
+		"summary":       summary,
+	})
+}
+
 // ===================== 辅助 =====================
 
 func svcOfLog(t string) string {
@@ -1187,11 +1290,22 @@ func landingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 重新生成 sing-box（ss outbound 变更）并重启
+	// v1.5.12：确保 sing-box 已 enable（之前可能被 disable 了）
 	go func() {
 		_ = exec.Command(binGenConf, "sing-box").Run()
-		_ = exec.Command("systemctl", "restart", "sing-box").Run()
+		// 若 sing-box 有任何启用的服务（ss/anytls/group2），确保它运行
+		needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.Group2Enabled == "true"
+		if needSB {
+			_ = exec.Command("systemctl", "enable", "sing-box").Run()
+			_ = exec.Command("systemctl", "restart", "sing-box").Run()
+		}
 	}()
-	jwrite(w, 200, map[string]bool{"ok": true})
+	// 友好提示：落地出口只对 anytls-2 生效，naive-2 走 direct（架构约束）
+	note := ""
+	if c.SSLandingEnabled == "true" && c.Group2Enabled != "true" {
+		note = "落地 SS 已保存，但当前未启用落地服务，ss-out 不会生效"
+	}
+	jwrite(w, 200, map[string]any{"ok": true, "note": note})
 }
 
 // ===================== 第2组服务设置 =====================
@@ -1236,16 +1350,20 @@ func group2Handler(w http.ResponseWriter, r *http.Request) {
 	if b.DisguiseNaive2 != nil && *b.DisguiseNaive2 != "" {
 		c.DisguiseNaive2 = *b.DisguiseNaive2
 	}
-	// 启用时校验：密钥需已生成 + 端口必填
+	// 启用时校验：端口必填；密钥缺失则自动生成（v1.5.12：原先报错要求用户先点
+	// 「生成密钥」，但用户反馈启用后无法用 → 改为自动生成，体验更顺）
 	if c.Group2Enabled == "true" {
-		s := readSecrets()
-		if s.AnyTLS2Pass == "" || s.Naive2User == "" {
-			jerr(w, 400, "第2组密钥未生成，请先点击「生成第2组密钥」")
+		if c.AnyTLS2Port == 0 || c.Naive2Port == 0 {
+			jerr(w, 400, "启用落地服务需填写 anytls-2 端口 / naive-2 端口")
 			return
 		}
-		if c.AnyTLS2Port == 0 || c.Naive2Port == 0 {
-			jerr(w, 400, "启用第2组需填写 anytls2_port / naive2_port")
-			return
+		s := readSecrets()
+		if s.AnyTLS2Pass == "" || s.Naive2User == "" {
+			out, err := exec.Command(binAdmin, "regen2").CombinedOutput()
+			if err != nil {
+				jerr(w, 500, "自动生成落地服务密钥失败: "+string(out))
+				return
+			}
 		}
 	}
 	if err := configSet(c); err != nil {
@@ -1253,20 +1371,21 @@ func group2Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 状态变化需重新生成两个服务配置并重启
+	// v1.5.12：启用时 sing-box 可能之前因无 inbound 被 disable，这里显式 enable
 	if previouslyEnabled != (c.Group2Enabled == "true") || c.Group2Enabled == "true" {
 		go func() {
 			_ = exec.Command(binGenConf, "all").Run()
+			_ = exec.Command("systemctl", "enable", "sing-box").Run()
 			_ = exec.Command("systemctl", "restart", "sing-box").Run()
+			_ = exec.Command("systemctl", "enable", "caddy").Run()
 			_ = exec.Command("systemctl", "restart", "caddy").Run()
 		}()
 	}
 	jwrite(w, 200, map[string]bool{"ok": true})
 }
 
-// generateGroup2Keys 生成第2组密钥到 secrets.env（委托 ansgo-admin regen2）
-func generateGroup2Keys() error {
-	return exec.Command(binAdmin, "regen2").Run()
-}
+// v1.5.12: 落地服务密钥自动生成已内联到 group2Handler 启用分支（缺失时直接调
+// ansgo-admin regen2）。原先的 generateGroup2Keys 死代码已删除（从未被调用）。
 
 // ===================== 服务安装/卸载（面板内按需）=====================
 
