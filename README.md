@@ -45,8 +45,8 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 # ② 登录面板 →「服务管理」页按需安装代理服务（默认全部未启动）
 #    https://your-domain.com:<随机端口>/<随机URL路径>/
 
-# ③ 更新到最新版
-bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)    # 选「重新部署」会保留现有配置
+# ③ 更新已部署服务器到最新版（自动识别裸金属/Docker，配置保留 + 自动备份）
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh | bash
 
 # ④ 卸载（保留配置）/ 彻底清理（全删）
 curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | bash -s -- --uninstall
@@ -303,9 +303,51 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 ANS-GO 升级有三种场景，按需选用：
 
-> ⚠️ **v1.5.15 修复了「节点信息页一直加载中」的致命 bug**（默认部署后 SS/AnyTLS/Naive 全启用 → 几乎所有用户都中招）。**强烈建议所有已部署的服务器按下方「场景 1」或「场景 2」尽快更新面板二进制。** 详见 [v1.5.15 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.15)。
+> ⭐ **v1.5.16 新增 SOCKS5 + 自定义网页标题**。已部署的服务器推荐用下方的 **「方式 1：一键升级脚本」**，自动备份 + 识别部署形态 + 补全新功能所需配置字段。
 
-### 场景 1：重新部署（最简单，配置保留）
+### 方式 1：一键升级脚本 ⭐（推荐，裸金属 / Docker 自动识别）
+
+`deploy/upgrade.sh` 是专门为「已部署服务器的跨版本升级」设计的脚本，自动检测部署形态（裸金属 / Docker）并走对应路径，**升级前自动备份，幂等可重复执行**：
+
+```bash
+# 在已部署的服务器上执行（root），自动识别裸金属/Docker
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh | bash
+
+# 或下载后执行（可加参数）
+curl -fsSL -o upgrade.sh https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh
+bash upgrade.sh              # 自动识别形态，升级前确认
+bash upgrade.sh --yes        # 跳过确认（自动化场景）
+bash upgrade.sh --docker     # 强制走 Docker 路径
+bash upgrade.sh --metal      # 强制走裸金属路径
+bash upgrade.sh --help       # 查看用法
+```
+
+**两种形态各自做了什么：**
+
+| | 裸金属（LXC / systemd 直管） | Docker（`ghcr.io/jiasongji/ansgo`） |
+|---|---|---|
+| **更新内容** | ① 更新 `ansgo-genconf` + `ansgo-admin` 脚本（SOCKS5 生成逻辑）② 更新 `ansgo-panel` 二进制（md5 对比，相同则跳过）③ 补 `panel.json` 字段（`socks_port`/`svc_socks_enabled`/`panel_title`）④ 补 `secrets.env` 凭证（`SOCKS_USER`/`SOCKS_PASS`）| 只拉新镜像重建容器（配置在 volume 里，不丢） |
+| **影响范围** | 仅重启 `ansgo-panel`（~2s），代理服务（sing-box/caddy）不动 | 重建容器，三服务短暂中断几秒 |
+| **自动备份** | `/etc/ansgo-backup-upgrade-{时间戳}/` | compose 目录下 `ansgo-etc-vol-backup-{时间戳}.tgz` |
+
+> ⚠️ **SOCKS5 升级后默认不启用**（`svc_socks_enabled=false`，符合「面板内按需装服务」架构）。启用方式：登录面板「服务管理」页点「安装」，或 SSH 执行 `ansgo-admin regen socks`（Docker：`docker exec ansgo ansgo-admin regen socks`）。
+
+**回滚：**
+```bash
+# 裸金属：从备份目录恢复（脚本结束时会打印具体命令）
+BK=$(ls -1dt /etc/ansgo-backup-upgrade-* | head -1)
+cp -a "$BK/_usr_local_bin_ansgo-panel" /usr/local/bin/ansgo-panel
+cp -a "$BK/_etc_ansgo_panel.json"      /etc/ansgo/panel.json
+cp -a "$BK/_etc_ansgo_secrets.env"     /etc/ansgo/secrets.env
+systemctl restart ansgo-panel
+
+# Docker：把 docker-compose.yml 的 image: ghcr.io/jiasongji/ansgo:latest
+#         改成上一版 tag（如 :v1.5.15），再 docker compose up -d
+```
+
+---
+
+### 方式 2：重新部署（最简单，配置保留）
 
 重新跑 install.sh，**已存在的 `panel.json` / `secrets.env` 会被保留**（脚本检测到则跳过生成），仅刷新脚本/二进制：
 
@@ -319,73 +361,11 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 ```
 
 > 此方式会拉取最新 `install.sh`、最新二进制（若已装则跳过，加 `--force-bin` 强制重装）。
+> 注意：install.sh 重跑不会自动补 `socks_port` 等 v1.5.16 新字段——**需要新功能请用「方式 1」的 upgrade.sh**。
 
-### ⭐ 升级到 v1.5.15（节点信息页「加载中」修复）
+### 方式 3：升级单个组件（面板 / sing-box / caddy）
 
-**只升级面板二进制即可**，配置/密钥/证书全部不动。两种方式任选其一：
-
-#### 方式 A：一键脚本（裸金属 + Docker 都适用）
-
-在**已部署的服务器**上执行：
-
-```bash
-# 裸金属（直装在系统里）
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
-  | bash -s -- --force-bin --non-interactive   # 拉最新 install.sh + 强制刷新面板二进制
-
-# Docker（容器内）
-cd /etc/ansgo-docker
-docker compose pull && docker compose up -d    # 拉最新镜像并重建容器（配置在卷里不丢）
-```
-
-#### 方式 B：手动替换面板二进制（裸金属，最快）
-
-面板二进制从 [v1.5.15 release](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.15) 下载，**必须按 stop→rm→scp→md5→start 流程**（scp 覆盖运行中二进制会静默失败，§9 经验）：
-
-```bash
-# 1. SSH 进服务器（裸金属）
-ssh -p <SSH端口> root@<服务器IP>
-
-# 2. 备份 + 停止
-cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-pre-v1.5.15/
-systemctl stop ansgo-panel
-
-# 3. 下载新二进制（替换 <arch> 为 amd64 或 arm64，用 uname -m 查：x86_64→amd64 / aarch64→arm64）
-ARCH=amd64
-curl -fsSL -o /usr/local/bin/ansgo-panel \
-  https://github.com/jiasongji/ANS-GO/releases/download/v1.5.15/ansgo-panel-linux-${ARCH}
-chmod +x /usr/local/bin/ansgo-panel
-
-# 4. 校验 md5（应与 release 页公布的 md5 一致）
-md5sum /usr/local/bin/ansgo-panel
-# 期望：amd64 → d51adf1f2492be5ccf3b696b6e6f4630
-#       arm64 → 2f38c35606906f9849613c191eae6613
-
-# 5. 启动 + 验证
-systemctl start ansgo-panel
-systemctl is-active ansgo-panel    # 应输出 active
-```
-
-#### 方式 C：手动替换（Docker）
-
-```bash
-# 在宿主机
-docker cp <本地下载的 ansgo-panel-linux-amd64> ansgo:/usr/local/bin/ansgo-panel
-docker exec ansgo chmod +x /usr/local/bin/ansgo-panel
-docker exec ansgo systemctl restart ansgo-panel
-```
-
-> ⚠️ **方式 C 是临时修复**（容器重建会丢失）。永久固化需重建镜像——推荐用方式 A 的 `docker compose pull`。
-
-#### 验证修复生效
-
-打开浏览器访问面板 →「节点信息」页，应能看到 **SS / AnyTLS / NaiveProxy 三张服务卡**（含连接地址、端口、密钥、URI + 二维码），不再卡在「加载中…」。
-
-> ⚠️ **务必硬刷新浏览器**（Ctrl/Cmd+Shift+R）清缓存，否则可能仍加载旧 HTML。
-
-### 场景 2：升级单个组件（面板 / sing-box / caddy）
-
-通过 `ansgo-admin update` 升级单个二进制：
+通过 `ansgo-admin update` 升级单个二进制（**注意：此命令只更新二进制，不会更新 genconf/admin 脚本本身，也不会补 SOCKS5 配置字段——跨版本升级请用方式 1**）：
 
 ```bash
 # 升级 sing-box（自动从 SagerNet 官方 release 拉取最新版）
@@ -393,7 +373,7 @@ ansgo-admin update sing-box
 
 # 升级面板（先在 mac 上交叉编译，scp 上传到服务器，再执行）
 # 1. 本地编译（macOS）：
-cd deploy/panel && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ansgo-panel .
+cd deploy/panel && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=v1.5.16" -o ansgo-panel .
 # 2. scp 上传（必须 stop→rm→scp→md5→start，否则 scp 覆盖运行中二进制会静默失败）
 systemctl stop ansgo-panel
 rm /usr/local/bin/ansgo-panel
@@ -404,7 +384,7 @@ ssh root@<server> 'systemctl start ansgo-panel'
 # caddy-naive 分支需 xcaddy 现场编译，推荐重跑 install.sh --force-bin
 ```
 
-### 场景 3：升级 Docker 镜像
+### 方式 4：升级 Docker 镜像
 
 ```bash
 cd /etc/ansgo-docker
@@ -413,12 +393,16 @@ docker compose up -d                             # 重建容器（配置在卷�
 docker image prune -f                            # 清理旧镜像（可选）
 ```
 
+> Docker 部署的 SOCKS5 新字段（`socks_port` 等）在镜像启动后由面板自动用默认值补全；如需手动启用 SOCKS5，进容器执行 `docker exec ansgo ansgo-admin regen socks`。
+
 ### 升级前必备份
 
 ```bash
 ansgo-admin backup                               # 裸金属：备份到 /etc/ansgo-backup-{ts}/
 docker exec ansgo ansgo-admin backup             # Docker：容器内备份
 ```
+
+> `upgrade.sh` 已内置自动备份，上述命令用于手动升级（方式 3/4）前的额外保险。
 
 ---
 
@@ -597,6 +581,7 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 - **落地服务 + 链式出站**：仅 AnyTLS-2 经 SS 走另一台落地服务器（隐藏中转 IP）；NaiveProxy / SOCKS5 不参与落地
 - **完全解耦**：caddy / sing-box / 面板三个独立进程、端口、systemd unit，**改协议端口永远不会断面板**
 - **离线兜底**：`ansgo-admin` bash 脚本零依赖，面板全挂也能 SSH 管理一切
+- **一键升级**：`upgrade.sh` 已部署服务器跨版本升级，自动识别裸金属/Docker，自动备份 + 补全新功能配置字段
 - **nginx 共存模式**：`--no-caddy` 让 caddy 不监听 80/443，已装 nginx/宝塔的服务器可共存
 - **暗黑/白天双主题 + 移动端自适应**：左侧可折叠侧边栏（桌面折叠 + 移动端抽屉，localStorage 记忆）
 - **安全**：管理员密码 bcrypt、按 IP 登录锁定、8 小时会话、随机 URL 路径、全程 TLS
@@ -638,6 +623,7 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ├── README.md               # ⭐ 本文档（用户教程入口）
 ├── deploy/                 # 全部部署产物
 │   ├── README.md           #    手动部署 / 复现指南
+│   ├── upgrade.sh          # ⭐ 已部署服务器跨版本升级（裸金属/Docker 自动识别）
 │   ├── Dockerfile.allinone #    ⭐ all-in-one 镜像（sing-box+caddy+面板+systemd，推 ghcr.io/jiasongji/ansgo）
 │   ├── Dockerfile          #    面板单镜像（兼容用，推 ghcr.io/jiasongji/ansgo-panel）
 │   ├── docker/             #    docker-compose.yml + entrypoint.sh

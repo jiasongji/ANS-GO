@@ -527,6 +527,7 @@ SSH:                25822（2026-06-22 加固：原 22，已改非标端口 + �
 | 落地服务 SS2022 协议 `bad timestamp: diff Ns` 拒绝连接 | **v1.5.14 线上修复**（非代码 bug，运行时环境问题）。SS2022（`2022-blake3-aes-128-gcm`）把时间戳编进 nonce 防重放，两端系统时钟差 >30s 就拒绝。**触发场景**：中转机（SVC）是 LXC 容器，`systemd-timesyncd` 不存在 + `timedatectl set-ntp` 报 `NTP not supported`（LXC 宿主控制时钟），系统时钟慢 ANS-GO 100s。**诊断法**：ANS-GO `journalctl -u sing-box | grep "bad timestamp"` 看 diff 值；`date -u` 两端对比。**修复**：① 临时：`date -s "$(curl -sI https://www.google.com \| grep -i ^date: \| sed 's/^[Dd]ate: //')"` 立即同步；② 持久：装 `openntpd` + `systemctl enable --now openntpd`（轻量 NTP，~200KB）。⚠️ **教训**：SS2022 / WireGuard / Kerberos / TLS 证书校验都依赖时钟同步，LXC 容器部署这些协议必须单独配 NTP（容器内 `timedatectl` 无效）|
 | 宝塔/aaPanel 服务器 iptables policy=DROP 致服务端口外网不通 | **v1.5.14 线上修复**。宝塔/aaPanel 装安全插件后把 `iptables INPUT policy=DROP`，install.sh 的 nft 放行规则在 iptables-legacy 后端下不生效。**症状**：容器内 `curl :PORT` 200，外网 `curl :PORT` 000 或超时（说明是防火墙拦截而非服务问题）。**诊断法**：`iptables -nL INPUT \| head -3` 看 policy；若 DROP 则需逐端口放行。**修复**：`iptables -I INPUT -p tcp --dport <PORT> -j ACCEPT` + `iptables-save > /etc/iptables/rules.v4` 持久化（Debian 12 装 `iptables-persistent` 后 `netfilter-persistent save`）。⚠️ SVC 服务器（LXC 容器 + 宝塔）实测需放行 21002/21008/21018/21112/10568 五个端口 |
 | **节点信息页一直显示「加载中…」**（其他页面正常）| **v1.5.15 根治**。根因：前端 `row(label, val, copyVal)` 函数体里 `(copyVal\|\|val).replace(...)` 直接对 `val` 调 string-only 方法，但 `val` 可能是 number（`api/node` 返回的 `port: 33899` 是 JSON 数字），`number.replace` 抛 `TypeError: ...replace is not a function`。该调用在 `card()` 模板插值 `${row('端口',n.port)}` 内，而 `card()` 又在 `loadNode` 的 `forEach` 内——**异常让整个 async `loadNode` 在 forEach 中终止，最末行 `$('#content').innerHTML=html` 永远走不到**，content 停在第 3 行写入的「加载中…」占位符。**触发条件**：SS/AnyTLS/Naive 任一 `enabled=true`（默认部署后全启用 → 几乎所有用户都中招）。**诊断法**：① 浏览器 Console 看是否有 `TypeError: ...replace is not a function`；② `curl api/node` 拿真实 JSON 看 port 字段是 number 还是 string；③ 本地用 Node 抽 `<script>` 块喂真实 API 数据跑 loadNode 复现。**修复**：`row()` 内部对 `val` 先 `String(val)` 强转，`.replace` 只在 string 上调用。⚠️ **教训**：JS 模板字符串 `${obj.field}` 若 field 是 number/bool 而后续做 string-only 操作，必须先 `String()` 强转；async 函数内 forEach 异常会让整个 promise reject 静默失败（`api()` 封装只 catch fetch 异常，不 catch 业务代码异常），DOM 停在占位符上无法被发现 |
+| **如何把已部署服务器升级到新版本** | **v1.5.16 起用 `deploy/upgrade.sh`**（见 §12「已部署服务器升级」）。此前升级方式有三条：① 重跑 install.sh（全新部署逻辑，不补跨版本新字段如 `socks_port`）；② `ansgo-admin update panel <本地二进制>`（仅更新单二进制，不更新 genconf/admin 脚本，不补配置字段）；③ 手动 stop→rm→scp→md5→start（最繁琐）。**upgrade.sh 把三条路径的不足一次补齐**：自动检测裸金属/Docker、更新 3 组件（genconf+admin 脚本 + panel 二进制）、python3 幂等补 panel.json 新字段、幂等补 secrets.env 凭证、升级前自动备份。⚠️ **设计要点**：脚本自包含不依赖服务器旧版 ansgo-admin（避免「用旧 admin 更新新 admin」的鸡生蛋）；`ansgo-panel` 无 `-version` flag 靠 md5 对比判断是否真更新；bash `set -u` 下 `$VAR` 后紧跟全角标点会被当成另一个变量名（v1.5.5 教训），脚本内一律用 `${VAR}` 界定。SOCKS5 升级后默认 `svc_socks_enabled:"false"`（不启用，符合「面板内按需装服务」架构），需用户在面板点「安装」或 `ansgo-admin regen socks` |
 
 ---
 
@@ -638,6 +639,28 @@ bash install.sh --uninstall --purge
 - Docker 面板单镜像（仅面板，兼容用）：`ghcr.io/jiasongji/ansgo-panel:latest`（见 `deploy/Dockerfile`）
 
 > **两种部署形态**：LXC / 低配（256MB）用裸金属（`install.sh`，systemd 直管三服务，内存最小）；KVM / 资源充裕用 Docker 一体化（`install.sh --docker`，host 网络 + privileged，单容器内 systemd 复用全部 unit/脚本/面板代码，面板 0 改动）。
+
+### 已部署服务器升级（`deploy/upgrade.sh`）
+
+**v1.5.16 新增**专门的跨版本升级脚本，区别于 install.sh（全新部署）和 `ansgo-admin update`（仅更新单个二进制，不更新脚本/不补字段）。`upgrade.sh` 把「更新 3 组件 + 补配置字段 + 备份 + 形态自动检测」打包成一条 `curl | bash`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh | bash
+# 参数：--docker | --metal（强制形态）/ --ver v1.5.16 / --yes（跳过确认）
+```
+
+| 形态 | 升级动作 | 备份位置 |
+|------|---------|---------|
+| **裸金属** | ① 更新 `ansgo-genconf` + `ansgo-admin` 脚本（raw 拉取）② 更新 `ansgo-panel` 二进制（release，md5 对比相同则跳过重启）③ python3 幂等补 `panel.json`（`socks_port` 随机不冲突 / `svc_socks_enabled:"false"` / `panel_title`）④ 幂等补 `secrets.env`（`SOCKS_USER`/`SOCKS_PASS`）⑤ 重启 ansgo-panel | `/etc/ansgo-backup-upgrade-{TS}/` |
+| **Docker** | `$COMPOSE pull` → `$COMPOSE up -d`（复用 volume）| compose 目录 `ansgo-etc-vol-backup-{TS}.tgz` |
+
+**设计约束（脚本自包含，不依赖服务器旧版 ansgo-admin，避免鸡生蛋）**：
+- `VER` 硬编码（与 install.sh 一致），发新版只改这一行 + commit
+- bootstrap 落地机制移植自 install.sh v1.5.3（解决 `curl | bash` 的 SIGPIPE + 进程替换卡死）
+- `ansgo-panel` 无 `-version` flag（main.go 仅 `-setpass`），靠 **md5 对比**判断是否真更新，启动后用 `journalctl` 日志行 `ansgo-panel v1.5.16 监听...` 验证版本
+- SOCKS5 升级后默认 `svc_socks_enabled:"false"`（不启用，符合「面板内按需装服务」架构）
+- `--docker`/`--metal` 互斥；同时检测到两种形态标记返回 `ambiguous` 要求显式指定
+- ⚠️ **bash set -u 陷阱**（v1.5.5 教训）：变量后紧跟全角标点（如 `$DOCKER_COMPOSE_FILE，`）会被当成另一个变量名，必须用 `${DOCKER_COMPOSE_FILE}` 界定
 
 ---
 
