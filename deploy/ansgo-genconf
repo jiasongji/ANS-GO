@@ -4,7 +4,7 @@
 #
 # 单一事实来源：
 #   /etc/ansgo/panel.json    端口 + 面板设置 + 域名 + 第2组服务 + 落地配置 (JSON)
-#   /etc/ansgo/secrets.env   SS_KEY / ANYTLS_* / NAIVE_* / 第2组密钥 (shell 可 source)
+#   /etc/ansgo/secrets.env   SS_KEY / ANYTLS_* / SOCKS_* / NAIVE_* / 第2组密钥 (shell 可 source)
 #   /etc/ssl/ansgo/*.pem     共享真实证书
 #
 # 用法:
@@ -49,13 +49,13 @@ def g(k, d=""):
 DOMAIN = g("domain", "example.com")
 SS_PORT = int(g("ss_port", 23456))
 ANYTLS_PORT = int(g("anytls_port", 8443))
+SOCKS_PORT = int(g("socks_port", 10808))
 NAIVE_PORT = int(g("naive_port", 44333))
 SS_METHOD = os.environ.get("SS_METHOD", "2022-blake3-aes-128-gcm")
 
-# 第2组服务（额外 anytls-2 / naive-2，可选走 ss 落地）
+# 落地服务（额外 anytls-2，可选走 ss 落地；Naive 不参与落地）
 GROUP2_ENABLED = str(g("group2_enabled", "false")).lower() == "true"
 ANYTLS2_PORT = int(g("anytls2_port", 0)) if g("anytls2_port") else 0
-NAIVE2_PORT = int(g("naive2_port", 0)) if g("naive2_port") else 0
 
 # 落地 SS 出口配置（第2组流量走这里）
 LANDING_ENABLED = str(g("ss_landing_enabled", "false")).lower() == "true"
@@ -67,7 +67,6 @@ LANDING_PASS = g("ss_landing_password", "")
 # 伪装站点
 DISGUISE_PANEL = g("disguise_panel", "proxy:https://example.com")
 DISGUISE_NAIVE = g("disguise_naive", "proxy:https://example.com")
-DISGUISE_NAIVE2 = g("disguise_naive2", DISGUISE_NAIVE)
 
 # 证书来源：cert_mode="manual" 且两路径齐全 -> 用绝对路径；否则回退 cert_dir/fullchain.pem+privkey.pem
 # （与 Go 端 certPaths() 语义保持一致，全项目统一）
@@ -83,11 +82,12 @@ def is_on(k):
     return str(g(k, "true")).lower() == "true"
 SVC_SS = is_on("svc_ss_enabled")
 SVC_ANYTLS = is_on("svc_anytls_enabled")
+SVC_SOCKS = str(g("svc_socks_enabled", "false")).lower() == "true"
 SVC_NAIVE = is_on("svc_naive_enabled")
 # caddy_enable：是否部署 :443 伪装站 + :80 跳转。
 #   true（默认，兼容旧部署）：caddy 监听 80/443，提供域名直访伪装
 #   false（--no-caddy 模式，v1.5.6+）：跳过 80/443 站点块，让现有 nginx 等 web 服务器接管；
-#             naive/naive2 站点仍生成（只听各自的 naive 端口，不碰 80/443）
+#             naive 站点仍生成（只听 naive 端口，不碰 80/443）
 CADDY_ENABLE = is_on("caddy_enable")
 
 # ---- 读取密钥 ----
@@ -111,22 +111,25 @@ def sec(k):
 SS_KEY = sec("SS_KEY")
 ANYTLS_PASS = sec("ANYTLS_PASS")
 ANYTLS_UUID = sec("ANYTLS_UUID")
+SOCKS_USER = secrets.get("SOCKS_USER", "")
+SOCKS_PASS = secrets.get("SOCKS_PASS", "")
+if SVC_SOCKS and (not SOCKS_USER or not SOCKS_PASS):
+    print("ansgo-genconf: SOCKS5 启用但缺少 SOCKS_USER/SOCKS_PASS（执行 ansgo-admin regen socks 生成）", file=sys.stderr)
+    sys.exit(2)
 NAIVE_USER = sec("NAIVE_USER")
 NAIVE_PASS = sec("NAIVE_PASS")
 
-# 第2组密钥（启用时必需）
+# 落地服务 AnyTLS-2 密钥（启用时必需）
 ANYTLS2_PASS = secrets.get("ANYTLS2_PASS", "")
 ANYTLS2_UUID = secrets.get("ANYTLS2_UUID", "")
-NAIVE2_USER = secrets.get("NAIVE2_USER", "")
-NAIVE2_PASS = secrets.get("NAIVE2_PASS", "")
 if GROUP2_ENABLED:
-    for k in ("ANYTLS2_PASS", "ANYTLS2_UUID", "NAIVE2_USER", "NAIVE2_PASS"):
+    for k in ("ANYTLS2_PASS", "ANYTLS2_UUID"):
         if not secrets.get(k):
-            print(f"ansgo-genconf: 第2组启用但缺少 {k}（执行 ansgo-admin regen2 生成）", file=sys.stderr)
+            print(f"ansgo-genconf: AnyTLS-2 启用但缺少 {k}（执行 ansgo-admin regen2 生成）", file=sys.stderr)
             sys.exit(2)
 
 # ===================== 生成 sing-box config =====================
-# v1.5.14: 端口冲突预检测——naive/naive2 同走 caddy，anytls/anytls2/ss 同走 sing-box，
+# v1.5.14: 端口冲突预检测——naive 走 caddy，ss/anytls/socks/anytls2 同走 sing-box，
 #   两服务端口撞了会导致生成的配置语法/语义错误（caddy "ambiguous site definition" 或
 #   sing-box 同进程 bind 同端口失败），服务进入重启循环。genconf 在生成前必须显式拒绝。
 def check_port_conflicts():
@@ -143,12 +146,12 @@ def check_port_conflicts():
         add_caddy(443, ":443 伪装站")
     if SVC_NAIVE:
         add_caddy(NAIVE_PORT, "naive")
-    if GROUP2_ENABLED and NAIVE2_PORT:
-        add_caddy(NAIVE2_PORT, "naive2")
     if SVC_SS:
         add_sb(SS_PORT, "ss")
     if SVC_ANYTLS:
         add_sb(ANYTLS_PORT, "anytls")
+    if SVC_SOCKS:
+        add_sb(SOCKS_PORT, "socks")
     if GROUP2_ENABLED and ANYTLS2_PORT:
         add_sb(ANYTLS2_PORT, "anytls2")
 
@@ -188,6 +191,14 @@ def gen_singbox():
             },
         })
 
+    # SOCKS5 inbound（按开关，强制用户名/密码鉴权）
+    if SVC_SOCKS:
+        inbounds.append({
+            "type": "socks", "tag": "socks-in",
+            "listen": "::", "listen_port": SOCKS_PORT,
+            "users": [{"username": SOCKS_USER, "password": SOCKS_PASS}],
+        })
+
     # 第2组 anytls-2 inbound（需第2组启用）
     if GROUP2_ENABLED and ANYTLS2_PORT:
         inbounds.append({
@@ -203,11 +214,7 @@ def gen_singbox():
 
     outbounds = [{"type": "direct", "tag": "direct"}]
 
-    # 落地 SS outbound（第2组 anytls-2 走它）
-    # ⚠️ v1.5.12 架构修正：只有 anytls-2 能经 ss-out 落地（它在 sing-box 里）。
-    #   naive-2 在 caddy 里（独立进程），物理上无法经 sing-box 的 ss-out 转发，
-    #   naive-2 永远走 caddy 的 direct 出口（中转机 IP）。这是 caddy forwardproxy
-    #   与 sing-box 分离架构的固有约束，文档/UI 都已明确告知。
+    # 落地 SS outbound（仅 AnyTLS-2 走它；Naive 不参与任何落地）
     rules = []
     if LANDING_ENABLED and LANDING_HOST and LANDING_PORT and LANDING_PASS:
         outbounds.append({
@@ -244,12 +251,13 @@ def gen_singbox():
     with open("/etc/sing-box/config.json", "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
     note = f"ss={SS_PORT}, anytls={ANYTLS_PORT}"
+    if SVC_SOCKS:
+        note += f", socks={SOCKS_PORT}"
     if GROUP2_ENABLED:
         note += f", anytls2={ANYTLS2_PORT}"
         if LANDING_ENABLED and ANYTLS2_PORT:
             note += f"->ss-landing({LANDING_HOST}:{LANDING_PORT})"
-        if NAIVE2_PORT:
-            note += f", naive2={NAIVE2_PORT}(走 direct, caddy 无法经 ss-out)"
+
     print(f"已生成 /etc/sing-box/config.json ({note}, sni={DOMAIN})")
 
 # ===================== 生成 Caddyfile =====================
@@ -282,9 +290,6 @@ def gen_caddy():
     if SVC_NAIVE:
         blocks.append(f"# :{NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）\n:{NAIVE_PORT} {{\n  tls {FULLCHAIN} {PRIVKEY}\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE_USER} {NAIVE_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE)}}}\n")
 
-    # 第2组 naive-2（caddy 另起一个 site）
-    if GROUP2_ENABLED and NAIVE2_PORT:
-        blocks.append(f"# :{NAIVE2_PORT} NaiveProxy 第2组（走 ss 落地）\n:{NAIVE2_PORT} {{\n  tls {FULLCHAIN} {PRIVKEY}\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE2_USER} {NAIVE2_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE2)}}}\n")
 
     # :80 重定向（caddy_enable=true 时生成；--no-caddy 模式跳过）
     if CADDY_ENABLE:
@@ -296,8 +301,6 @@ def gen_caddy():
     note = f":443 纯伪装={DISGUISE_PANEL}" if CADDY_ENABLE else "caddy_enable=false（跳过 80/443，nginx 等接管）"
     if SVC_NAIVE:
         note += f", :{NAIVE_PORT} naive伪装={DISGUISE_NAIVE}"
-    if GROUP2_ENABLED and NAIVE2_PORT:
-        note += f", :{NAIVE2_PORT} naive2伪装={DISGUISE_NAIVE2}"
     suffix = ", :80->https 跳转" if CADDY_ENABLE else ""
     print(f"已生成 /etc/caddy/Caddyfile ({note}{suffix})")
 

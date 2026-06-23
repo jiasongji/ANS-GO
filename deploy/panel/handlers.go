@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"net/url"
@@ -51,7 +52,12 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case rel == "" || rel == "/" || rel == "index.html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexHTML)
+		title := c.PanelTitle
+		if title == "" {
+			title = "ANS-GO 管理面板"
+		}
+		page := strings.Replace(string(indexHTML), "<title>ANS-GO 管理面板</title>", "<title>"+html.EscapeString(title)+"</title>", 1)
+		w.Write([]byte(page))
 	case rel == "static/qrcode.min.js":
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
@@ -170,20 +176,14 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 
 func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
-	// v1.5.10: 服务状态 = enabled && 进程 active
-	//   之前只看进程（SS 未装但 sing-box 因 AnyTLS 跑着 → SS 误显示 active）
-	//   现在：未启用的服务显示 inactive（即使载体进程在跑）
 	sbActive := svcActive("sing-box") == "active"
 	caddyActive := svcActive("caddy") == "active"
 	panelActive := svcActive("ansgo-panel") == "active"
 	ssEnabled := c.SvcSSEnabled == "true"
 	anytlsEnabled := c.SvcAnyTLSEnabled == "true"
+	socksEnabled := c.SvcSocksEnabled == "true"
 	naiveEnabled := c.SvcNaiveEnabled == "true"
-	// caddy 需要 active 的条件：
-	//   默认模式（CaddyEnable=true）：caddy 跑 :443 伪装站，始终需要
-	//   --no-caddy 模式（CaddyEnable=false）：caddy 只在 naive 启用时才需要
 	caddyNeeded := c.CaddyEnable == "true" || naiveEnabled
-	// 服务级状态：enabled && 载体进程 active
 	svcStatus := func(enabled, carrierActive bool) string {
 		if enabled && carrierActive {
 			return "active"
@@ -195,26 +195,16 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 			"naive":    svcStatus(naiveEnabled, caddyActive),
 			"ss":       svcStatus(ssEnabled, sbActive),
 			"anytls":   svcStatus(anytlsEnabled, sbActive),
+			"socks":    svcStatus(socksEnabled, sbActive),
 			"panel":    map[bool]string{true: "active", false: "inactive"}[panelActive],
 			"caddy":    svcStatus(caddyNeeded, caddyActive),
-			"sing-box": svcStatus(ssEnabled || anytlsEnabled, sbActive),
+			"sing-box": svcStatus(ssEnabled || anytlsEnabled || socksEnabled || c.Group2Enabled == "true", sbActive),
 		},
-		"svc_enabled": map[string]bool{
-			"ss":     ssEnabled,
-			"anytls": anytlsEnabled,
-			"naive":  naiveEnabled,
-		},
-		"ports": map[string]int{
-			"naive": c.NaivePort, "anytls": c.AnyTLSPort,
-			"ss": c.SSPort, "panel": c.PanelPort,
-		},
-		"domain": c.Domain,
-		"url":    fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath),
-		"mem":    memInfo(),
-		"load":   loadAvg(),
-		"uptime": uptimeHours(),
-		"tcp":    tcpEstabCount(),
-		"cert":   certInfoFull(c),
+		"svc_enabled": map[string]bool{"ss": ssEnabled, "anytls": anytlsEnabled, "socks": socksEnabled, "naive": naiveEnabled},
+		"ports":       map[string]int{"naive": c.NaivePort, "anytls": c.AnyTLSPort, "socks": c.SocksPort, "ss": c.SSPort, "panel": c.PanelPort},
+		"domain":      c.Domain,
+		"url":         fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath),
+		"mem":         memInfo(), "load": loadAvg(), "uptime": uptimeHours(), "tcp": tcpEstabCount(), "cert": certInfoFull(c),
 	}
 	jwrite(w, 200, resp)
 }
@@ -223,21 +213,18 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 
 func nodeHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
-	s := readSecrets()
-	uris := buildURIs(c, s)
-	// v1.5.12: 每个服务对象加 enabled 字段，让前端据此决定是否渲染卡片
-	// （未启用的服务不显示在节点信息页，避免空 URI 误导用户）
+	sec := readSecrets()
+	uris := buildURIs(c, sec)
 	resp := map[string]any{
-		"domain":  c.Domain,
-		"ss":      map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": s.SSKey, "enabled": c.SvcSSEnabled == "true", "host": c.Domain},
-		"anytls":  map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": s.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": c.Domain},
-		"naive":   map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": s.NaiveUser, "pass": s.NaivePass, "enabled": c.SvcNaiveEnabled == "true", "host": c.Domain},
+		"domain":         c.Domain,
+		"ss":             map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": sec.SSKey, "enabled": c.SvcSSEnabled == "true", "host": c.Domain},
+		"anytls":         map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": sec.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": c.Domain},
+		"socks":          map[string]any{"uri": uris["socks"], "port": c.SocksPort, "user": sec.SocksUser, "pass": sec.SocksPass, "enabled": c.SvcSocksEnabled == "true", "host": c.Domain},
+		"naive":          map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": sec.NaiveUser, "pass": sec.NaivePass, "enabled": c.SvcNaiveEnabled == "true", "host": c.Domain},
 		"group2_enabled": c.Group2Enabled == "true",
 	}
 	if c.Group2Enabled == "true" {
-		// naive2 走 direct（caddy 无法经 sing-box ss-out），anytls2 走 ss-out 落地（架构约束，v1.5.12）
-		resp["anytls2"] = map[string]any{"uri": uris["anytls2"], "port": c.AnyTLS2Port, "password": s.AnyTLS2Pass, "sni": c.Domain, "enabled": true, "host": c.Domain, "via": "ss-landing"}
-		resp["naive2"] = map[string]any{"uri": uris["naive2"], "port": c.Naive2Port, "user": s.Naive2User, "pass": s.Naive2Pass, "enabled": true, "host": c.Domain, "via": "direct"}
+		resp["anytls2"] = map[string]any{"uri": uris["anytls2"], "port": c.AnyTLS2Port, "password": sec.AnyTLS2Pass, "sni": c.Domain, "enabled": true, "host": c.Domain, "via": "ss-landing"}
 	}
 	jwrite(w, 200, resp)
 }
@@ -249,68 +236,44 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 405, "方法不允许")
 		return
 	}
-	var b struct {
-		Target string `json:"target"`
-		Action string `json:"action"`
-	}
+	var b struct{ Target, Action string }
 	json.NewDecoder(r.Body).Decode(&b)
 	if b.Action != "start" && b.Action != "stop" && b.Action != "restart" {
 		jerr(w, 400, "action 必须为 start/stop/restart")
 		return
 	}
-	// v1.5.10: SS/AnyTLS 共享 sing-box 进程，不能直接 stop sing-box（会同时停掉另一个）
-	//   新逻辑：单独停 SS/AnyTLS 时，设 enabled=false + genconf + restart sing-box
-	//   （genconf 按 enabled 字段生成 inbound，停 SS 后 sing-box config 只剩 AnyTLS）
-	//   只有当 SS+AnyTLS 都未启用时，才 stop+disable sing-box
-	if b.Target == "ss" || b.Target == "anytls" {
-		if b.Action == "stop" {
+	if b.Target == "ss" || b.Target == "anytls" || b.Target == "socks" {
+		if b.Action == "stop" || b.Action == "start" {
 			c := configGet()
-			if b.Target == "ss" {
-				c.SvcSSEnabled = "false"
-			} else {
-				c.SvcAnyTLSEnabled = "false"
+			en := boolStr(b.Action == "start")
+			switch b.Target {
+			case "ss":
+				c.SvcSSEnabled = en
+			case "anytls":
+				c.SvcAnyTLSEnabled = en
+			case "socks":
+				c.SvcSocksEnabled = en
 			}
 			if err := configSet(c); err != nil {
 				jerr(w, 500, "保存配置失败: "+err.Error())
 				return
 			}
-			// 重新生成 sing-box config（移除被停用的 inbound）
 			exec.Command(binGenConf, "sing-box").Run()
-			// 检查 sing-box 是否还有启用的 inbound
-			needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.Group2Enabled == "true"
+			needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || c.Group2Enabled == "true"
 			if needSB {
+				_ = exec.Command("systemctl", "enable", "sing-box").Run()
 				_ = exec.Command("systemctl", "restart", "sing-box").Run()
-				jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": "stopped", "note": "已从 sing-box 移除，其它服务不受影响"})
 			} else {
 				_ = exec.Command("systemctl", "stop", "sing-box").Run()
 				_ = exec.Command("systemctl", "disable", "sing-box").Run()
-				jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": "stopped", "note": "sing-box 已停（无其他启用服务）"})
 			}
+			jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": b.Action})
 			return
 		}
-		if b.Action == "start" {
-			c := configGet()
-			if b.Target == "ss" {
-				c.SvcSSEnabled = "true"
-			} else {
-				c.SvcAnyTLSEnabled = "true"
-			}
-			if err := configSet(c); err != nil {
-				jerr(w, 500, "保存配置失败: "+err.Error())
-				return
-			}
-			exec.Command(binGenConf, "sing-box").Run()
-			_ = exec.Command("systemctl", "enable", "sing-box").Run()
-			_ = exec.Command("systemctl", "restart", "sing-box").Run()
-			jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": "started"})
-			return
-		}
-		// restart 走原逻辑（直接 restart sing-box）
 	}
-	// 其它 target（naive/panel/all）走原 systemctl 逻辑
 	var svcs []string
 	switch b.Target {
-	case "ss", "anytls":
+	case "ss", "anytls", "socks":
 		svcs = []string{"sing-box"}
 	case "naive":
 		svcs = []string{"caddy"}
@@ -323,9 +286,9 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var errs []string
-	for _, s := range svcs {
-		if err := systemctl(b.Action, s); err != nil {
-			errs = append(errs, s+": "+err.Error())
+	for _, svc := range svcs {
+		if err := systemctl(b.Action, svc); err != nil {
+			errs = append(errs, svc+": "+err.Error())
 		}
 	}
 	if len(errs) > 0 {
@@ -359,29 +322,18 @@ func portHandler(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 500, "保存配置失败: "+err.Error())
 			return
 		}
-		// 防火墙放行新端口（nft 可能不存在，忽略错误）
 		_ = exec.Command("sh", "-c", "nft add rule inet filter input tcp dport "+strconv.Itoa(b.Port)+" accept 2>/dev/null || true").Run()
 		newURL := fmt.Sprintf("https://%s:%d%s", c.Domain, b.Port, c.URLPath)
 		scheduleSelfRestart(3)
-		jwrite(w, 200, map[string]any{
-			"ok":         true,
-			"restart_in": 3,
-			"new_url":    newURL,
-			"msg":        fmt.Sprintf("面板将在 3 秒后重启到新端口 %d，请用新地址重新访问（会话已重置，需重新登录）。", b.Port),
-		})
-	case "ss":
-		c.SSPort = b.Port
-		if msg := portConflicts(c); msg != "" {
-			jerr(w, 400, "端口冲突: "+msg)
-			return
+		jwrite(w, 200, map[string]any{"ok": true, "restart_in": 3, "new_url": newURL, "msg": fmt.Sprintf("面板将在 3 秒后重启到新端口 %d，请用新地址重新访问（会话已重置，需重新登录）。", b.Port)})
+	case "ss", "anytls", "socks":
+		if b.Target == "ss" {
+			c.SSPort = b.Port
+		} else if b.Target == "anytls" {
+			c.AnyTLSPort = b.Port
+		} else {
+			c.SocksPort = b.Port
 		}
-		if err := applyProto(c, "sing-box"); err != nil {
-			jerr(w, 500, err.Error())
-			return
-		}
-		jwrite(w, 200, map[string]bool{"ok": true})
-	case "anytls":
-		c.AnyTLSPort = b.Port
 		if msg := portConflicts(c); msg != "" {
 			jerr(w, 400, "端口冲突: "+msg)
 			return
@@ -432,10 +384,12 @@ func regenHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 405, "方法不允许")
 		return
 	}
-	var b struct{ Target string `json:"target"` }
+	var b struct {
+		Target string `json:"target"`
+	}
 	json.NewDecoder(r.Body).Decode(&b)
-	if b.Target != "ss" && b.Target != "anytls" && b.Target != "naive" && b.Target != "g2" {
-		jerr(w, 400, "target 必须为 ss/anytls/naive/g2")
+	if b.Target != "ss" && b.Target != "anytls" && b.Target != "socks" && b.Target != "naive" && b.Target != "g2" {
+		jerr(w, 400, "target 必须为 ss/anytls/socks/naive/g2")
 		return
 	}
 	adminArgs := []string{"regen", b.Target}
@@ -447,15 +401,10 @@ func regenHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "regen 失败: "+string(out))
 		return
 	}
-	// 重新读取并返回最新 URI
 	c := configGet()
-	s := readSecrets()
-	uris := buildURIs(c, s)
-	jwrite(w, 200, map[string]any{
-		"ok":   true,
-		"log":  string(out),
-		"uris": uris,
-	})
+	sec := readSecrets()
+	uris := buildURIs(c, sec)
+	jwrite(w, 200, map[string]any{"ok": true, "log": string(out), "uris": uris})
 }
 
 // ===================== 手动设置密钥（直接写 secrets.env）=====================
@@ -509,30 +458,21 @@ func setSecret(key, value string) error {
 //   - anytls  : 写 ANYTLS_PASS
 //   - naive   : 写 NAIVE_USER + NAIVE_PASS
 //   - anytls2 : 写 ANYTLS2_PASS
-//   - naive2  : 写 NAIVE2_USER + NAIVE2_PASS
+//   - socks   : 写 SOCKS_USER + SOCKS_PASS
 func keyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
 	}
-	var b struct {
-		Target string `json:"target"`
-		Method string `json:"method"`
-		Key    string `json:"key"`
-		Pass   string `json:"pass"`
-		User   string `json:"user"`
-	}
+	var b struct{ Target, Method, Key, Pass, User string }
 	json.NewDecoder(r.Body).Decode(&b)
-
-	// 各 target 的校验 + 写入分派
-	confTarget := "" // "sing-box" 或 "caddy"
+	confTarget := ""
 	switch b.Target {
 	case "ss":
 		method := strings.TrimSpace(b.Method)
 		if method == "" {
 			method = "2022-blake3-aes-128-gcm"
 		}
-		// 校验 SS2022 密钥长度（aes-128 -> 16 字节，aes-256 -> 32 字节）
 		wantBytes := 0
 		switch {
 		case strings.HasPrefix(method, "2022-blake3-aes-128"):
@@ -552,7 +492,6 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 500, "写入 SS_KEY 失败: "+err.Error())
 			return
 		}
-		// method 也要同步到 panel.json（node URI / dashboard 展示用）
 		c := configGet()
 		if c.SSMethod != method {
 			c.SSMethod = method
@@ -569,10 +508,30 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		confTarget = "sing-box"
+	case "socks":
+		u := strings.TrimSpace(b.User)
+		pw := strings.TrimSpace(b.Pass)
+		if u == "" || pw == "" {
+			jerr(w, 400, "SOCKS5 用户名和密码均不能为空")
+			return
+		}
+		if strings.ContainsAny(u, ": \t\r\n") || strings.ContainsAny(pw, ": \t\r\n") {
+			jerr(w, 400, "SOCKS5 用户名/密码不能包含冒号或空白字符")
+			return
+		}
+		if err := setSecret("SOCKS_USER", u); err != nil {
+			jerr(w, 500, "写入 SOCKS_USER 失败: "+err.Error())
+			return
+		}
+		if err := setSecret("SOCKS_PASS", pw); err != nil {
+			jerr(w, 500, "写入 SOCKS_PASS 失败: "+err.Error())
+			return
+		}
+		confTarget = "sing-box"
 	case "naive":
 		u := strings.TrimSpace(b.User)
-		p := strings.TrimSpace(b.Pass)
-		if u == "" || p == "" {
+		pw := strings.TrimSpace(b.Pass)
+		if u == "" || pw == "" {
 			jerr(w, 400, "NaiveProxy 用户名和密码均不能为空")
 			return
 		}
@@ -580,7 +539,7 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 500, "写入 NAIVE_USER 失败: "+err.Error())
 			return
 		}
-		if err := setSecret("NAIVE_PASS", p); err != nil {
+		if err := setSecret("NAIVE_PASS", pw); err != nil {
 			jerr(w, 500, "写入 NAIVE_PASS 失败: "+err.Error())
 			return
 		}
@@ -595,37 +554,17 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		confTarget = "sing-box"
-	case "naive2":
-		u := strings.TrimSpace(b.User)
-		p := strings.TrimSpace(b.Pass)
-		if u == "" || p == "" {
-			jerr(w, 400, "NaiveProxy-2 用户名和密码均不能为空")
-			return
-		}
-		if err := setSecret("NAIVE2_USER", u); err != nil {
-			jerr(w, 500, "写入 NAIVE2_USER 失败: "+err.Error())
-			return
-		}
-		if err := setSecret("NAIVE2_PASS", p); err != nil {
-			jerr(w, 500, "写入 NAIVE2_PASS 失败: "+err.Error())
-			return
-		}
-		confTarget = "caddy"
 	default:
-		jerr(w, 400, "target 必须为 ss/anytls/naive/anytls2/naive2")
+		jerr(w, 400, "target 必须为 ss/anytls/socks/naive/anytls2")
 		return
 	}
-	// 重新生成配置 + 重启对应服务（与 regen / landing 同样的 goroutine 模式）
 	go func() {
 		_ = exec.Command(binGenConf, confTarget).Run()
 		_ = exec.Command("systemctl", "restart", confTarget).Run()
 	}()
 	c := configGet()
-	s := readSecrets()
-	jwrite(w, 200, map[string]any{
-		"ok":   true,
-		"uris": buildURIs(c, s),
-	})
+	sec := readSecrets()
+	jwrite(w, 200, map[string]any{"ok": true, "uris": buildURIs(c, sec)})
 }
 
 // ===================== 证书 =====================
@@ -692,19 +631,19 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	if r.Method == "GET" {
 		jwrite(w, 200, map[string]any{
-			"mode":       c.CertMode,
-			"fullchain":  c.CertFullchain,
-			"privkey":    c.CertPrivkey,
-			"cert_info":  certInfoFull(c),
-			"domain":     c.Domain,
+			"mode":      c.CertMode,
+			"fullchain": c.CertFullchain,
+			"privkey":   c.CertPrivkey,
+			"cert_info": certInfoFull(c),
+			"domain":    c.Domain,
 		})
 		return
 	}
 	// POST
 	var b struct {
-		Mode       *string `json:"mode"`
-		Fullchain  *string `json:"fullchain"`
-		Privkey    *string `json:"privkey"`
+		Mode      *string `json:"mode"`
+		Fullchain *string `json:"fullchain"`
+		Privkey   *string `json:"privkey"`
 	}
 	json.NewDecoder(r.Body).Decode(&b)
 	if b.Mode != nil {
@@ -751,8 +690,8 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	scheduleSelfRestart(3)
 	jwrite(w, 200, map[string]any{
 		"ok": true, "restart_in": 3, "new_url": newURL,
-		"msg":     "证书设置已保存，三服务将在 3 秒后重启（面板会断开，请用新证书重新访问）。",
-		"cert":    certInfoFull(c),
+		"msg":  "证书设置已保存，三服务将在 3 秒后重启（面板会断开，请用新证书重新访问）。",
+		"cert": certInfoFull(c),
 	})
 }
 
@@ -764,21 +703,22 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		jwrite(w, 200, map[string]any{
 			"domain":               c.Domain,
 			"panel_port":           c.PanelPort,
+			"panel_title":          c.PanelTitle,
 			"url_path":             c.URLPath,
 			"admin_user":           c.AdminUser,
 			"session_hours":        c.SessionHours,
 			"login_lock_threshold": c.LoginLockThreshold,
 			"login_lock_minutes":   c.LoginLockMinutes,
-			"ss_port":              c.SSPort, "anytls_port": c.AnyTLSPort, "naive_port": c.NaivePort,
-			"disguise_panel":       c.DisguisePanel,
-			"disguise_naive":       c.DisguiseNaive,
-			"cert_days_left":       certInfoFull(c)["days_left"],
+			"ss_port":              c.SSPort, "anytls_port": c.AnyTLSPort, "socks_port": c.SocksPort, "naive_port": c.NaivePort,
+			"disguise_panel": c.DisguisePanel,
+			"disguise_naive": c.DisguiseNaive,
+			"cert_days_left": certInfoFull(c)["days_left"],
 		})
 		return
 	}
-	// POST
 	var b struct {
 		URLPath            *string `json:"url_path"`
+		PanelTitle         *string `json:"panel_title"`
 		SessionHours       *int    `json:"session_hours"`
 		AdminUser          *string `json:"admin_user"`
 		AdminPass          *string `json:"admin_pass"`
@@ -789,13 +729,17 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		DisguiseNaive      *string `json:"disguise_naive"`
 	}
 	json.NewDecoder(r.Body).Decode(&b)
-
 	needRestart := false
 	needCaddyReload := false
-	newURL := ""
 	if b.URLPath != nil {
 		c.URLPath = normalizePath(*b.URLPath)
 		needRestart = true
+	}
+	if b.PanelTitle != nil {
+		c.PanelTitle = strings.TrimSpace(*b.PanelTitle)
+		if c.PanelTitle == "" {
+			c.PanelTitle = "ANS-GO 管理面板"
+		}
 	}
 	if b.SessionHours != nil {
 		c.SessionHours = clamp(*b.SessionHours, 1, 720)
@@ -826,7 +770,6 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 	if b.LoginLockMinutes != nil {
 		c.LoginLockMinutes = clamp(*b.LoginLockMinutes, 1, 1440)
 	}
-	// 伪装站点设置（格式校验：proxy:<URL> 或 page）
 	validateDisguise := func(v string) bool {
 		return strings.HasPrefix(v, "proxy:http") || v == "page" || v == "file" || v == "file_server"
 	}
@@ -855,19 +798,15 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if needCaddyReload {
-		// 重新生成 caddy 配置并重启（:443 与 naive 伪装可能变了）
 		go func() {
 			_ = exec.Command(binGenConf, "caddy").Run()
 			_ = exec.Command("systemctl", "restart", "caddy").Run()
 		}()
 	}
 	if needRestart {
-		newURL = fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath)
+		newURL := fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath)
 		scheduleSelfRestart(3)
-		jwrite(w, 200, map[string]any{
-			"ok": true, "restart_in": 3, "new_url": newURL,
-			"msg": "设置已保存，面板将在 3 秒后重启（如改了端口/路径需用新地址重新登录）。",
-		})
+		jwrite(w, 200, map[string]any{"ok": true, "restart_in": 3, "new_url": newURL, "msg": "设置已保存，面板将在 3 秒后重启（如改了端口/路径需用新地址重新登录）。"})
 		return
 	}
 	jwrite(w, 200, map[string]bool{"ok": true})
@@ -896,9 +835,10 @@ func logsHandler(w http.ResponseWriter, r *http.Request) {
 // ===================== 服务健康检测（v1.5.12）=====================
 
 // healthHandler 检测单个服务的运行状态：
-//   1. systemd 是否 active（systemctl is-active）
-//   2. 配置端口是否在 LISTEN（ss -tln）
-//   3. 本机 TCP 自连能否握手（net.DialTimeout）
+//  1. systemd 是否 active（systemctl is-active）
+//  2. 配置端口是否在 LISTEN（ss -tln）
+//  3. 本机 TCP 自连能否握手（net.DialTimeout）
+//
 // POST {target: ss|anytls|naive|panel|caddy|group2}
 // 返回 {ok, target, enabled, active, port, port_listening, tcp_connect, tcp_ms, summary}
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -906,21 +846,24 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 405, "方法不允许")
 		return
 	}
-	var b struct{ Target string `json:"target"` }
+	var b struct {
+		Target string `json:"target"`
+	}
 	json.NewDecoder(r.Body).Decode(&b)
 	c := configGet()
-	// target -> (systemd 单元, 是否启用, 端口)
 	type svcInfo struct {
 		unit, port string
 		enabled    bool
 	}
 	info := svcInfo{}
-	caddyActive := c.CaddyEnable == "true" || c.SvcNaiveEnabled == "true" || c.Group2Enabled == "true"
+	caddyActive := c.CaddyEnable == "true" || c.SvcNaiveEnabled == "true"
 	switch b.Target {
 	case "ss":
 		info = svcInfo{"sing-box", strconv.Itoa(c.SSPort), c.SvcSSEnabled == "true"}
 	case "anytls":
 		info = svcInfo{"sing-box", strconv.Itoa(c.AnyTLSPort), c.SvcAnyTLSEnabled == "true"}
+	case "socks":
+		info = svcInfo{"sing-box", strconv.Itoa(c.SocksPort), c.SvcSocksEnabled == "true"}
 	case "naive":
 		info = svcInfo{"caddy", strconv.Itoa(c.NaivePort), c.SvcNaiveEnabled == "true"}
 	case "panel":
@@ -929,17 +872,11 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		info = svcInfo{"caddy", "443", caddyActive}
 	case "anytls2":
 		info = svcInfo{"sing-box", strconv.Itoa(c.AnyTLS2Port), c.Group2Enabled == "true"}
-	case "naive2":
-		info = svcInfo{"caddy", strconv.Itoa(c.Naive2Port), c.Group2Enabled == "true"}
 	default:
-		jerr(w, 400, "target 必须为 ss/anytls/naive/panel/caddy/anytls2/naive2")
+		jerr(w, 400, "target 必须为 ss/anytls/socks/naive/panel/caddy/anytls2")
 		return
 	}
-
-	// 1) systemd active
 	active := svcActive(info.unit)
-
-	// 2) 端口 LISTEN 检测（ss -tlnp，取第 4 列 local addr，匹配 :端口$）
 	portListening := "no"
 	if port := info.port; port != "" && port != "0" {
 		out, _ := exec.Command("sh", "-c", "ss -tln 2>/dev/null | awk 'NR>1{print $4}'").Output()
@@ -950,8 +887,6 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
-	// 3) TCP 本机自连（127.0.0.1:port）握手
 	tcpConnect := "no"
 	tcpMs := int64(0)
 	if portListening == "yes" {
@@ -963,8 +898,6 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			tcpConnect = "yes"
 		}
 	}
-
-	// 综合诊断
 	summary := "正常"
 	if !info.enabled {
 		summary = "服务未启用（请先在服务管理页安装）"
@@ -975,26 +908,14 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	} else if tcpConnect != "yes" {
 		summary = "端口监听但 TCP 握手失败（防火墙或服务异常）"
 	}
-
-	jwrite(w, 200, map[string]any{
-		"ok":            true,
-		"target":        b.Target,
-		"unit":          info.unit,
-		"enabled":       info.enabled,
-		"active":        active,
-		"port":          info.port,
-		"port_listening": portListening,
-		"tcp_connect":   tcpConnect,
-		"tcp_ms":        tcpMs,
-		"summary":       summary,
-	})
+	jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "unit": info.unit, "enabled": info.enabled, "active": active, "port": info.port, "port_listening": portListening, "tcp_connect": tcpConnect, "tcp_ms": tcpMs, "summary": summary})
 }
 
 // ===================== 辅助 =====================
 
 func svcOfLog(t string) string {
 	switch t {
-	case "ss", "anytls", "sing-box":
+	case "ss", "anytls", "socks", "sing-box":
 		return "sing-box"
 	case "naive", "caddy":
 		return "caddy"
@@ -1032,34 +953,28 @@ func validPort(p int) bool { return p > 0 && p < 65536 }
 // （跨进程端口重复是允许的，caddy 和 sing-box 是独立进程）。
 // 返回冲突描述，空串表示无冲突。v1.5.14 新增。
 //
-// caddy 端口：:443 伪装站（CaddyEnable=true 时）+ naive + naive2（启用时）
+// caddy 端口：:443 伪装站（CaddyEnable=true 时）+ naive
 // sing-box 端口：ss + anytls + anytls2（启用时）
 // panel 端口不属于任何载体，单独校验，不在此函数内。
 func portConflicts(c Config) string {
-	// caddy 端口 -> 服务名列表（同端口多个服务名 = 冲突）
 	caddyPorts := map[int][]string{}
-	addCaddy := func(port int, name string) {
-		caddyPorts[port] = append(caddyPorts[port], name)
-	}
+	addCaddy := func(port int, name string) { caddyPorts[port] = append(caddyPorts[port], name) }
 	if c.CaddyEnable == "true" {
 		addCaddy(443, ":443 伪装站")
 	}
 	if c.SvcNaiveEnabled == "true" {
 		addCaddy(c.NaivePort, "naive")
 	}
-	if c.Group2Enabled == "true" {
-		addCaddy(c.Naive2Port, "naive2")
-	}
-	// sing-box 端口 -> 服务名列表
 	sbPorts := map[int][]string{}
-	addSB := func(port int, name string) {
-		sbPorts[port] = append(sbPorts[port], name)
-	}
+	addSB := func(port int, name string) { sbPorts[port] = append(sbPorts[port], name) }
 	if c.SvcSSEnabled == "true" {
 		addSB(c.SSPort, "ss")
 	}
 	if c.SvcAnyTLSEnabled == "true" {
 		addSB(c.AnyTLSPort, "anytls")
+	}
+	if c.SvcSocksEnabled == "true" {
+		addSB(c.SocksPort, "socks")
 	}
 	if c.Group2Enabled == "true" {
 		addSB(c.AnyTLS2Port, "anytls2")
@@ -1097,8 +1012,8 @@ func bcryptOK(hash, plain string) bool {
 
 // ---- 密钥读取 ----
 type secretData struct {
-	SSMethod, SSKey, AnyTLSPass, AnyTLSUUID, NaiveUser, NaivePass string
-	AnyTLS2Pass, AnyTLS2UUID, Naive2User, Naive2Pass string
+	SSMethod, SSKey, AnyTLSPass, AnyTLSUUID, SocksUser, SocksPass, NaiveUser, NaivePass string
+	AnyTLS2Pass, AnyTLS2UUID                                                            string
 }
 
 func readSecrets() secretData {
@@ -1127,6 +1042,10 @@ func readSecrets() secretData {
 			s.AnyTLSPass = v
 		case "ANYTLS_UUID":
 			s.AnyTLSUUID = v
+		case "SOCKS_USER":
+			s.SocksUser = v
+		case "SOCKS_PASS":
+			s.SocksPass = v
 		case "NAIVE_USER":
 			s.NaiveUser = v
 		case "NAIVE_PASS":
@@ -1135,10 +1054,6 @@ func readSecrets() secretData {
 			s.AnyTLS2Pass = v
 		case "ANYTLS2_UUID":
 			s.AnyTLS2UUID = v
-		case "NAIVE2_USER":
-			s.Naive2User = v
-		case "NAIVE2_PASS":
-			s.Naive2Pass = v
 		}
 	}
 	if s.SSMethod == "" {
@@ -1154,23 +1069,16 @@ func buildURIs(c Config, s secretData) map[string]string {
 		u["ss"] = fmt.Sprintf("ss://%s@%s:%d#ANS-GO-SS", ui, c.Domain, c.SSPort)
 	}
 	if s.AnyTLSPass != "" {
-		u["anytls"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#ANS-GO-AnyTLS",
-			s.AnyTLSPass, c.Domain, c.AnyTLSPort, c.Domain)
+		u["anytls"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#ANS-GO-AnyTLS", s.AnyTLSPass, c.Domain, c.AnyTLSPort, c.Domain)
+	}
+	if s.SocksUser != "" {
+		u["socks"] = fmt.Sprintf("socks5://%s:%s@%s:%d#ANS-GO-SOCKS5", url.QueryEscape(s.SocksUser), url.QueryEscape(s.SocksPass), c.Domain, c.SocksPort)
 	}
 	if s.NaiveUser != "" {
-		u["naive"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#ANS-GO-Naive",
-			url.QueryEscape(s.NaiveUser), url.QueryEscape(s.NaivePass), c.Domain, c.NaivePort)
+		u["naive"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#ANS-GO-Naive", url.QueryEscape(s.NaiveUser), url.QueryEscape(s.NaivePass), c.Domain, c.NaivePort)
 	}
-	// 第2组（启用时）
-	if c.Group2Enabled == "true" {
-		if s.AnyTLS2Pass != "" && c.AnyTLS2Port != 0 {
-			u["anytls2"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#ANS-GO-AnyTLS2",
-				s.AnyTLS2Pass, c.Domain, c.AnyTLS2Port, c.Domain)
-		}
-		if s.Naive2User != "" && c.Naive2Port != 0 {
-			u["naive2"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#ANS-GO-Naive2",
-				url.QueryEscape(s.Naive2User), url.QueryEscape(s.Naive2Pass), c.Domain, c.Naive2Port)
-		}
+	if c.Group2Enabled == "true" && s.AnyTLS2Pass != "" && c.AnyTLS2Port != 0 {
+		u["anytls2"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#ANS-GO-AnyTLS2", s.AnyTLS2Pass, c.Domain, c.AnyTLS2Port, c.Domain)
 	}
 	return u
 }
@@ -1366,13 +1274,13 @@ func landingHandler(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		_ = exec.Command(binGenConf, "sing-box").Run()
 		// 若 sing-box 有任何启用的服务（ss/anytls/group2），确保它运行
-		needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.Group2Enabled == "true"
+		needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || c.Group2Enabled == "true"
 		if needSB {
 			_ = exec.Command("systemctl", "enable", "sing-box").Run()
 			_ = exec.Command("systemctl", "restart", "sing-box").Run()
 		}
 	}()
-	// 友好提示：落地出口只对 anytls-2 生效，naive-2 走 direct（架构约束）
+	// 友好提示：落地出口只对 AnyTLS-2 生效，Naive 不参与落地
 	note := ""
 	if c.SSLandingEnabled == "true" && c.Group2Enabled != "true" {
 		note = "落地 SS 已保存，但当前未启用落地服务，ss-out 不会生效"
@@ -1385,58 +1293,33 @@ func landingHandler(w http.ResponseWriter, r *http.Request) {
 func group2Handler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	if r.Method == "GET" {
-		// 读取第2组密钥是否存在
-		s := readSecrets()
-		jwrite(w, 200, map[string]any{
-			"enabled":       c.Group2Enabled == "true",
-			"anytls2_port":  c.AnyTLS2Port,
-			"naive2_port":   c.Naive2Port,
-			"has_keys":      s.AnyTLS2Pass != "" && s.Naive2User != "",
-			"landing_on":    c.SSLandingEnabled == "true",
-			"disguise_naive2": c.DisguiseNaive2,
-		})
+		sec := readSecrets()
+		jwrite(w, 200, map[string]any{"enabled": c.Group2Enabled == "true", "anytls2_port": c.AnyTLS2Port, "has_keys": sec.AnyTLS2Pass != "", "landing_on": c.SSLandingEnabled == "true"})
 		return
 	}
-	// POST
 	var b struct {
-		Enabled       *bool   `json:"enabled"`
-		AnyTLS2Port   *int    `json:"anytls2_port"`
-		Naive2Port    *int    `json:"naive2_port"`
-		DisguiseNaive2 *string `json:"disguise_naive2"`
+		Enabled     *bool `json:"enabled"`
+		AnyTLS2Port *int  `json:"anytls2_port"`
 	}
 	json.NewDecoder(r.Body).Decode(&b)
 	previouslyEnabled := c.Group2Enabled == "true"
-	// 记录原端口，便于冲突时回滚（避免坏配置残留 panel.json 导致 genconf 失败）
 	prevAnyTLS2Port := c.AnyTLS2Port
-	prevNaive2Port := c.Naive2Port
 	if b.Enabled != nil {
-		if *b.Enabled {
-			c.Group2Enabled = "true"
-		} else {
-			c.Group2Enabled = "false"
-		}
+		c.Group2Enabled = boolStr(*b.Enabled)
 	}
 	if b.AnyTLS2Port != nil {
 		c.AnyTLS2Port = clamp(*b.AnyTLS2Port, 1, 65535)
 	}
-	if b.Naive2Port != nil {
-		c.Naive2Port = clamp(*b.Naive2Port, 1, 65535)
-	}
-	if b.DisguiseNaive2 != nil && *b.DisguiseNaive2 != "" {
-		c.DisguiseNaive2 = *b.DisguiseNaive2
-	}
-	// 启用时校验：端口必填；密钥缺失则自动生成（v1.5.12：原先报错要求用户先点
-	// 「生成密钥」，但用户反馈启用后无法用 → 改为自动生成，体验更顺）
 	if c.Group2Enabled == "true" {
-		if c.AnyTLS2Port == 0 || c.Naive2Port == 0 {
-			jerr(w, 400, "启用落地服务需填写 anytls-2 端口 / naive-2 端口")
+		if c.AnyTLS2Port == 0 {
+			jerr(w, 400, "启用落地服务需填写 anytls-2 端口")
 			return
 		}
-		s := readSecrets()
-		if s.AnyTLS2Pass == "" || s.Naive2User == "" {
+		sec := readSecrets()
+		if sec.AnyTLS2Pass == "" {
 			out, err := exec.Command(binAdmin, "regen2").CombinedOutput()
 			if err != nil {
-				jerr(w, 500, "自动生成落地服务密钥失败: "+string(out))
+				jerr(w, 500, "自动生成 AnyTLS-2 密钥失败: "+string(out))
 				return
 			}
 		}
@@ -1445,12 +1328,9 @@ func group2Handler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
 	}
-	// v1.5.14: 端口冲突预检（naive2 不能和 naive 撞 caddy 端口，
-	// anytls2 不能和 ss/anytls 撞 sing-box 端口）。撞了回滚到原值并报错。
 	if c.Group2Enabled == "true" {
 		if msg := portConflicts(c); msg != "" {
 			c.AnyTLS2Port = prevAnyTLS2Port
-			c.Naive2Port = prevNaive2Port
 			_ = configSet(c)
 			jerr(w, 400, "端口冲突: "+msg+"。已撤销本次端口改动，请先在面板修改冲突端口。")
 			return
@@ -1458,11 +1338,9 @@ func group2Handler(w http.ResponseWriter, r *http.Request) {
 	}
 	if previouslyEnabled != (c.Group2Enabled == "true") || c.Group2Enabled == "true" {
 		go func() {
-			_ = exec.Command(binGenConf, "all").Run()
+			_ = exec.Command(binGenConf, "sing-box").Run()
 			_ = exec.Command("systemctl", "enable", "sing-box").Run()
 			_ = exec.Command("systemctl", "restart", "sing-box").Run()
-			_ = exec.Command("systemctl", "enable", "caddy").Run()
-			_ = exec.Command("systemctl", "restart", "caddy").Run()
 		}()
 	}
 	jwrite(w, 200, map[string]bool{"ok": true})
@@ -1482,10 +1360,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 405, "方法不允许")
 		return
 	}
-	var b struct {
-		Service string `json:"service"`
-		Action  string `json:"action"`
-	}
+	var b struct{ Service, Action string }
 	json.NewDecoder(r.Body).Decode(&b)
 	if b.Action != "install" && b.Action != "uninstall" {
 		jerr(w, 400, "action 必须为 install/uninstall")
@@ -1500,47 +1375,38 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 	case "anytls":
 		c.SvcAnyTLSEnabled = boolStr(b.Action == "install")
 		confTarget, procName = "sing-box", "sing-box"
+	case "socks":
+		c.SvcSocksEnabled = boolStr(b.Action == "install")
+		confTarget, procName = "sing-box", "sing-box"
 	case "naive":
 		c.SvcNaiveEnabled = boolStr(b.Action == "install")
 		confTarget, procName = "caddy", "caddy"
 	default:
-		jerr(w, 400, "service 必须为 ss/anytls/naive")
+		jerr(w, 400, "service 必须为 ss/anytls/socks/naive")
 		return
 	}
 	if err := configSet(c); err != nil {
 		jerr(w, 500, "保存配置失败: "+err.Error())
 		return
 	}
-	// 重新生成配置
 	if out, err := exec.Command(binGenConf, confTarget).CombinedOutput(); err != nil {
 		jerr(w, 500, "生成配置失败: "+string(out))
 		return
 	}
-	// 判断该进程是否还需要运行
-	// sing-box：SS/AnyTLS/Group2 任一启用就需运行
-	// caddy：默认模式（CaddyEnable=true）始终需要（:443 伪装站）；--no-caddy 模式只在 naive 启用时需要
 	needProc := false
 	if procName == "sing-box" {
-		needProc = c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.Group2Enabled == "true"
+		needProc = c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || c.Group2Enabled == "true"
 	} else if procName == "caddy" {
 		needProc = c.CaddyEnable == "true" || c.SvcNaiveEnabled == "true"
 	}
 	if b.Action == "install" || needProc {
-		// 启动/重启进程
 		_ = exec.Command("systemctl", "enable", procName).Run()
 		_ = exec.Command("systemctl", "restart", procName).Run()
 	} else {
-		// 无其他启用服务，停止并 disable
 		_ = exec.Command("systemctl", "stop", procName).Run()
 		_ = exec.Command("systemctl", "disable", procName).Run()
 	}
-	jwrite(w, 200, map[string]any{
-		"ok":        true,
-		"service":   b.Service,
-		"installed": b.Action == "install",
-		"proc":      procName,
-		"proc_on":   needProc || b.Action == "install",
-	})
+	jwrite(w, 200, map[string]any{"ok": true, "service": b.Service, "installed": b.Action == "install", "proc": procName, "proc_on": needProc || b.Action == "install"})
 }
 
 func boolStr(b bool) string {

@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.15"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.15，含节点信息页「加载中」根治）
+VER="v1.5.16"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.16，新增 SOCKS5 + 自定义网页标题 + 落地仅 AnyTLS-2）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -93,12 +93,12 @@ esac
 # v1.5.12: 所有端口默认空（未指定），在 validate_inputs 后随机生成（10000-65535，
 #   避开 80/443/25822/互相冲突/已占用）。用户通过 --ss-port 等参数可显式指定。
 DOMAIN="" DYNU_KEY="" DYNU_CID="" DYNU_SECRET="" EMAIL=""
-SS_PORT="" ANYTLS_PORT="" NAIVE_PORT="" PANEL_PORT=""
+SS_PORT="" ANYTLS_PORT="" SOCKS_PORT="" NAIVE_PORT="" PANEL_PORT=""
 PANEL_USER="admin" DISGUISE_PANEL="proxy:https://example.com" DISGUISE_NAIVE="proxy:https://example.com"
 # 证书来源：acme（默认，需 Dynu 凭证）/ manual（手动指定已有证书+私钥路径，二选一）
 CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
 # 各服务密码/密钥（v1.5.5 新增；留空则部署时自动随机生成）
-SS_PASSWORD="" ANYTLS_PASSWORD="" ANYTLS_UUID_IN="" NAIVE_USER_IN="" NAIVE_PASSWORD=""
+SS_PASSWORD="" ANYTLS_PASSWORD="" ANYTLS_UUID_IN="" SOCKS_USER_IN="" SOCKS_PASSWORD="" NAIVE_USER_IN="" NAIVE_PASSWORD=""
 PANEL_PASSWORD_IN="" URL_PATH_IN=""
 NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0 LANDING=0 NO_CADDY=0
 LANDING_ARGS=()
@@ -129,6 +129,7 @@ usage(){ cat <<EOF
   --email EMAIL            ACME 注册邮箱
   --ss-port N              Shadowsocks 端口（默认随机 10000-65535）
   --anytls-port N          AnyTLS 端口（默认随机 10000-65535）
+  --socks-port N           SOCKS5 端口（默认随机 10000-65535）
   --naive-port N           NaiveProxy 端口（默认随机 10000-65535，勿用 443）
   --panel-port N           面板端口（默认随机 10000-65535）
   --panel-user USER        面板管理员用户名（默认 admin）
@@ -137,6 +138,8 @@ usage(){ cat <<EOF
   --ss-password KEY        Shadowsocks 密钥（默认随机；须 base64(16字节)，用 'openssl rand -base64 16' 生成）
   --anytls-password PASS   AnyTLS 密码（默认随机）
   --anytls-uuid UUID       AnyTLS 用户 UUID（默认随机；标准 UUID 格式如 a1b2c3d4-e5f6-7890-abcd-ef1234567890）
+  --socks-user USER        SOCKS5 用户名（默认随机；不含冒号和空白）
+  --socks-password PASS    SOCKS5 密码（默认随机；不含冒号和空白）
   --naive-user USER        NaiveProxy 用户名（默认随机；不含冒号和空白）
   --naive-password PASS    NaiveProxy 密码（默认随机；不含冒号和空白）
   --disguise-panel VAL     :443 直访伪装站点（proxy:<URL> 反代 / page 默认页，默认 proxy:https://example.com）
@@ -165,6 +168,7 @@ while [ $# -gt 0 ]; do
     --email) EMAIL="$2"; shift 2;;
     --ss-port) SS_PORT="$2"; shift 2;;
     --anytls-port) ANYTLS_PORT="$2"; shift 2;;
+    --socks-port) SOCKS_PORT="$2"; shift 2;;
     --naive-port) NAIVE_PORT="$2"; shift 2;;
     --panel-port) PANEL_PORT="$2"; shift 2;;
     --panel-user) PANEL_USER="$2"; shift 2;;
@@ -173,6 +177,8 @@ while [ $# -gt 0 ]; do
     --ss-password) SS_PASSWORD="$2"; shift 2;;
     --anytls-password) ANYTLS_PASSWORD="$2"; shift 2;;
     --anytls-uuid) ANYTLS_UUID_IN="$2"; shift 2;;
+    --socks-user) SOCKS_USER_IN="$2"; shift 2;;
+    --socks-password) SOCKS_PASSWORD="$2"; shift 2;;
     --naive-user) NAIVE_USER_IN="$2"; shift 2;;
     --naive-password) NAIVE_PASSWORD="$2"; shift 2;;
     --disguise-panel) DISGUISE_PANEL="$2"; shift 2;;
@@ -201,7 +207,7 @@ validate_inputs(){
   local errs=0 port p
 
   # 端口范围校验（1-65535，整数）
-  for p in SS_PORT ANYTLS_PORT NAIVE_PORT PANEL_PORT; do
+  for p in SS_PORT ANYTLS_PORT SOCKS_PORT NAIVE_PORT PANEL_PORT; do
     port="${!p:-}"
     [ -n "$port" ] || continue
     if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
@@ -215,7 +221,7 @@ validate_inputs(){
   local sys_ports="25822"
   [ "$NO_CADDY" = 0 ] && sys_ports="80 443 25822"
   local conf_ports=()
-  for p in SS_PORT ANYTLS_PORT NAIVE_PORT PANEL_PORT; do
+  for p in SS_PORT ANYTLS_PORT SOCKS_PORT NAIVE_PORT PANEL_PORT; do
     port="${!p:-}"; [ -n "$port" ] || continue
     # 与系统固定端口冲突
     for s in $sys_ports; do
@@ -248,12 +254,12 @@ validate_inputs(){
     fi
   fi
 
-  # NaiveProxy 用户名/密码：不含冒号和空白（caddy basic_auth 限制）
+  # SOCKS5/NaiveProxy 用户名/密码：不含冒号和空白
   # 注：用平行数组而非 "val:flag" 拼接，避免值本身含冒号被截断
-  local naive_vals=("$NAIVE_USER_IN" "$NAIVE_PASSWORD")
-  local naive_flags=("--naive-user" "--naive-password")
+  local naive_vals=("$SOCKS_USER_IN" "$SOCKS_PASSWORD" "$NAIVE_USER_IN" "$NAIVE_PASSWORD")
+  local naive_flags=("--socks-user" "--socks-password" "--naive-user" "--naive-password")
   local i
-  for i in 0 1; do
+  for i in 0 1 2 3; do
     local val="${naive_vals[$i]}" flag="${naive_flags[$i]}"
     [ -n "$val" ] || continue
     if [[ "$val" == *:* ]] || [[ "$val" =~ [[:space:]] ]]; then
@@ -318,6 +324,7 @@ rand_port(){
 if [ "$UNINSTALL" = 0 ] && [ "$LANDING" = 0 ]; then
   [ -z "$SS_PORT" ]     && SS_PORT="$(rand_port)"     && _rand_port_used+="$SS_PORT "
   [ -z "$ANYTLS_PORT" ] && ANYTLS_PORT="$(rand_port)" && _rand_port_used+="$ANYTLS_PORT "
+  [ -z "$SOCKS_PORT" ]  && SOCKS_PORT="$(rand_port)"  && _rand_port_used+="$SOCKS_PORT "
   [ -z "$NAIVE_PORT" ]  && NAIVE_PORT="$(rand_port)"  && _rand_port_used+="$NAIVE_PORT "
   [ -z "$PANEL_PORT" ]  && PANEL_PORT="$(rand_port)"  && _rand_port_used+="$PANEL_PORT "
 fi
@@ -500,6 +507,7 @@ URL_PATH=${URL_PATH}
 PANEL_PORT=${PANEL_PORT}
 SS_PORT=${SS_PORT}
 ANYTLS_PORT=${ANYTLS_PORT}
+SOCKS_PORT=${SOCKS_PORT}
 NAIVE_PORT=${NAIVE_PORT}
 DISGUISE_PANEL=${DISGUISE_PANEL}
 DISGUISE_NAIVE=${DISGUISE_NAIVE}
@@ -512,6 +520,8 @@ CERT_PRIVKEY=${KEY_FILE}
 SS_KEY_IN=${SS_PASSWORD}
 ANYTLS_PASS_IN=${ANYTLS_PASSWORD}
 ANYTLS_UUID_IN=${ANYTLS_UUID_IN}
+SOCKS_USER_IN=${SOCKS_USER_IN}
+SOCKS_PASS_IN=${SOCKS_PASSWORD}
 NAIVE_USER_IN=${NAIVE_USER_IN}
 NAIVE_PASS_IN=${NAIVE_PASSWORD}
 NO_CADDY=${NO_CADDY}
@@ -605,6 +615,7 @@ EOF
 ║  ──────── 代理服务端口（登录面板后启用） ────────             ║
 ║   • Shadowsocks : ${SS_PORT}
 ║   • AnyTLS      : ${ANYTLS_PORT}
+║   • SOCKS5      : ${SOCKS_PORT}
 ║   • NaiveProxy  : ${NAIVE_PORT}
 ║   • 管理面板    : ${PANEL_PORT}
 ║                                                               ║
@@ -723,6 +734,7 @@ fi
 if [ "$NONINT" = 0 ]; then
   ask "Shadowsocks 端口（回车=随机）" "$SS_PORT"; SS_PORT="${ASK_VAL:-$SS_PORT}"
   ask "AnyTLS 端口（回车=随机）" "$ANYTLS_PORT"; ANYTLS_PORT="${ASK_VAL:-$ANYTLS_PORT}"
+  ask "SOCKS5 端口（回车=随机）" "$SOCKS_PORT"; SOCKS_PORT="${ASK_VAL:-$SOCKS_PORT}"
   ask "NaiveProxy 端口（回车=随机）" "$NAIVE_PORT"; NAIVE_PORT="${ASK_VAL:-$NAIVE_PORT}"
   ask "面板端口（回车=随机）" "$PANEL_PORT"; PANEL_PORT="${ASK_VAL:-$PANEL_PORT}"
   ask "面板管理员用户名" "$PANEL_USER"; PANEL_USER="${ASK_VAL:-$PANEL_USER}"
@@ -883,12 +895,14 @@ SS_METHOD=2022-blake3-aes-128-gcm
 SS_KEY=${SS_PASSWORD:-$(openssl rand -base64 16)}
 ANYTLS_PASS=${ANYTLS_PASSWORD:-$(openssl rand -hex 16)}
 ANYTLS_UUID=${ANYTLS_UUID_IN:-$(cat /proc/sys/kernel/random/uuid)}
+SOCKS_USER=${SOCKS_USER_IN:-$(openssl rand -hex 6)}
+SOCKS_PASS=${SOCKS_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
 NAIVE_USER=${NAIVE_USER_IN:-$(openssl rand -hex 6)}
 NAIVE_PASS=${NAIVE_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
 EOF
   log "已生成 /etc/ansgo/secrets.env"
   # 提示哪些字段用了用户提供的值（不会打印值本身，仅提示字段名）
-  [ -n "$SS_PASSWORD$ANYTLS_PASSWORD$ANYTLS_UUID_IN$NAIVE_USER_IN$NAIVE_PASSWORD" ] && \
+  [ -n "$SS_PASSWORD$ANYTLS_PASSWORD$ANYTLS_UUID_IN$SOCKS_USER_IN$SOCKS_PASSWORD$NAIVE_USER_IN$NAIVE_PASSWORD" ] && \
     inf "  其中部分密钥由 CLI 参数指定（详见各 --xxx-password 参数）"
 else warn "/etc/ansgo/secrets.env 已存在，保留现有密钥"; fi
 chmod 600 /etc/ansgo/secrets.env
@@ -901,6 +915,7 @@ if [ ! -f /etc/ansgo/panel.json ]; then
 {
   "domain": "${DOMAIN}",
   "panel_port": ${PANEL_PORT},
+  "panel_title": "ANS-GO 管理面板",
   "url_path": "${URLPATH}",
   "admin_user": "${PANEL_USER}",
   "admin_pass_hash": "PLACEHOLDER",
@@ -910,12 +925,13 @@ if [ ! -f /etc/ansgo/panel.json ]; then
   "ss_port": ${SS_PORT},
   "ss_method": "2022-blake3-aes-128-gcm",
   "anytls_port": ${ANYTLS_PORT},
+  "socks_port": ${SOCKS_PORT},
   "naive_port": ${NAIVE_PORT},
   "disguise_panel": "${DISGUISE_PANEL}",
   "disguise_naive": "${DISGUISE_NAIVE}",
-  "disguise_naive2": "${DISGUISE_NAIVE}",
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
+  "svc_socks_enabled": "false",
   "svc_naive_enabled": "false",
   "caddy_enable": "$([ "$NO_CADDY" = 1 ] && echo false || echo true)",
   "cert_mode": "${CERT_MODE}",
@@ -1022,12 +1038,13 @@ cat <<EOF
 ║  ──────── 代理服务端口（登录面板后启用） ────────             ║
 ║   • Shadowsocks : ${SS_PORT}
 ║   • AnyTLS      : ${ANYTLS_PORT}
+║   • SOCKS5      : ${SOCKS_PORT}
 ║   • NaiveProxy  : ${NAIVE_PORT}
 ║   • 管理面板    : ${PANEL_PORT}
 ║                                                               ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  下一步：登录面板 →「服务管理」页，按需安装代理服务           ║
-║           落地服务（AnyTLS-2/NaiveProxy-2 + 远端 SS）在        ║
+║           落地服务（AnyTLS-2 + 远端 SS）在        ║
 ║           「落地服务」页（原「第二组服务」+「出口落地」合并）  ║
 ╚═══════════════════════════════════════════════════════════════╝
 EOF

@@ -4,7 +4,7 @@
 #
 # 首次启动（/etc/ansgo/panel.json 不存在）：
 #   1. 生成 panel.json（端口/伪装/svc_*_enabled=false/随机 url_path）
-#   2. 生成 secrets.env（SS / ANYTLS / NAIVE 密钥）
+#   2. 生成 secrets.env（SS / ANYTLS / SOCKS / NAIVE 密钥）
 #   3. 设置管理员密码（PANEL_PASS 环境变量 → bcrypt）
 # 每次启动：
 #   4. 确保证书存在（无则自签占位，保证服务能起）
@@ -32,21 +32,23 @@ mkdir -p /etc/ansgo "$CERTDIR" /etc/sing-box /etc/caddy /var/www/html /var/log
 
 # v1.5.12: 端口默认随机生成（10000-65535）。容器内无 ss 命令查占用，
 # host 网络模式下 install.sh 已在宿主选好随机端口并通过 ansgo.env 透传
-# （SS_PORT/ANYTLS_PORT/NAIVE_PORT/PANEL_PORT），此处仅作容器首次启动兜底。
+# （SS_PORT/ANYTLS_PORT/SOCKS_PORT/NAIVE_PORT/PANEL_PORT），此处仅作容器首次启动兜底。
 _rand_port(){ python3 -c "import random;print(random.randint(10000,65535))"; }
 RPANEL_PORT="${PANEL_PORT:-$(_rand_port)}"
 RSS_PORT="${SS_PORT:-$(_rand_port)}"
 RANYTLS_PORT="${ANYTLS_PORT:-$(_rand_port)}"
+RSOCKS_PORT="${SOCKS_PORT:-$(_rand_port)}"
 RNAIVE_PORT="${NAIVE_PORT:-$(_rand_port)}"
 
 # ---- 1/3 首次：panel.json + secrets.env ----
 if [ ! -f "$CONF" ]; then
-  log "首次初始化：生成 panel.json + secrets.env（端口随机：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT naive=$RNAIVE_PORT）"
+  log "首次初始化：生成 panel.json + secrets.env（端口随机：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT socks=$RSOCKS_PORT naive=$RNAIVE_PORT）"
   URLPATH="${URL_PATH:-/$(openssl rand -hex 4)/}"
   cat > "$CONF" <<EOF
 {
   "domain": "${DOMAIN}",
   "panel_port": ${RPANEL_PORT},
+  "panel_title": "ANS-GO 管理面板",
   "url_path": "${URLPATH}",
   "admin_user": "${PANEL_USER:-admin}",
   "admin_pass_hash": "PLACEHOLDER",
@@ -56,12 +58,13 @@ if [ ! -f "$CONF" ]; then
   "ss_port": ${RSS_PORT},
   "ss_method": "2022-blake3-aes-128-gcm",
   "anytls_port": ${RANYTLS_PORT},
+  "socks_port": ${RSOCKS_PORT},
   "naive_port": ${RNAIVE_PORT},
   "disguise_panel": "${DISGUISE_PANEL:-proxy:https://example.com}",
   "disguise_naive": "${DISGUISE_NAIVE:-proxy:https://example.com}",
-  "disguise_naive2": "${DISGUISE_NAIVE:-proxy:https://example.com}",
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
+  "svc_socks_enabled": "false",
   "svc_naive_enabled": "false",
   "caddy_enable": "$([ "${NO_CADDY:-0}" = 1 ] && echo false || echo true)",
   "cert_mode": "${CERT_MODE}",
@@ -73,7 +76,7 @@ if [ ! -f "$CONF" ]; then
 EOF
   chmod 600 "$CONF"
   log "已生成 $CONF (url_path=${URLPATH})"
-  log "⚠️ 随机端口：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT naive=$RNAIVE_PORT（请记下！）"
+  log "⚠️ 随机端口：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT socks=$RSOCKS_PORT naive=$RNAIVE_PORT（请记下！）"
 
   if [ ! -f "$SECRETS" ]; then
     # v1.5.5: 支持宿主通过 ansgo.env 透传 SS_KEY_IN/ANYTLS_PASS_IN 等预指定密钥
@@ -83,6 +86,8 @@ SS_METHOD=2022-blake3-aes-128-gcm
 SS_KEY=${SS_KEY_IN:-$(openssl rand -base64 16)}
 ANYTLS_PASS=${ANYTLS_PASS_IN:-$(openssl rand -hex 16)}
 ANYTLS_UUID=${ANYTLS_UUID_IN:-$(cat /proc/sys/kernel/random/uuid)}
+SOCKS_USER=${SOCKS_USER_IN:-$(openssl rand -hex 6)}
+SOCKS_PASS=${SOCKS_PASS_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
 NAIVE_USER=${NAIVE_USER_IN:-$(openssl rand -hex 6)}
 NAIVE_PASS=${NAIVE_PASS_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
 EOF

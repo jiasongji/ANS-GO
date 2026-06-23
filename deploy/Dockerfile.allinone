@@ -27,7 +27,7 @@ WORKDIR /src
 COPY deploy/panel/go.mod deploy/panel/go.sum ./
 RUN go mod download
 COPY deploy/panel/ .
-ARG PANEL_VERSION=v1.5.15
+ARG PANEL_VERSION=v1.5.16
 RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags "-s -w -X main.version=${PANEL_VERSION}" -o /out/ansgo-panel .
 
@@ -64,7 +64,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 LABEL org.opencontainers.image.source="https://github.com/jiasongji/ANS-GO" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.title="ANS-GO all-in-one" \
-      org.opencontainers.image.description="NaiveProxy + AnyTLS + Shadowsocks 三协议代理 + Go Web 管理面板（sing-box + caddy + systemd 单容器）"
+      org.opencontainers.image.description="Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy 多协议代理 + Go Web 管理面板（sing-box + caddy + systemd 单容器）"
 
 # systemd + 运行依赖（curl/openssl/jq/python3 供 acme.sh / ansgo-genconf / ansgo-cert-issue 用）
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -127,7 +127,7 @@ RUN chmod +x /usr/local/bin/ansgo-entrypoint
 RUN mkdir -p /etc/ansgo /etc/ssl/ansgo /etc/sing-box /etc/caddy /var/www/html /root/.acme.sh /var/log
 
 # host 网络：端口直连宿主
-EXPOSE 80 443 15608 23456 8443 33899 44333 21111 21112 44334
+EXPOSE 80 443 15608 23456 8443 10808 33899 44333 21111 21112
 
 VOLUME ["/etc/ansgo", "/etc/ssl/ansgo", "/etc/sing-box", "/etc/caddy", "/root/.acme.sh"]
 
