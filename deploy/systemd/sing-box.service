@@ -11,8 +11,11 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# v1.5.17: 加 CAP_DAC_READ_SEARCH —— manual 证书模式时证书可能在权限受限的宿主目录
+# （宝塔默认 600 无 x 位），无此 cap 即便 root 也无法 open/search（capability 被
+# CapabilityBoundingSet 收窄后 root 不再隐式绕过 DAC）。只加读权限不加写，最小化提权。
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_READ_SEARCH
 NoNewPrivileges=true
 
 [Install]

@@ -103,33 +103,38 @@ if grep -q '"admin_pass_hash": "PLACEHOLDER"' "$CONF" 2>/dev/null && [ -n "${PAN
     || log "WARN: setpass 失败，稍后可用 docker exec ansgo ansgo-admin panel-pass 重置"
 fi
 
-# ---- 3/3 证书：manual 模式同步到 /etc/ssl/ansgo/ 卷；acme 模式无则自签占位 ----
-# v1.5.10: manual 模式不再让 sing-box/caddy 直接读宿主路径（SELinux/权限问题），
-#         改为启动时把宿主证书 cp 到 /etc/ssl/ansgo/ 卷（容器完全控制），
-#         并把 panel.json 的 cert_mode 改为 acme（让 genconf 用 /etc/ssl/ansgo/ 路径）。
-#         续期：宿主更新证书后，docker restart ansgo（重跑 entrypoint 自动同步）
+# ---- 3/3 证书：manual 模式同步宿主证书到 /etc/ssl/ansgo/ 卷；acme 模式无则自签占位 ----
+# v1.5.17: manual 模式【保持 cert_mode=manual】，但把 cert_fullchain/cert_privkey
+#         指向卷内副本 /etc/ssl/ansgo/（而非宿主 bind mount 路径）。
+#         原因：宿主证书目录常是 600（宝塔默认，无 x 位），sing-box.service/caddy.service
+#         的 CapabilityBoundingSet 去掉了 CAP_DAC_READ_SEARCH，即便 root 也读不了；
+#         卷内副本 644 权限，服务可正常读取。面板证书页据此正确显示"手动模式"。
+#         （v1.5.10 曾把 cert_mode 强制改成 acme 规避权限，但导致面板证书页误显示
+#          "acme 自动签发"，用户为修正又改回 manual + 宿主路径 → 服务全挂。v1.5.17 根治。）
+#         续期：宿主更新证书后，docker restart ansgo（重跑 entrypoint 自动同步卷内副本）
 if [ "$CERT_MODE" = "manual" ]; then
-  log "证书来源：手动模式（宿主 cert=$CERT_FULLCHAIN）"
+  log "证书来源：手动模式（宿主 cert=$CERT_FULLCHAIN → 同步到卷内 $CERTDIR/）"
   if [ ! -f "$CERT_FULLCHAIN" ] || [ ! -f "$CERT_PRIVKEY" ]; then
     log "ERROR: 证书/私钥文件不存在（确认 docker-compose.yml 已 bind mount 宿主证书目录）"
     log "  缺失: $([ ! -f "$CERT_FULLCHAIN" ] && echo "$CERT_FULLCHAIN") $([ ! -f "$CERT_PRIVKEY" ] && echo "$CERT_PRIVKEY")"
   else
-    # 同步宿主证书到 ansgo_ssl 卷（容器完全控制，无权限问题）
+    # 同步宿主证书到 ansgo_ssl 卷（容器完全控制，644 权限，服务可读）
     cp -f "$CERT_FULLCHAIN" "$CERTDIR/fullchain.pem"
     cp -f "$CERT_PRIVKEY" "$CERTDIR/privkey.pem"
     chmod 644 "$CERTDIR/fullchain.pem" "$CERTDIR/privkey.pem"
     log "已同步宿主证书到 $CERTDIR/（fullchain.pem + privkey.pem，644 权限）"
-    # 改 panel.json 为 acme 模式（让 genconf 用 /etc/ssl/ansgo/，不再依赖宿主路径）
+    # panel.json 保持 cert_mode=manual，但 cert_fullchain/cert_privkey 改指卷内副本路径
+    # （genconf/Go certPaths() 据此生成 sing-box/caddy 配置，指向可读的卷内文件）
     if [ -f "$CONF" ]; then
       python3 -c "
 import json
 p = '$CONF'
 c = json.load(open(p))
-c.pop('cert_fullchain', None)
-c.pop('cert_privkey', None)
-c['cert_mode'] = 'acme'
+c['cert_mode'] = 'manual'
+c['cert_fullchain'] = '$CERTDIR/fullchain.pem'
+c['cert_privkey'] = '$CERTDIR/privkey.pem'
 json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
-" 2>/dev/null && log "panel.json 已切换为 acme 模式（用 $CERTDIR/）"
+" 2>/dev/null && log "panel.json 已设为 manual 模式（cert_fullchain/cert_privkey 指向卷内 $CERTDIR/）"
     fi
   fi
 else

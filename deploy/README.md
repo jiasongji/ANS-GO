@@ -155,7 +155,7 @@ curl -fsSL https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sin
 install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
 
 # caddy-naive：本项目 release 预编译产物（推荐）
-VER=v1.5.16
+VER=v1.5.17
 curl -fsSL https://github.com/jiasongji/ANS-GO/releases/download/${VER}/caddy-naive-linux-${ARCH} -o /usr/local/bin/caddy
 chmod 0755 /usr/local/bin/caddy
 # 失败则现场 xcaddy 编译（需 Go 1.22+ + git，约 3-5 分钟）：
@@ -343,7 +343,7 @@ docker buildx build --builder ansgo-builder \
   --build-arg HTTP_PROXY=http://host.docker.internal:1666 \
   --build-arg HTTPS_PROXY=http://host.docker.internal:1666 \
   -t ghcr.io/jiasongji/ansgo:latest \
-  -t ghcr.io/jiasongji/ansgo:v1.5.16 \
+  -t ghcr.io/jiasongji/ansgo:v1.5.17 \
   -f deploy/Dockerfile.allinone . --push
 ```
 
@@ -448,7 +448,7 @@ bash install.sh --uninstall --purge
 - 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
 - sing-box：**SagerNet 官方 release**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/...`），本项目 release vendored 兜底
 - caddy-naive：本项目 release 预编译产物（双架构），失败回退 xcaddy 现场编译
-- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/v1.5.16/ansgo-panel-linux-<arch>`
+- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/v1.5.17/ansgo-panel-linux-<arch>`
 - acme.sh：本仓库 vendored 快照（可选），或官方 `https://get.acme.sh`
 - 面板镜像：`ghcr.io/jiasongji/ansgo:latest`（all-in-one）/ `ghcr.io/jiasongji/ansgo-panel:latest`（面板单镜像）
 

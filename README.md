@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.16-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.17-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -172,12 +172,12 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com \
              --cert-mode manual \
-             --cert-fullchain /www/server/panel/vhost/cert/your-domain.com/fullchain.pem \
-             --cert-privkey  /www/server/panel/vhost/cert/your-domain.com/privkey.pem \
-             --anytls-port 21002 \
-             --naive-port 21008 \
-             --panel-port 10568 \
-             --panel-user ad_admin \
+             --cert-fullchain /path/to/fullchain.pem \
+             --cert-privkey  /path/to/privkey.pem \
+             --anytls-port <端口> \
+             --naive-port <端口> \
+             --panel-port <端口> \
+             --panel-user admin \
              --no-caddy \
              --non-interactive
 ```
@@ -373,7 +373,7 @@ ansgo-admin update sing-box
 
 # 升级面板（先在 mac 上交叉编译，scp 上传到服务器，再执行）
 # 1. 本地编译（macOS）：
-cd deploy/panel && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=v1.5.16" -o ansgo-panel .
+cd deploy/panel && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=1.5.17" -o ansgo-panel .
 # 2. scp 上传（必须 stop→rm→scp→md5→start，否则 scp 覆盖运行中二进制会静默失败）
 systemctl stop ansgo-panel
 rm /usr/local/bin/ansgo-panel
@@ -557,7 +557,12 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ## ✨ 特性
 
-### v1.5.16 最新特性 ⭐
+### v1.5.17 最新修复 ⭐
+
+- **【Bug修复】Docker manual 证书模式三根因根治**：① 面板证书页不再误显示「acme 自动签发」（entrypoint 保持 `cert_mode=manual` + 证书路径指向卷内 644 副本）；② `sing-box.service`/`caddy.service` 加回 `CAP_DAC_READ_SEARCH`，修掉 capability 收窄后 root 读不了宿主 `600` 证书目录致服务全挂（任何改服务/端口/落地都会触发）；③ 版本号 `vv1.5.16` 双 v 修正
+- 详见 [v1.5.17 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.17)
+
+### v1.5.16 最新特性
 
 - **【新功能】SOCKS5 支持**：sing-box 第三个 inbound，强制用户名/密码鉴权，面板可安装/卸载/改端口/改凭证/生成 URI/健康检测
 - **【新功能】面板自定义网页标题**：面板设置页可自定义浏览器标签标题，刷新后立即生效
