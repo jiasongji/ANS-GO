@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.12"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.12）
+VER="v1.5.14"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.14）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -820,6 +820,16 @@ if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules
     log "  → 从本项目 release 下载成功"
   else
     # 回退：现场用 xcaddy 编译
+    # v1.5.14: 磁盘空间预检——caddy v2.11.4 依赖树 + Go 工具链约 1.5GB，
+    # ANS-GO 这类 3.86GB 小盘 VPS 被填满会导致后续步骤全部失败（sing-box 配置写不进去）
+    avail_mb=$(df -m / 2>/dev/null | awk 'NR==2{print $4}')
+    if [ -n "$avail_mb" ] && [ "$avail_mb" -lt 1500 ]; then
+      err "磁盘空间不足（根分区可用 ${avail_mb}MB < 1500MB），xcaddy 编译 caddy-naive 需要 ≥1.5GB"
+      err "解决方案：① 上传 caddy-naive-linux-${AARCH} 到 release $VER 后重跑"
+      err "           ② 清理磁盘后重试（apt clean / rm -rf /root/go /root/.cache）"
+      err "           ③ 用更大磁盘的服务器"
+      exit 3
+    fi
     warn "本项目 release 无 caddy-naive 预编译产物，改用 xcaddy 现场编译（约 3-5 分钟）"
     command -v git >/dev/null 2>&1 || { apt-get update && apt-get install -y git; }
 

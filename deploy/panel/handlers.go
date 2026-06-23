@@ -371,6 +371,10 @@ func portHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	case "ss":
 		c.SSPort = b.Port
+		if msg := portConflicts(c); msg != "" {
+			jerr(w, 400, "端口冲突: "+msg)
+			return
+		}
 		if err := applyProto(c, "sing-box"); err != nil {
 			jerr(w, 500, err.Error())
 			return
@@ -378,6 +382,10 @@ func portHandler(w http.ResponseWriter, r *http.Request) {
 		jwrite(w, 200, map[string]bool{"ok": true})
 	case "anytls":
 		c.AnyTLSPort = b.Port
+		if msg := portConflicts(c); msg != "" {
+			jerr(w, 400, "端口冲突: "+msg)
+			return
+		}
 		if err := applyProto(c, "sing-box"); err != nil {
 			jerr(w, 500, err.Error())
 			return
@@ -385,6 +393,10 @@ func portHandler(w http.ResponseWriter, r *http.Request) {
 		jwrite(w, 200, map[string]bool{"ok": true})
 	case "naive":
 		c.NaivePort = b.Port
+		if msg := portConflicts(c); msg != "" {
+			jerr(w, 400, "端口冲突: "+msg)
+			return
+		}
 		if err := applyProto(c, "caddy"); err != nil {
 			jerr(w, 500, err.Error())
 			return
@@ -996,15 +1008,75 @@ func systemctl(action, svc string) error {
 	return exec.Command("systemctl", action, svc).Run()
 }
 
+// svcActive 返回 systemctl is-active 的真实状态文本。
+// 关键：systemctl is-active 对 inactive/failed/activating 都返回非0退出码，
+// 但 stdout 仍输出正确的状态字符串。早期版本因 err!=nil 丢弃 stdout 直接返回
+// "unknown"，把 caddy 重启循环中的 "activating"、未启动的 "inactive"、崩溃的
+// "failed" 全部归为 unknown，丢失诊断信息、误导排查（v1.5.14 修复）。
+// 仅当 stdout 为空（极少见，如 unit 不存在）才回退 unknown。
 func svcActive(svc string) string {
 	out, err := exec.Command("systemctl", "is-active", svc).Output()
-	if err != nil {
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		if err != nil {
+			return "unknown"
+		}
 		return "unknown"
 	}
-	return strings.TrimSpace(string(out))
+	return s
 }
 
 func validPort(p int) bool { return p > 0 && p < 65536 }
+
+// portConflicts 检查 caddy / sing-box 各自承载的端口集合内部是否有重复
+// （跨进程端口重复是允许的，caddy 和 sing-box 是独立进程）。
+// 返回冲突描述，空串表示无冲突。v1.5.14 新增。
+//
+// caddy 端口：:443 伪装站（CaddyEnable=true 时）+ naive + naive2（启用时）
+// sing-box 端口：ss + anytls + anytls2（启用时）
+// panel 端口不属于任何载体，单独校验，不在此函数内。
+func portConflicts(c Config) string {
+	// caddy 端口 -> 服务名列表（同端口多个服务名 = 冲突）
+	caddyPorts := map[int][]string{}
+	addCaddy := func(port int, name string) {
+		caddyPorts[port] = append(caddyPorts[port], name)
+	}
+	if c.CaddyEnable == "true" {
+		addCaddy(443, ":443 伪装站")
+	}
+	if c.SvcNaiveEnabled == "true" {
+		addCaddy(c.NaivePort, "naive")
+	}
+	if c.Group2Enabled == "true" {
+		addCaddy(c.Naive2Port, "naive2")
+	}
+	// sing-box 端口 -> 服务名列表
+	sbPorts := map[int][]string{}
+	addSB := func(port int, name string) {
+		sbPorts[port] = append(sbPorts[port], name)
+	}
+	if c.SvcSSEnabled == "true" {
+		addSB(c.SSPort, "ss")
+	}
+	if c.SvcAnyTLSEnabled == "true" {
+		addSB(c.AnyTLSPort, "anytls")
+	}
+	if c.Group2Enabled == "true" {
+		addSB(c.AnyTLS2Port, "anytls2")
+	}
+	var errs []string
+	for port, names := range caddyPorts {
+		if len(names) > 1 {
+			errs = append(errs, fmt.Sprintf("caddy 端口 %d 被 %s 同时占用", port, strings.Join(names, "+")))
+		}
+	}
+	for port, names := range sbPorts {
+		if len(names) > 1 {
+			errs = append(errs, fmt.Sprintf("sing-box 端口 %d 被 %s 同时占用", port, strings.Join(names, "+")))
+		}
+	}
+	return strings.Join(errs, "; ")
+}
 func clamp(v, lo, hi int) int {
 	if v < lo {
 		return lo
@@ -1334,6 +1406,9 @@ func group2Handler(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&b)
 	previouslyEnabled := c.Group2Enabled == "true"
+	// 记录原端口，便于冲突时回滚（避免坏配置残留 panel.json 导致 genconf 失败）
+	prevAnyTLS2Port := c.AnyTLS2Port
+	prevNaive2Port := c.Naive2Port
 	if b.Enabled != nil {
 		if *b.Enabled {
 			c.Group2Enabled = "true"
@@ -1370,8 +1445,17 @@ func group2Handler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
 	}
-	// 状态变化需重新生成两个服务配置并重启
-	// v1.5.12：启用时 sing-box 可能之前因无 inbound 被 disable，这里显式 enable
+	// v1.5.14: 端口冲突预检（naive2 不能和 naive 撞 caddy 端口，
+	// anytls2 不能和 ss/anytls 撞 sing-box 端口）。撞了回滚到原值并报错。
+	if c.Group2Enabled == "true" {
+		if msg := portConflicts(c); msg != "" {
+			c.AnyTLS2Port = prevAnyTLS2Port
+			c.Naive2Port = prevNaive2Port
+			_ = configSet(c)
+			jerr(w, 400, "端口冲突: "+msg+"。已撤销本次端口改动，请先在面板修改冲突端口。")
+			return
+		}
+	}
 	if previouslyEnabled != (c.Group2Enabled == "true") || c.Group2Enabled == "true" {
 		go func() {
 			_ = exec.Command(binGenConf, "all").Run()
