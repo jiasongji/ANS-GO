@@ -833,7 +833,7 @@ if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules
   else
     # 回退：现场用 xcaddy 编译
     # v1.5.14: 磁盘空间预检——caddy v2.11.4 依赖树 + Go 工具链约 1.5GB，
-    # ANS-GO 这类 3.86GB 小盘 VPS 被填满会导致后续步骤全部失败（sing-box 配置写不进去）
+    # 3.86GB 这类小盘 VPS 被填满会导致后续步骤全部失败（sing-box 配置写不进去）
     avail_mb=$(df -m / 2>/dev/null | awk 'NR==2{print $4}')
     if [ -n "$avail_mb" ] && [ "$avail_mb" -lt 1500 ]; then
       err "磁盘空间不足（根分区可用 ${avail_mb}MB < 1500MB），xcaddy 编译 caddy-naive 需要 ≥1.5GB"
