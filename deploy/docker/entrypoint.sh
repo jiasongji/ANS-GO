@@ -30,24 +30,33 @@ log(){ echo "[entrypoint] $*"; }
 
 mkdir -p /etc/ansgo "$CERTDIR" /etc/sing-box /etc/caddy /var/www/html /var/log
 
+# v1.5.12: 端口默认随机生成（10000-65535）。容器内无 ss 命令查占用，
+# host 网络模式下 install.sh 已在宿主选好随机端口并通过 ansgo.env 透传
+# （SS_PORT/ANYTLS_PORT/NAIVE_PORT/PANEL_PORT），此处仅作容器首次启动兜底。
+_rand_port(){ python3 -c "import random;print(random.randint(10000,65535))"; }
+RPANEL_PORT="${PANEL_PORT:-$(_rand_port)}"
+RSS_PORT="${SS_PORT:-$(_rand_port)}"
+RANYTLS_PORT="${ANYTLS_PORT:-$(_rand_port)}"
+RNAIVE_PORT="${NAIVE_PORT:-$(_rand_port)}"
+
 # ---- 1/3 首次：panel.json + secrets.env ----
 if [ ! -f "$CONF" ]; then
-  log "首次初始化：生成 panel.json + secrets.env"
+  log "首次初始化：生成 panel.json + secrets.env（端口随机：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT naive=$RNAIVE_PORT）"
   URLPATH="${URL_PATH:-/$(openssl rand -hex 4)/}"
   cat > "$CONF" <<EOF
 {
   "domain": "${DOMAIN}",
-  "panel_port": ${PANEL_PORT:-15608},
+  "panel_port": ${RPANEL_PORT},
   "url_path": "${URLPATH}",
   "admin_user": "${PANEL_USER:-admin}",
   "admin_pass_hash": "PLACEHOLDER",
   "session_hours": 8,
   "login_lock_threshold": 5,
   "login_lock_minutes": 10,
-  "ss_port": ${SS_PORT:-23456},
+  "ss_port": ${RSS_PORT},
   "ss_method": "2022-blake3-aes-128-gcm",
-  "anytls_port": ${ANYTLS_PORT:-8443},
-  "naive_port": ${NAIVE_PORT:-44333},
+  "anytls_port": ${RANYTLS_PORT},
+  "naive_port": ${RNAIVE_PORT},
   "disguise_panel": "${DISGUISE_PANEL:-proxy:https://soft.xiaoz.org}",
   "disguise_naive": "${DISGUISE_NAIVE:-proxy:https://soft.xiaoz.org}",
   "disguise_naive2": "${DISGUISE_NAIVE:-proxy:https://soft.xiaoz.org}",
@@ -64,6 +73,7 @@ if [ ! -f "$CONF" ]; then
 EOF
   chmod 600 "$CONF"
   log "已生成 $CONF (url_path=${URLPATH})"
+  log "⚠️ 随机端口：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT naive=$RNAIVE_PORT（请记下！）"
 
   if [ ! -f "$SECRETS" ]; then
     # v1.5.5: 支持宿主通过 ansgo.env 透传 SS_KEY_IN/ANYTLS_PASS_IN 等预指定密钥

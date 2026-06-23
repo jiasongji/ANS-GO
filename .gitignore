@@ -27,4 +27,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# ===== 本地任务提示词（含服务器敏感信息，不入库）=====
 .merge-menu-task-prompt.md
+.debug-task-prompt.md

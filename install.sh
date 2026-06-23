@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.11
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.12
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.11"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.11）
+VER="v1.5.12"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.12）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -90,8 +90,10 @@ case "$ARCH" in
 esac
 
 # ---- 默认值 ----
+# v1.5.12: 所有端口默认空（未指定），在 validate_inputs 后随机生成（10000-65535，
+#   避开 80/443/25822/互相冲突/已占用）。用户通过 --ss-port 等参数可显式指定。
 DOMAIN="" DYNU_KEY="" DYNU_CID="" DYNU_SECRET="" EMAIL=""
-SS_PORT=23456 ANYTLS_PORT=8443 NAIVE_PORT=44333 PANEL_PORT=15608
+SS_PORT="" ANYTLS_PORT="" NAIVE_PORT="" PANEL_PORT=""
 PANEL_USER="admin" DISGUISE_PANEL="proxy:https://soft.xiaoz.org" DISGUISE_NAIVE="proxy:https://soft.xiaoz.org"
 # 证书来源：acme（默认，需 Dynu 凭证）/ manual（手动指定已有证书+私钥路径，二选一）
 CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
@@ -125,10 +127,10 @@ usage(){ cat <<EOF
   --dynu-client-id ID      Dynu OAuth Client ID（路径B，与 --dynu-secret 同用）
   --dynu-secret SECRET     Dynu OAuth Secret（路径B）
   --email EMAIL            ACME 注册邮箱
-  --ss-port N              Shadowsocks 端口（默认 23456）
-  --anytls-port N          AnyTLS 端口（默认 8443）
-  --naive-port N           NaiveProxy 端口（默认 44333，勿用 443）
-  --panel-port N           面板端口（默认 15608）
+  --ss-port N              Shadowsocks 端口（默认随机 10000-65535）
+  --anytls-port N          AnyTLS 端口（默认随机 10000-65535）
+  --naive-port N           NaiveProxy 端口（默认随机 10000-65535，勿用 443）
+  --panel-port N           面板端口（默认随机 10000-65535）
   --panel-user USER        面板管理员用户名（默认 admin）
   --panel-password PASS    面板管理员密码（默认随机；自定义须 6-64 字符）
   --panel-url-path PATH    面板 URL 路径（默认随机 /xxxxxxxx/；自定义形如 /my-path/）
@@ -285,6 +287,39 @@ validate_inputs(){
 # 仅在「安装/部署」场景下校验；卸载/落地/帮助场景跳过
 if [ "$UNINSTALL" = 0 ] && [ "$LANDING" = 0 ]; then
   validate_inputs
+fi
+
+# =============================================================================
+# 随机端口填补（v1.5.12）
+#   未通过 --ss-port/--anytls-port/--naive-port/--panel-port 指定的端口，
+#   在 10000-65535 范围随机生成。避免以下端口：
+#     - 80/443（caddy 固定端口，--no-caddy 模式下除外）
+#     - 25822（SSH 加固后端口）
+#     - 已被占用的端口（ss -tln 检测）
+#     - 已为本部署其它服务选用的端口（互斥）
+# =============================================================================
+_rand_port_used=" "   # 本次部署已选端口（空格分隔），避免互相冲突
+_sys_busy_ports(){ echo "25822"; [ "$NO_CADDY" = 0 ] && echo "80 443"; }
+_listening_ports(){ ss -tln 2>/dev/null | awk 'NR>1{print $4}' | sed 's/.*://' | sort -u; }
+rand_port(){
+  # 在 10000-65535 随机生成一个未冲突端口
+  local busy sys_used p
+  busy="$( { _listening_ports; echo "$_rand_port_used" | tr ' ' '\n'; } | sort -u )"
+  sys_used="$(_sys_busy_ports)"
+  while :; do
+    p=$(( (RANDOM << 15 | RANDOM) % 55536 + 10000 ))  # 10000-65535
+    # 跳过系统保留 / 已监听 / 本次已选
+    { echo "$sys_used" | grep -qx "$p"; } && continue
+    { echo "$busy" | grep -qx "$p"; } && continue
+    echo "$p"; return
+  done
+}
+# 仅在「安装/部署」场景下填补；卸载/落地/帮助场景跳过
+if [ "$UNINSTALL" = 0 ] && [ "$LANDING" = 0 ]; then
+  [ -z "$SS_PORT" ]     && SS_PORT="$(rand_port)"     && _rand_port_used+="$SS_PORT "
+  [ -z "$ANYTLS_PORT" ] && ANYTLS_PORT="$(rand_port)" && _rand_port_used+="$ANYTLS_PORT "
+  [ -z "$NAIVE_PORT" ]  && NAIVE_PORT="$(rand_port)"  && _rand_port_used+="$NAIVE_PORT "
+  [ -z "$PANEL_PORT" ]  && PANEL_PORT="$(rand_port)"  && _rand_port_used+="$PANEL_PORT "
 fi
 
 # =============================================================================
@@ -556,22 +591,33 @@ EOF
   hr "部署完成"
   cat <<EOF
 
-═══════════════════════════════════════════════════
-  ✅ ANS-GO 一体化部署完成（Docker / KVM）
-═══════════════════════════════════════════════════
-  Web 面板:   https://${DOMAIN}:${PANEL_PORT}${ACTUAL_PATH}
-  用户名:     ${PANEL_USER}
-  密码(首次): ${PANEL_PW}
-───────────────────────────────────────────────────
-  ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 后台签发中（约 1-3 分钟），首次访问若提示不受信稍候刷新即可")
-  管理命令:
-     cd ${DIR} && $COMPOSE logs -f ansgo   # 查日志/签证书进度
-     docker exec ansgo ansgo-admin status         # 服务状态
-     docker exec ansgo ansgo-admin info           # 节点连接参数
-  下一步: 登录面板 →「服务安装」页按需开启代理服务
-═══════════════════════════════════════════════════
+╔═══════════════════════════════════════════════════════════════╗
+║  ✅ ANS-GO 一体化部署完成（Docker / KVM）                     ║
+╠═══════════════════════════════════════════════════════════════╣
+║                                                               ║
+║  ⚠️  本次部署端口均为随机生成，请立即记录！                   ║
+║  ─────────────────────────────────────────────────            ║
+║                                                               ║
+║  Web 面板:   https://${DOMAIN}:${PANEL_PORT}${ACTUAL_PATH}
+║  用户名:     ${PANEL_USER}
+║  密码(首次): ${PANEL_PW}
+║                                                               ║
+║  ──────── 代理服务端口（登录面板后启用） ────────             ║
+║   • Shadowsocks : ${SS_PORT}
+║   • AnyTLS      : ${ANYTLS_PORT}
+║   • NaiveProxy  : ${NAIVE_PORT}
+║   • 管理面板    : ${PANEL_PORT}
+║                                                               ║
+╠═══════════════════════════════════════════════════════════════╣
+║  ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 后台签发中（约 1-3 分钟），首次访问若提示不受信稍候刷新即可")
+║  管理命令:
+║     cd ${DIR} && $COMPOSE logs -f ansgo   # 查日志/签证书进度
+║     docker exec ansgo ansgo-admin status         # 服务状态
+║     docker exec ansgo ansgo-admin info           # 节点连接参数
+║  下一步: 登录面板 →「服务管理」页按需开启代理服务
+╚═══════════════════════════════════════════════════════════════╝
 EOF
-  log "代理服务默认未启动，请在面板「服务安装」页按需开启。"
+  log "代理服务默认未启动，请在面板「服务管理」页按需开启。"
   exit 0
 }
 
@@ -675,10 +721,10 @@ else
   fi
 fi
 if [ "$NONINT" = 0 ]; then
-  ask "Shadowsocks 端口" "$SS_PORT"; SS_PORT="${ASK_VAL:-$SS_PORT}"
-  ask "AnyTLS 端口" "$ANYTLS_PORT"; ANYTLS_PORT="${ASK_VAL:-$ANYTLS_PORT}"
-  ask "NaiveProxy 端口" "$NAIVE_PORT"; NAIVE_PORT="${ASK_VAL:-$NAIVE_PORT}"
-  ask "面板端口" "$PANEL_PORT"; PANEL_PORT="${ASK_VAL:-$PANEL_PORT}"
+  ask "Shadowsocks 端口（回车=随机）" "$SS_PORT"; SS_PORT="${ASK_VAL:-$SS_PORT}"
+  ask "AnyTLS 端口（回车=随机）" "$ANYTLS_PORT"; ANYTLS_PORT="${ASK_VAL:-$ANYTLS_PORT}"
+  ask "NaiveProxy 端口（回车=随机）" "$NAIVE_PORT"; NAIVE_PORT="${ASK_VAL:-$NAIVE_PORT}"
+  ask "面板端口（回车=随机）" "$PANEL_PORT"; PANEL_PORT="${ASK_VAL:-$PANEL_PORT}"
   ask "面板管理员用户名" "$PANEL_USER"; PANEL_USER="${ASK_VAL:-$PANEL_USER}"
   ask "直访伪装 :443 (proxy:<URL> 或 page)" "$DISGUISE_PANEL"; DISGUISE_PANEL="${ASK_VAL:-$DISGUISE_PANEL}"
   ask "Naive伪装 (代理端口, proxy:<URL> 或 page)" "$DISGUISE_NAIVE"; DISGUISE_NAIVE="${ASK_VAL:-$DISGUISE_NAIVE}"
@@ -697,7 +743,8 @@ if [ "$NONINT" = 0 ]; then
 fi
 echo "----------------------------------------"
 printf "  域名        : %s\n" "$DOMAIN"
-printf "  端口        : ss=%s anytls=%s naive=%s panel=%s\n" "$SS_PORT" "$ANYTLS_PORT" "$NAIVE_PORT" "$PANEL_PORT"
+printf "  ⚠️ 端口（随机生成，请记下）：\n"
+printf "    ss=%s anytls=%s naive=%s panel=%s\n" "$SS_PORT" "$ANYTLS_PORT" "$NAIVE_PORT" "$PANEL_PORT"
 printf "  直访伪装   : %s\n" "$DISGUISE_PANEL"
 printf "  Naive伪装  : %s\n" "$DISGUISE_NAIVE"
 if [ "$CERT_MODE" = "manual" ]; then
@@ -951,16 +998,27 @@ hr "部署完成"
 URL_PATH=$(python3 -c "import json;print(json.load(open('/etc/ansgo/panel.json'))['url_path'])" 2>/dev/null)
 cat <<EOF
 
-═══════════════════════════════════════════════════
-  ✅ ANS-GO 管理面板部署完成
-═══════════════════════════════════════════════════
-  Web 面板:   https://${DOMAIN}:${PANEL_PORT}${URL_PATH:-/}
-  用户名:     ${PANEL_USER}
-  密码(仅此一次): ${PANEL_PW}
-───────────────────────────────────────────────────
-  下一步：登录面板 →「服务安装」页，按需安装代理服务
-           （Shadowsocks / AnyTLS / NaiveProxy）
-           第二组服务（走 SS 落地）在「第二组服务」页
-═══════════════════════════════════════════════════
+╔═══════════════════════════════════════════════════════════════╗
+║  ✅ ANS-GO 管理面板部署完成                                   ║
+╠═══════════════════════════════════════════════════════════════╣
+║                                                               ║
+║  ⚠️  本次部署端口均为随机生成，请立即记录！                   ║
+║  ─────────────────────────────────────────────────            ║
+║                                                               ║
+║  Web 面板:   https://${DOMAIN}:${PANEL_PORT}${URL_PATH:-/}
+║  用户名:     ${PANEL_USER}
+║  密码(仅此一次): ${PANEL_PW}
+║                                                               ║
+║  ──────── 代理服务端口（登录面板后启用） ────────             ║
+║   • Shadowsocks : ${SS_PORT}
+║   • AnyTLS      : ${ANYTLS_PORT}
+║   • NaiveProxy  : ${NAIVE_PORT}
+║   • 管理面板    : ${PANEL_PORT}
+║                                                               ║
+╠═══════════════════════════════════════════════════════════════╣
+║  下一步：登录面板 →「服务管理」页，按需安装代理服务           ║
+║           落地服务（AnyTLS-2/NaiveProxy-2 + 远端 SS）在        ║
+║           「落地服务」页（原「第二组服务」+「出口落地」合并）  ║
+╚═══════════════════════════════════════════════════════════════╝
 EOF
-log "完成。代理服务未启动，请在面板「服务安装」页按需开启。"
+log "代理服务未启动，请在面板「服务管理」页按需开启。"

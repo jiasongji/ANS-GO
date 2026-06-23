@@ -5,8 +5,18 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
 >
-> **当前版本：v1.5.11**（install.sh 脚本版本；**面板 Go 二进制升级到 v1.5.11**，含三页合并的统一「服务管理」页）。版本历史见 GitHub Releases。
+> **当前版本：v1.5.12**（install.sh 脚本版本；**面板 Go 二进制升级到 v1.5.12**，含 5 项 UX 优化 + 4 个落地服务致命 bug 修复）。版本历史见 GitHub Releases。
 >
+> - **v1.5.12**：**5 项面板 UX 优化 + 4 个落地服务致命 bug 根治**（裸金属 + Docker 同步生效）。
+>   ① **节点信息页重构**（前端 `loadNode`）：未启用的服务不再显示（之前空 URI 误导用户）；每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示，每行独立「📋 复制」按钮；URI 单独成行也带复制。落地服务启用时 anytls-2/naive-2 才显示（并标注 anytls-2 出口经 SS 落地 / naive-2 走 direct 的架构约束）。后端 `nodeHandler` 同步加 `enabled` 字段让前端据此过滤。
+>   ② **「第二组服务」+「出口落地」合并为「落地服务」单页**（前端导航精简一项）：上半部分配置 AnyTLS-2/NaiveProxy-2（启用/端口/伪装），下半部分配置远端 SS 落地服务器（host/port/method/password）。`api/group2` + `api/landing` 两个后端端点保持不变（合并仅是前端表现层）。
+>   ③ **端口全部随机生成**：`install.sh` + `entrypoint.sh` 默认端口从 23456/8443/44333/15608 改为**全部随机**（10000-65535，自动避开 80/443/25822/互相冲突/已占用）。`rand_port()` 在 `validate_inputs` 后填补空端口，部署完成横幅用 ╔═══╗ 边框 + ⚠️ 警示标突出显示。用户可通过 `--ss-port` 等参数显式指定（向后兼容）。
+>   ④ **落地服务启用时自动生成密钥**：`group2Handler` 启用分支检测到 `ANYTLS2_PASS`/`NAIVE2_USER` 任一为空时**自动调 `ansgo-admin regen2`** 生成（原代码要求用户先手动点「生成密钥」按钮 → 用户反馈启用后无法用）。生成的密钥可在「服务管理」页底部查看/修改。同时启用 sing-box + caddy 显式 `enable`（之前可能被 disable 起不来）。
+>   ⑤ **所有服务加端口监听检测**（新 `api/health` + 前端 UI）：每服务检测 ① systemd active ② 端口 LISTEN（`ss -tln`）③ TCP 自连握手（`net.DialTimeout`）。仪表盘/服务管理页每张卡加「🔍 检测」按钮，结果就近渲染（✅/❌ 行级显示 + 综合诊断）。
+>   ⑥ **【Bug修复】sing-box 路由规则引用不存在的 `naive-in2` tag**：`ansgo-genconf` 之前在落地 SS outbound 的路由规则里把 `["anytls-in2", "naive-in2"]` 一起塞进去，但 NaiveProxy 由 **caddy** 承载，sing-box 里**根本没有 naive-in2 这个 inbound**。新版 sing-box 配置校验失败/规则被丢弃 → 第二组流量全部走 direct（用户实测"配置了落地但用不了"的核心根因）。修复：路由规则只引用 `anytls-in2`，并删除冗余的 `action: route` 字段（sing-box 1.11+ 默认 action 就是 route）。
+>   ⑦ **【Bug修复】naive-2 走 direct 架构约束明确告知**：之前 UI 文档说"naive-2 出口经 SS 落地"，但 caddy 和 sing-box 是**两个独立进程**，caddy 收到 naive-2 流量后**直连目标站点**（无法转发给 sing-box 的 ss-out，这是 caddy/sing-box 分离架构的固有约束）。修复：节点信息页/服务管理页/落地服务页全部明确标注"naive-2 走 direct"，避免用户对"naive-2 出口 IP"产生错误预期。
+>   ⑧ **【Bug修复】`landingHandler` 启用时同步 enable sing-box**：原代码落地 SS 配置变化只 `restart sing-box`，但若 sing-box 之前因无启用服务被 `disable` 了，restart 会失败（unit 未 enable）。修复：检测到有启用服务时显式 `enable` + `restart`。同时返回 `note` 字段告知"未启用落地服务时 ss-out 不生效"。
+>   ⚠️ **经验教训：caddy（NaiveProxy）与 sing-box（SS/AnyTLS）是两个独立进程，跨进程路由不可能**——任何"naive-2 流量走 sing-box 的 ss-out 落地"的设计在物理上都不可行，UI/文档必须诚实告知。naive-2 永远走 caddy 的 direct 出口（中转机 IP），只有 anytls-2 能经 sing-box ss-out 落地到远端服务器
 > - **v1.5.11**：**前端 UX 重构——「服务安装」「端口管理」「密钥管理」三页合并为统一「服务管理」页**（裸金属 + Docker 同步生效，纯前端改动）。① **新增 `loadMgmt()` 函数**（`index.html`）：一次并行拉取 `api/dashboard` + `api/node`，每服务渲染一张卡片——状态标签（未安装/已安装·运行中/已安装·未运行）+ 端口输入 + 密钥/凭证输入 + 安装/卸载 + 启停按钮 + 🎲随机/💾保存密钥，一站式完成原先跨三页的全部操作。② **导航精简**：删除 `install/port/key` 三个 nav button，新增 `🗂️ 服务管理`（data-t="mgmt"）；`showTab` 派发表加 `mgmt:loadMgmt`（保留 `install:loadInstall/port:loadPort/key:loadKey` 映射不破坏潜在引用，但不再有 nav 入口）。③ **`reloadCurrentTab()` 抽象**：`svcInstall/svc/regen/saveKey` 完成回调从硬编码 `loadInstall/loadSvc/loadKey` 改为 `reloadCurrentTab()`（按当前激活 tab 自动刷新），让这些操作在 mgmt 页面也能正确刷新状态/密钥。④ 保留所有原字段 ID（`#p_ss` `#k_at_pass` 等），`setPort/saveKey/regen/svcInstall` 函数签名 0 改动，后端 API 0 改动。⚠️ **经验教训：HTML 经 `//go:embed` 编译进 Go 二进制，改前端必须重新 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 出包 + stop→rm→scp→md5→start 流程（AGENTS.md §9），浏览器硬刷新清缓存；动作函数完成回调统一走「刷新当前 tab」而非硬编码本页函数，避免后续合并/拆分页面时回调链断裂**
 > - **v1.5.10**：修复 v1.5.9 的 Docker 容器重启回归——**容器重启时 naive 已装但 caddy 被停的 bug**。根因：`entrypoint.sh` 第 143 行只看 `caddy_enable=false` 就 `systemctl stop caddy`，没看 `svc_naive_enabled`。容器重启（`docker-compose up -d`）后即使 naive 已装，caddy 仍被停 → NaiveProxy inactive。修复：`--no-caddy` 模式下检查 `svc_naive_enabled`：naive 已装 → `enable + restart caddy`（仅听 naive 端口，不碰 80/443）；naive 未装 → `disable + stop caddy`（80/443 由 nginx 接管）。`handlers.go` 同步把 caddy 启用条件对齐到 `CaddyEnable=="true" || SvcNaiveEnabled=="true"`。**测试**：`docker-compose pull && docker-compose up -d` 后 naive 应自动恢复 active。
 > - **v1.5.9**：修复用户反馈的 SS/AnyTLS 状态耦合 + caddy 自启动问题。**首次自 v1.5.0 改动 Go 面板代码**（main.go + handlers.go），Docker 镜像内面板二进制已更新（裸金属用户需等下一个面板 release tag 才能用上）。① **反馈 1：SS/AnyTLS 状态显示解耦**——`dashboardHandler` 服务状态改为 `enabled && 进程active`，未启用的服务显示 inactive（不再因载体进程在跑而误报 active）。② **反馈 1：停止 SS 不停 AnyTLS**——`serviceHandler` 对 ss/anytls 单独处理：设 enabled=false + genconf + restart sing-box（genconf 按 enabled 生成 inbound，停 SS 后 config 只剩 AnyTLS），不再 systemctl stop sing-box 误伤其他服务。只有 SS+AnyTLS 都未启用时才 stop+disable sing-box。③ **反馈 3：caddy 智能启停**——`Config` struct 加 `CaddyEnable` 字段（解析 panel.json `caddy_enable`，默认 true 兼容旧部署）；`svcInstallHandler` caddy 启用条件改为 `CaddyEnable=="true" || SvcNaiveEnabled=="true"`（默认模式始终跑 :443 伪装站；--no-caddy 模式只在 naive 启用时才 enable+start caddy）。⚠️ **Go 编译坑：`exec.Command(...).CombinedOutput()` 返回 `(output, err)` 两个值，不能 `_ = ...` 赋给单值，用 `.Run()` 替代（只返回 err）**
@@ -37,7 +47,7 @@
 
 - **面板优先架构**：install.sh 只装面板 + 证书，代理服务在 Web 后台「服务安装」页按需启用
 - **三协议代理**（按需）：NaiveProxy + AnyTLS + Shadowsocks（2022）
-- **第二组服务 + 链式出站**：可选额外 anytls-2 + naive-2，出口经 SS 走另一台落地服务器
+- **落地服务 + 链式出站**：可选额外 anytls-2 + naive-2（**仅 anytls-2 出口经 SS 走另一台落地服务器**，naive-2 走 direct；caddy/sing-box 分离架构约束，v1.5.12 起明确告知）
 - **真实域名证书**：`your-domain.com`（Let's Encrypt），面板与各服务共享
 - **Web 管理面板**：中文、暗黑/白天双主题、**移动端自适应**（侧边栏抽屉 / 表单 label 上置 / 网格单列）、**左侧可折叠导航**（桌面端折叠成图标条 + 移动端汉堡抽屉，localStorage 记忆）、可管全部协议参数 + 证书 + 服务安装/卸载 + 自身配置
 - **性能最大化**：网络内核调优、清理垃圾软件、内存占用最小
@@ -105,15 +115,16 @@
 | 服务 | 默认端口 | 协议 | 类别 | 面板可改 |
 |------|---------|------|------|---------|
 | caddy :443 伪装站 | `443` TCP | HTTPS（反代伪装）| **面板必需**（域名直访）| ❌ 固定（伪装站）|
-| Web 面板 (ansgo-panel) | `15608` TCP | HTTPS | **面板必需** | ✅（改后重启）|
-| NaiveProxy (caddy) | `44333` TCP | HTTPS forward proxy | 按需安装 | ✅ |
-| AnyTLS (sing-box) | `21111` TCP | TLS | 按需安装 | ✅ |
-| Shadowsocks (sing-box) | `33899` TCP | SS2022 | 按需安装 | ✅ |
-| 第二组 anytls-2 / naive-2 | `21112` / `44334` | TLS / HTTPS | 按需（走 SS 落地）| ✅ |
+| Web 面板 (ansgo-panel) | **随机** 10000-65535（v1.5.12 前 15608）| HTTPS | **面板必需** | ✅（改后重启）|
+| NaiveProxy (caddy) | **随机** 10000-65535（v1.5.12 前 44333）| HTTPS forward proxy | 按需安装 | ✅ |
+| AnyTLS (sing-box) | **随机** 10000-65535（v1.5.12 前 21111）| TLS | 按需安装 | ✅ |
+| Shadowsocks (sing-box) | **随机** 10000-65535（v1.5.12 前 33899）| SS2022 | 按需安装 | ✅ |
+| 落地服务 anytls-2 / naive-2 | **随机** 10000-65535（v1.5.12 前 21112 / 44334）| TLS / HTTPS | 按需（anytls-2 走 SS 落地，naive-2 走 direct）| ✅ |
 | caddy HTTP（重定向）| `80` TCP | HTTP | 固定 | ❌ |
 | SSH | `25822` TCP | SSH | **已加固**（公钥+禁密码，见 §15）| ❌ |
 
-> :443 是**域名直访伪装站**（纯反代，不提供代理），随面板一起启动。NaiveProxy 用独立端口（默认 44333），不要用 443。
+> :443 是**域名直访伪装站**（纯反代，不提供代理），随面板一起启动。NaiveProxy 用独立端口，不要用 443。
+> v1.5.12 起：所有服务端口**部署时随机生成**（10000-65535，避开 80/443/25822/已占用），可通过 `--ss-port` 等参数显式指定。已部署服务器端口不变（仅新部署默认值改变）。
 >
 > ⚠️ **SSH 端口已从默认 22 改为 25822**（2026-06-22 加固，见 §15）。`install.sh` 仍装在 22，加固属部署后动作；新部署若需复刻，加固步骤见 §15。
 
@@ -190,13 +201,14 @@ manual 模式: cert_fullchain + cert_privkey 字段指定的绝对路径（用�
 - 同一 sing-box 进程的 `type: shadowsocks` inbound
 - 加密：`2022-blake3-aes-128-gcm`，密钥 base64(16 bytes)
 
-### 5.4 第二组服务（可选，走 SS 落地）
-- **默认关闭**，面板「第二组服务」页勾选启用才部署。启动后额外起：
-  - `anytls-in2`（sing-box，独立端口，默认 21112）
-  - `naive-2`（caddy forward_proxy，独立端口，默认 44334）+ 独立 basic_auth 凭证
-- **链式出站**：第二组的出口流量经 `ss-out`（sing-box shadowsocks outbound）转发到另一台落地服务器的 ss-server（中转→落地架构）。第一组仍走 direct。
-- 生成路由规则：`{ inbound: [anytls-in2, naive-in2], outbound: ss-out }`
-- 密钥：`ansgo-admin regen2` 生成（ANYTLS2_* / NAIVE2_*，存 secrets.env）；面板「密钥管理」或「第二组服务」页可触发
+### 5.4 落地服务（可选，原"第二组服务"，v1.5.12 起与"出口落地"合并）
+- **默认关闭**，面板「落地服务」页勾选启用才部署。启用后额外起：
+  - `anytls-in2`（sing-box，独立端口，**默认随机**，v1.5.12 前为 21112）
+  - `naive-2`（caddy forward_proxy，独立端口，**默认随机**，v1.5.12 前为 44334）+ 独立 basic_auth 凭证
+- **链式出站（仅 AnyTLS-2）**：AnyTLS-2 的出口流量经 `ss-out`（sing-box shadowsocks outbound）转发到另一台落地服务器的 ss-server（中转→落地架构）。第一组仍走 direct。
+- ⚠️ **NaiveProxy-2 走 direct（架构约束，v1.5.12 明确告知）**：naive-2 在 caddy 进程中，caddy 与 sing-box 是两个独立进程，naive-2 流量**无法跨进程转发**到 sing-box 的 ss-out，只能走 caddy 的 direct 出口（中转机 IP）。若需隐藏中转 IP，请使用 AnyTLS-2。
+- 生成路由规则（v1.5.12 修复）：`{ inbound: ["anytls-in2"], outbound: "ss-out" }`（之前错误地引用了 `naive-in2` 导致 sing-box 配置校验失败/规则被丢弃）
+- 密钥：`ansgo-admin regen2` 生成（ANYTLS2_* / NAIVE2_*，存 secrets.env）；面板「落地服务」页启用时若密钥未生成会**自动调 regen2**（v1.5.12 改进），生成后可在「服务管理」页底部查看/修改
 
 ### 5.5 落地服务器 Shadowsocks
 - 独立部署在中转机之外的另一台服务器，仅跑一个 ss-server（direct 出口）
@@ -236,15 +248,17 @@ https://your-domain.com:15608/<随机URL路径>/
 
 ### 6.4 功能模块（中文 UI，支持暗黑/白天双主题切换 + 移动端自适应 + 左侧可折叠导航，localStorage 记忆）
 1. **登录页**（含「忘记密码？」命令提示）
-2. **仪表盘**：各服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时
-3. **节点信息**：各启用服务连接参数 + URI 一键复制 + 客户端二维码（启用第二组时额外显示 anytls-2/naive-2）
+2. **仪表盘**：各服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时 + **每服务「🔍 检测」按钮**（v1.5.12，调 `api/health` 三合一诊断：systemd active + 端口 LISTEN + TCP 握手）
+3. **节点信息**（v1.5.12 重构）：**只显示已启用的服务**（未启用不渲染卡片，避免空 URI 误导）；每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示，**每行独立「📋 复制」按钮**；URI 单独成行带复制 + 客户端二维码。落地服务启用时显示 anytls-2/naive-2（标注 anytls-2 出口经 SS 落地 / naive-2 走 direct 架构约束）
 4. **服务控制**：start / stop / restart（二次确认）
-5. **服务管理** ⭐（v1.5.11 起由「服务安装」+「端口管理」+「密钥管理」三页合并）：每服务一张卡片，一站式完成：① 状态标签（未安装/已安装·运行中/已安装·未运行）② Shadowsocks/AnyTLS/NaiveProxy 独立安装/卸载 ③ 各服务端口 + 面板端口均可改 ④ 手动输入自定义密钥（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，SS2022 自动校验 base64(16字节) 长度）+ 🎲 随机生成 ⑤ 启停按钮（start/stop/restart）。第二组（AnyTLS-2/Naive-2）在本页底部当 group2 启用时显示（端口仍走「第二组服务」页配置）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；随机生成走 ansgo-admin regen/regen2
-6. **第二组服务**：开关 / 端口 / Naive-2 伪装（启用后额外 anytls-2 + naive-2，走 SS 落地）
-7. **出口落地**：落地服务器 SS 配置（host/port/method/password + 开关），含密钥长度校验
-8. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
-9. **面板设置**：URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 两个伪装站点
-10. **日志查看**：tail 最近 N 行
+5. **服务管理** ⭐（v1.5.11 起由「服务安装」+「端口管理」+「密钥管理」三页合并；v1.5.12 加检测）：每服务一张卡片，一站式完成：① 状态标签（未安装/已安装·运行中/已安装·未运行）② Shadowsocks/AnyTLS/NaiveProxy 独立安装/卸载 ③ 各服务端口 + 面板端口均可改（v1.5.12 起部署默认随机）④ 手动输入自定义密钥（SS/AnyTLS/Naive + 落地服务 AnyTLS-2/Naive-2，SS2022 自动校验 base64(16字节) 长度）+ 🎲 随机生成 ⑤ 启停按钮（start/stop/restart）⑥ **「🔍 检测」按钮**（v1.5.12）。落地服务（AnyTLS-2/Naive-2）在本页底部当 group2 启用时显示（端口仍走「落地服务」页配置）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；随机生成走 ansgo-admin regen/regen2
+6. **落地服务** ⭐（v1.5.12 起由「第二组服务」+「出口落地」合并为单页）：
+   - **上半部分**：AnyTLS-2 + NaiveProxy-2 启用开关 / 端口 / Naive-2 伪装 / 🎲 重新生成密钥 + 💾 保存。启用时若密钥未生成**自动调 `ansgo-admin regen2`**（v1.5.12 改进，原要求用户先手动点「生成密钥」）
+   - **下半部分**：远端 SS 落地服务器配置（host/port/method/password + 开关），含 2022-blake3 密钥长度校验
+   - ⚠️ **架构约束告知**：只有 AnyTLS-2 经 SS 落地（隐藏中转 IP）；NaiveProxy-2 在 caddy 中走 direct 出口（caddy/sing-box 分离架构约束，物理上无法跨进程转发）
+7. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
+8. **面板设置**：URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 两个伪装站点
+9. **日志查看**：tail 最近 N 行
 
 ### 6.5 面板端口"可改"的技术机制（重要，必须诚实告知用户）
 面板端口写在 `config.json`，Go 二进制启动时读取。Web 改端口的流程：
@@ -357,8 +371,8 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 1. **「服务安装」页**：逐个安装 Shadowsocks / AnyTLS / NaiveProxy（点「安装」即生成配置 + 启动；「卸载」则停止 + 移配置，密钥保留可重装）
 2. **「端口管理」页**：调整各服务端口
 3. **「面板设置」页**：配置 :443 直访伪装站 / naive 伪装站（默认反代 soft.xiaoz.org）
-4. **「第二组服务」页**：可选启用额外 anytls-2 + naive-2（走 SS 落地）
-5. **「出口落地」页**：配置落地服务器 SS（第二组出口）
+4. **「落地服务」页**（v1.5.12 起由「第二组服务」+「出口落地」合并）：可选启用额外 anytls-2 + naive-2 + 远端 SS 落地服务器配置。⚠️ 只有 AnyTLS-2 经 SS 落地（隐藏中转 IP），NaiveProxy-2 走 direct（caddy/sing-box 分离架构约束）
+5. **「出口落地」页** → 已合并入「落地服务」页（v1.5.12）
 
 ### 为什么这样设计
 - **面板与代理解耦**：面板和 :443 伪装站随安装立即可用；代理服务按需开启，不装不占端口
@@ -475,6 +489,8 @@ SSH:                25822（2026-06-22 加固：原 22，已改非标端口 + �
 | Docker manual 证书模式 `ERROR: 证书文件不存在` | **v1.5.7 根治**。根因：宝塔/已有证书在宿主 `/www/server/...`，docker volume 只挂了 `/etc/ssl/ansgo`（命名卷），容器内看不到宿主证书路径。修复：install.sh 在 CERT_MODE=manual 时用 awk 在 docker-compose.yml 的 volumes 段自动追加 `- /宿主证书目录:/容器同路径:ro` bind mount（去重；awk 跨平台避免 macOS sed -i 与 GNU sed 语法差异） |
 | Docker 部署 `docker compose pull` 失败但 `docker pull` 手动成功 | **v1.5.7 根治**。根因：服务器装的是 `docker-compose` v1（独立二进制）而非 `docker compose` v2（子命令），原代码 `docker compose pull 2>/dev/null` 吞掉「'compose' is not a docker command」错误 → 误判失败 → 走本地构建 → 本地构建又失败。修复：检测 `docker compose version` / `command -v docker-compose` 自动选用可用那个（COMPOSE 变量）；compose pull 失败用 `docker pull` 直拉兜底；不吞 stderr（用 `tail -N` 保留诊断） |
 | 合并/拆分菜单页后操作回调不刷新数据 | **v1.5.11 抽象**。原先 `svcInstall/svc/regen/saveKey` 完成后硬编码 `setTimeout(loadInstall/loadSvc/loadKey, ...)` 回调，一旦操作按钮被搬到别的页面（v1.5.11 合三为一为「服务管理」），原回调刷新的还是旧独立页而不是当前页 → 用户点了「安装」但当前页状态不更新。修复：新增 `reloadCurrentTab()`（按 `.nav button.active` 的 `data-t` 派发对应 `loadXxx`），所有动作函数完成回调统一走它，避免后续合并/拆分页面时回调链断裂 |
+| 落地服务配置后能起但实际无法用（naive-2/anytls-2 流量全部走 direct）| **v1.5.12 根治**。**根因1（致命）**：`ansgo-genconf` 落地 SS outbound 的路由规则错误引用了 `["anytls-in2", "naive-in2"]`，但 NaiveProxy 由 caddy 承载，sing-box 里**根本没有 naive-in2 这个 inbound tag**。新版 sing-box 配置校验失败/规则被丢弃 → 第二组流量全部走 direct（用户实测核心问题）。**修复**：路由规则只引用 `anytls-in2`，删除冗余 `action: route` 字段。**根因2（架构性）**：naive-2 在 caddy（独立进程），物理上无法转发给 sing-box 的 ss-out，永远走 direct 出口。**修复**：UI/文档全部明确告知"naive-2 走 direct"，避免错误预期。**根因3**：`group2Handler` 启用时要求用户先手动点「生成密钥」，用户直接启用 → 密钥缺失报错。**修复**：启用分支自动调 `ansgo-admin regen2` 生成密钥。**根因4**：`landingHandler` 改配置只 `restart sing-box`，但 sing-box 之前可能被 `disable` 起不来。**修复**：有启用服务时显式 `enable` + `restart`。⚠️ **教训：caddy（NaiveProxy）与 sing-box（SS/AnyTLS）是两个独立进程，跨进程路由不可能**——任何"naive-2 流量走 sing-box 的 ss-out"的设计在物理上都不可行 |
+| 改面板端口/路径后失联 | SSH 进去 `ansgo-admin panel-port` / `panel-path` 重置（走密钥 + 25822 端口，见 §15）。**v1.5.12 起：部署默认面板端口也随机**，新部署务必记下 install.sh 输出的端口（或读 `/etc/ansgo/panel.json`） |
 
 ---
 
