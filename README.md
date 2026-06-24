@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.17-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.18-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -496,11 +496,11 @@ cat /etc/ansgo/panel.json | python3 -c 'import json,sys;d=json.load(sys.stdin);p
 
 > **代理服务默认不启动**——登录面板后到「**服务管理**」页按需开启 Shadowsocks / AnyTLS / NaiveProxy。
 
-每张服务卡支持：① 安装/卸载 ② 改端口 ③ 改密钥（手动输入或 🎲 随机）④ 启停 ⑤ **🔍 检测**（v1.5.12：systemd 状态 + 端口监听 + TCP 握手三合一诊断）。
+每张服务卡支持：① 安装/卸载 ② 改端口 ③ 改密钥（手动输入或每个输入框右侧 🎲 单字段随机，**v1.5.18**）④ 启停 ⑤ **🔍 检测**（v1.5.12：systemd 状态 + 端口监听 + TCP 握手三合一诊断）。**v1.5.18 起操作按钮集中一行自适应**：未安装 `[📥安装]`；已安装 `[💾应用][▶️启动/⏹停止][🔄重启][📤卸载][🔍检测]`（「💾应用」一次保存端口+密钥）。
 
-### 节点信息（v1.5.12 重构）
+### 节点信息（v1.5.12 重构，v1.5.18 连接地址改 IP）
 
-「节点信息」页**只显示已启用的服务**（未启用不显示，避免空 URI 误导）。每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示，每行独立「📋 复制」按钮 + URI + 客户端二维码。
+「节点信息」页**只显示已启用的服务**（未启用不显示，避免空 URI 误导）。每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示，每行独立「📋 复制」按钮 + URI + 客户端二维码。**v1.5.18 起「连接地址」显示服务器公网 IP**（自动探测，探测失败回退域名）；URI 仍是域名（TLS 协议 SNI 需要）。
 
 ### 启用落地服务（中转→落地架构）
 
@@ -556,6 +556,14 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ---
 
 ## ✨ 特性
+
+### v1.5.18 面板 UI 优化 ⭐
+
+- **【优化】节点信息「连接地址」显示服务器 IP**：Go 端用 UDP "连接" 探测公网出口 IP（`net.Dial("udp","8.8.8.8:80")` 取 `LocalAddr`，不真正发包，零依赖不外发），进程级缓存，探测失败回退域名。URI 仍是域名（TLS 协议 SNI 需要）
+- **【优化】「服务控制」菜单删除**：服务管理成为唯一总操作页（原「服务控制」的启停/重启功能已并入服务管理每张卡的操作行）
+- **【优化】🎲 随机按钮移到每个输入框右侧**：纯前端 `crypto.getRandomValues` 生成（SS2022 密钥走 base64(16字节)），**不自动保存**，与手动输入后须主动保存一致；移除卡底部「🎲 随机」汇总按钮
+- **【优化】操作按钮集中一行自适应**：每张服务卡底部操作行 `[💾应用][▶️启动/⏹停止][🔄重启][📤卸载][🔍检测]`，按可用性自适应（未安装只显示 `[📥安装]`）。「💾应用」串行调既有 portHandler+keyHandler 一次保存端口+密钥（零新增 API 端点）
+- 详见 [v1.5.18 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.18)
 
 ### v1.5.17 最新修复 ⭐
 

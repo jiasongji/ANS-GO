@@ -5,12 +5,13 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前版本：v1.5.17**（install.sh 脚本版本 v1.5.16；**面板 Go 二进制 v1.5.17 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
+> **当前版本：v1.5.18**（install.sh 脚本版本 v1.5.16；**面板 Go 二进制 v1.5.18 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
 >
 > ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
+> | **v1.5.18** | 面板 UI 优化四项：①节点信息「连接地址」显示服务器 IP（Go 端 UDP 探测公网出口，进程级缓存，失败回退域名）②删「服务控制」菜单，服务管理成唯一总操作页 ③🎲 随机按钮移到每个输入框右侧（纯前端 crypto.getRandomValues，不自动保存）④每张服务卡操作按钮集中一行自适应 `[应用][启停][重启][装卸][检测]` | 探测公网 IP 用 `net.Dial("udp","8.8.8.8:80")` 取 LocalAddr（不真正发包只走路由表，零依赖不外发）；合并操作行时端口「应用」整合进 `svcSave`（串行调 portHandler+keyHandler，零新增端点）；前端随机必须 crypto.getRandomValues 且不自动保存（与手动输入后须主动保存一致）|
 > | **v1.5.17** | Docker manual 证书模式四根因根治：证书页误显示 acme / capability 收窄致读不了宿主证书目录 / 版本号 `vv` 双 v / 容器重建后代理不自动恢复 | systemd `CapabilityBoundingSet` 收窄后 root 不再隐式绕过 DAC；容器重建 ≠ 重启（systemd 状态归零，entrypoint 须幂等重建）；证书路径走卷内 644 副本不依赖宿主原文件 |
 > | **v1.5.16** | 新增 SOCKS5（强制鉴权）+ 自定义网页标题 + NaiveProxy 落地简化（移除 naive-2，落地仅 AnyTLS-2→SS） | caddy 与 sing-box 是两个独立进程，跨进程路由物理上不可行；SOCKS5 公网部署必须强制鉴权 |
 > | **v1.5.15** | 根治节点信息页一直「加载中」 | JS 模板插值 `${obj.field}` 若 field 是 number/bool 再做 string-only 操作须先 `String()` 强转；async forEach 异常会静默 reject 整个 promise |
@@ -252,16 +253,15 @@ https://your-domain.com:15608/<随机URL路径>/
 ### 6.4 功能模块（中文 UI，支持暗黑/白天双主题切换 + 移动端自适应 + 左侧可折叠导航，localStorage 记忆）
 1. **登录页**（含「忘记密码？」命令提示）
 2. **仪表盘**：各服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时 + **每服务「🔍 检测」按钮**（v1.5.12，调 `api/health` 三合一诊断：systemd active + 端口 LISTEN + TCP 握手）
-3. **节点信息**（v1.5.12 重构）：**只显示已启用的服务**（未启用不渲染卡片，避免空 URI 误导）；每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示，**每行独立「📋 复制」按钮**；URI 单独成行带复制 + 客户端二维码。落地服务启用时仅显示 anytls-2（标注出口经 SS 落地）
-4. **服务控制**：start / stop / restart（二次确认）
-5. **服务管理** ⭐（v1.5.11 起由「服务安装」+「端口管理」+「密钥管理」三页合并；v1.5.12 加检测）：每服务一张卡片，一站式完成：① 状态标签（未安装/已安装·运行中/已安装·未运行）② Shadowsocks/AnyTLS/SOCKS5/NaiveProxy 独立安装/卸载 ③ 各服务端口 + 面板端口均可改（v1.5.12 起部署默认随机）④ 手动输入自定义密钥（SS/AnyTLS/SOCKS5/Naive + 落地服务 AnyTLS-2，SS2022 自动校验 base64(16字节) 长度）+ 🎲 随机生成 ⑤ 启停按钮（start/stop/restart）⑥ **「🔍 检测」按钮**（v1.5.12）。落地服务（AnyTLS-2）在本页底部当 group2 启用时显示（端口仍走「落地服务」页配置）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；随机生成走 ansgo-admin regen/regen2
-6. **落地服务** ⭐（v1.5.12 起由「第二组服务」+「出口落地」合并为单页）：
+3. **节点信息**（v1.5.12 重构，v1.5.18 连接地址改 IP）：**只显示已启用的服务**（未启用不渲染卡片，避免空 URI 误导）；每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示，**每行独立「📋 复制」按钮**；**v1.5.18 起「连接地址」优先显示服务器公网出口 IP（Go 端 UDP 探测，进程级缓存，探测失败回退域名），URI 仍是域名**（TLS 协议 SNI 需域名）；URI 单独成行带复制 + 客户端二维码。落地服务启用时仅显示 anytls-2（标注出口经 SS 落地）
+4. **服务管理** ⭐（v1.5.18 起「服务控制」菜单已删，服务管理成为唯一总操作页；v1.5.11 起由「服务安装」+「端口管理」+「密钥管理」三页合并；v1.5.12 加检测）：每服务一张卡片，一站式完成：① 状态标签（未安装/已安装·运行中/已安装·未运行）② Shadowsocks/AnyTLS/SOCKS5/NaiveProxy 独立安装/卸载 ③ 各服务端口 + 面板端口均可改（v1.5.12 起部署默认随机）④ 手动输入自定义密钥（SS/AnyTLS/SOCKS5/Naive + 落地服务 AnyTLS-2，SS2022 自动校验 base64(16字节) 长度），**v1.5.18 起每个密钥/凭证输入框右侧带独立 🎲 按钮（纯前端 crypto.getRandomValues 生成，不自动保存）** ⑤ **v1.5.18 起操作按钮集中一行自适应**（按可用性）：未安装 `[📥安装]`；已安装 `[💾应用][▶️启动/⏹停止][🔄重启][📤卸载][🔍检测]`，「💾应用」串行调 portHandler+keyHandler 一次保存端口+密钥（零新增端点）⑥ **「🔍 检测」按钮**（v1.5.12，v1.5.18 起并入操作行末位）。落地服务（AnyTLS-2）在本页底部当 group2 启用时显示（端口仍走「落地服务」页配置）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；整服务随机重置走 ansgo-admin regen/regen2（单字段随机已改前端 genField 不调后端）
+5. **落地服务** ⭐（v1.5.12 起由「第二组服务」+「出口落地」合并为单页）：
    - **上半部分**：AnyTLS-2 启用开关 / 端口 / 🎲 重新生成密钥 + 💾 保存。启用时若密钥未生成**自动调 `ansgo-admin regen2`**（v1.5.12 改进，原要求用户先手动点「生成密钥」）
    - **下半部分**：远端 SS 落地服务器配置（host/port/method/password + 开关），含 2022-blake3 密钥长度校验
    - ⚠️ **架构约束告知**：只有 AnyTLS-2 经 SS 落地（隐藏中转 IP）；NaiveProxy / SOCKS5 不参与远端落地
-7. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
-8. **面板设置**：网页标题 / URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 两个伪装站点
-9. **日志查看**：tail 最近 N 行
+6. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
+7. **面板设置**：网页标题 / URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 两个伪装站点
+8. **日志查看**：tail 最近 N 行
 
 ### 6.5 面板端口"可改"的技术机制（重要，必须诚实告知用户）
 面板端口写在 `config.json`，Go 二进制启动时读取。Web 改端口的流程：
@@ -389,6 +389,9 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 - **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
 - **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`。升级二进制前手动备份：`cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-update-vX.Y.Z-{ts}/ansgo-panel.old`。
 - **前端改动后必须重新编译 + 上传**：HTML 经 `//go:embed` 编译进 Go 二进制，改 `deploy/panel/web/index.html` 后须 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 重新出包 + 上面的 stop→rm→scp→md5→start 流程，浏览器硬刷新。
+- **探测公网 IP 用 UDP "连接"而非第三方 API**（v1.5.18）：`net.Dial("udp","8.8.8.8:80")` 取 `LocalAddr()` 只触发内核路由表选出口、不真正发包，零依赖不外发不泄密（符合 §13）；探测结果进程级缓存（`sync.Once`），容器/主机运行期固定。失败返回 ""，前端回退域名。不要改用 `ifconfig.me` 等公网 API（外发 + 违反 §13 第三方域名偏好）。
+- **Mac 本机无 Go 时的交叉编译**（v1.5.18）：用 `docker run --rm -v "$PWD":/src -w /src -e GOPROXY=https://goproxy.cn,direct -e HTTP_PROXY= -e HTTPS_PROXY= ... golang:1.26-alpine` 编译。**必须清空 `-e HTTP_PROXY=` 等环境变量**（orbstack/docker daemon 默认透传代理到容器内 `127.0.0.1:1666`，容器内访问不到会 `connection refused`）。go.mod 的 `go 1.26.4` 要求镜像版本 ≥ `golang:1.26`。
+- **合并操作按钮时优先复用现有 API 端点**（v1.5.18）：把端口「应用」+ 密钥「保存」整合成单个「💾 应用」按钮时，前端 `svcSave()` 串行调既有 `portHandler`+`keyHandler` 即可，**不要新增 `/api/svc-save` 端点**（重复实现校验 = 扩大回归面）。校验/重启逻辑已在两个 handler 内成熟稳定。
 
 ---
 
