@@ -5,12 +5,13 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前版本：v1.5.22**（install.sh 脚本版本 v1.5.22；**面板 Go 二进制 v1.5.22 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
+> **当前版本：v1.5.23**（install.sh 脚本版本 v1.5.23；**面板 Go 二进制 v1.5.23 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
 >
 > ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
+> | **v1.5.23** | NaiveProxy 改密码/重装后无法运行根治（三层防御）：NaiveProxy 凭证写入 Caddyfile `basic_auth`，含空格/`{}` 的密码破坏语法 → caddy 重启失败 → Naive 挂（AnyTLS/SS 走 sing-box 不受影响）。①前端 `svcSave` 拦非法字符 ②`keyHandler` 后端校验拒绝 ③**`genconf` 生成后 `caddy validate` 预检，失败回滚旧配置不重启**（终极兜底）。另：`keyHandler` genconf 失败时不重启服务；`genconf source secrets.env` 加 `\|\|true` 容错 | **配置文件语法注入是代理服务的经典坑**：用户可控的凭证（用户名/密码）被直接插进 Caddyfile/Nginx conf 等结构化配置文件时，必须校验不含该语法的元字符（空格/`{}`/`#` 注释符等），否则一个带空格的密码就让整个服务起不来。**校验要分层**：前端拦截（即时反馈）+ 后端 handler 拒绝（防绕过）+ 生成器 validate-and-rollback（终极兜底，即使前两层都漏了也不会把坏配置喂给进程）。**sing-box(caddy) 进程级隔离**让 AnyTLS/SS 不受 caddy 配置错误影响——这也是「改 Naive 密码挂的是 Naive 不是 AnyTLS」的原因。排查「服务无法运行」先看 `journalctl -u <svc>` 的配置解析错误行 |
 > | **v1.5.22** | 面板设置保存无反应根治 + 侧栏版本号：①`settingsHandler` 的 `url_path` 分支改为仅在 `newPath != c.URLPath` 时才 `needRestart`（旧逻辑字段存在即重启，前端每次回传 url_path → 改标题/IP 也重启 → 用户「点保存无反应」）②侧栏底部常驻 `ANS-GO vX.Y.Z` 版本号（`api/auth` 返回 `version` 字段，`checkAuth` 渲染，折叠态自适应）③`saveSet()` 的 `g()` 健壮化：`--no-caddy` 模式下 `s_disguise_panel` 不渲染，旧 `$('#s_x').value` 抛 TypeError 中断保存，改为缺失返回空串 | **「只提交源码不发版」= 没修复**：`upgrade.sh` 裸金属从 release 拉二进制、Docker 从 ghcr.io 拉镜像，二者都依赖发版产物；只 commit 不创建 release + 不 `docker buildx --push`，服务器执行 upgrade 后 md5 不变跳过替换，bug 照旧。**发版必须三件套同步**：①创建 GitHub release ②上传 6 个资产（panel/caddy/sing-box × amd64/arm64）③重建 ghcr 镜像（`:latest` + `:vX.Y.Z`）。版本号必须**前端可见**（侧栏常驻）才能让用户/运维一眼核实升级是否生效，避免「我升级了但不知道成没成」；前端读 DOM 元素的 helper 必须防御 `null`（条件渲染的字段可能不存在） |
 > | **v1.5.21** | 面板设置保存无反应修复（源码已修复但**未发版**，合入 v1.5.22 补齐发布） | 教训同 v1.5.22 第一条根因；此版本仅 commit `72fb817` 未创建 release 资产/镜像，是「只改代码不发布」的反例 |
 > | **v1.5.21** | 修复面板设置「保存无反应」：`settingsHandler` 只要 POST 体含 `url_path` 就 `needRestart=true`（无条件重启），而前端 `saveSet()` 每次都把当前 `url_path` 原样回传 → **只改标题/IP 也会重启面板**，用户表现为「点保存无反应」。改为仅在 `url_path` 真正变化时才重启（与 `panel_port` 的 `!= 守卫` 一致） | 「重启触发条件」必须用真实**变化判断**而非「字段存在」判断：前端表单常把全量字段回传，后端按 `*ptr != 当前值` 守卫才安全；同函数内 `panel_port` 已是正确范式（`*b.PanelPort != c.PanelPort`），`url_path` 漏写守卫是复制粘贴遗漏。新增 Go 集成回归测试（`TestSettingsSave_UntouchedFieldsDoNotRestart` + `TestSettingsSave_UrlPathChangeStillRestarts`）覆盖两条路径；`confPath`/`secretsPath` 由 const 改 var 以支持测试覆盖路径（运行时零影响） |
@@ -192,6 +193,7 @@ manual 模式: cert_fullchain + cert_privkey 字段指定的绝对路径（用�
   - 后台修改后 caddy 自动重载（无需 SSH）
 - 证书换真实证书后，浏览器直访 `https://your-domain.com` 显示绿色锁 + 伪装站内容
 - ⚠️ **NaiveProxy 是普通代理服务，不参与任何远端落地**（caddy 与 sing-box 是独立进程，跨进程路由不可行）
+- ⚠️ **NaiveProxy 凭证不能含空格/制表符/换行/花括号 `{}`**（v1.5.23）：凭证写入 Caddyfile `basic_auth user pass` 指令，含这些字符会破坏 Caddyfile 语法 → caddy 无法启动。面板「服务管理」页改凭证时前端 + 后端均校验拦截；`ansgo-genconf` 生成后用 `caddy validate` 预检兜底。🎲 随机生成的凭证是纯字母数字（安全）
 
 > ⚠️ **NaiveProxy 端口不要用 443**：443 留给纯反代伪装站（保证域名直访有效）。naive 用非标准端口（默认 44333），客户端带端口连接。
 
@@ -405,6 +407,7 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 - **「重启触发条件」必须用真实变化判断，不能只判「字段存在」**（v1.5.21）：`settingsHandler` 的 `url_path` 分支写成 `if b.URLPath != nil { ... needRestart = true }`，而前端 `saveSet()` 每次都把当前 `url_path` 原样回传（非「改动」）→ **只改网页标题或服务器 IP 也会触发面板重启**。重启覆盖层闪现 + 重定向到正在重启的面板（连接被拒），用户表现为「点保存无反应 / 刷新后状态异常」。正确范式是同函数内 `panel_port` 的 `*b.PanelPort != c.PanelPort` 守卫——所有「副作用动作」（重启/重载/重建）一律按 `新值 != 当前值` 判断，前端表单全量回传字段是常态不能假设「字段出现=用户改动」。修复后新增 Go 集成回归测试（`TestSettingsSave_UntouchedFieldsDoNotRestart` + `TestSettingsSave_UrlPathChangeStillRestarts`）锁死两条路径。
 - **「只提交源码不发版」= 没修复**（v1.5.22，最高优先级教训）：v1.5.21 修复了源码并 commit，但**没创建 GitHub release + 没上传二进制资产 + 没 `docker buildx --push` 重建镜像**。用户在服务器执行 `upgrade.sh` 后，裸金属分支从 `releases/download/v1.5.21/` 拉 404（release 不存在）→ md5 对比无变化 → 跳过替换；Docker 分支拉 `ghcr.io/jiasongji/ansgo:latest`（digest 未变）→ `--force-recreate` 重建但镜像内还是旧二进制。**结果：bug 照旧，用户以为修复无效**。发版必须三件套同步：①`gh release create vX.Y.Z` ②上传 6 个资产（`ansgo-panel-linux-{amd64,arm64}` + `caddy-naive-linux-{amd64,arm64}` + `sing-box-linux-{amd64,arm64}.tar.gz`，sing-box 资产可复用上游不变则跳过）③`docker buildx build --push -t ghcr.io/jiasongji/ansgo:latest -t ghcr.io/jiasongji/ansgo:vX.Y.Z`。**自检**：发版后 `gh release view vX.Y.Z --json assets` 确认资产齐 + `docker pull` 后 `docker run --rm ... md5sum` 对比。为了让用户能自验，v1.5.22 起面板侧栏底部常驻显示版本号。
 - **前端读 DOM 的 helper 必须防御 null**（v1.5.22）：`saveSet()` 的 `g=id=>$('#s_'+id).value` 在 `--no-caddy` 模式下 `s_disguise_panel` 不渲染 → `$('#s_disguise_panel')` 返回 null → `.value` 抛 TypeError → 整个 `saveSet` 中断，用户「点保存无反应」且无 toast。条件渲染的字段（`disguise_panel` 随 `caddy_enable` 显隐）必须用 `const g=id=>{const e=$('#s_'+id);return e?e.value:''}`。**通用规律：任何 `.value`/`.textContent`/`.checked` 读取前都要确认元素存在**，条件渲染 + 全量读取是经典组合坑。
+- **用户可控凭证插进结构化配置文件必须校验元字符**（v1.5.23）：NaiveProxy 用户名/密码被 `ansgo-genconf` 直接插进 Caddyfile 的 `basic_auth myuser mypass` 指令。**含空格/`{}`/`#` 等的密码会破坏 Caddyfile 语法** → `caddy validate` 失败 → caddy 重启失败 → Naive 无法运行（AnyTLS/SS 走 sing-box 不受影响，故「改 Naive 密码只挂 Naive」）。`keyHandler` 旧版对 SOCKS5 做了 `ContainsAny(": \t\r\n")` 校验却**漏了 NaiveProxy**（复制粘贴遗漏，同 v1.5.21 的 url_path 守卫遗漏同源）。修复用**三层防御**：①前端 `svcSave` 正则 `/[ \t\r\n{}]/` 拦截即时反馈 ②后端 `keyHandler` 拒绝（防 API 绕过）③**`genconf` 写完 Caddyfile 后 `caddy validate` 预检，失败回滚旧配置不重启**（终极兜底——即使前两层都漏，也永远不会把坏配置喂给 caddy 让它挂掉）。**通用规律**：任何「用户输入 → 字符串拼接进 Caddyfile/Nginx conf/systemd unit/JSON」的路径，都必须在生成后用对应工具 validate（`caddy validate` / `nginx -t` / `sing-box check` / `jq empty`），失败回滚。go func 里 `genconf && restart` 要检查 genconf 退出码，失败不重启。
 
 ---
 
@@ -570,7 +573,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrad
 
 1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 多协议连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
 2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.22
+3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.23
 4. **客户端实测（可选）**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
 
 ---

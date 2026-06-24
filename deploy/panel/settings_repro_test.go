@@ -205,3 +205,61 @@ func TestSettingsSave_UrlPathChangeStillRestarts(t *testing.T) {
 		t.Errorf("url_path not updated: %q", c.URLPath)
 	}
 }
+
+// TestKeyHandler_RejectsNaiveCaddyfileBreakingChars is the regression test for
+// v1.5.23: NaiveProxy credentials go into the Caddyfile basic_auth directive.
+// A password/user containing spaces, tabs, newlines or {} breaks Caddyfile
+// syntax → caddy restart fails → "Naive 无法运行". The handler must reject
+// such credentials BEFORE writing them to secrets.env (mirrors SOCKS5 check).
+func TestKeyHandler_RejectsNaiveCaddyfileBreakingChars(t *testing.T) {
+	srv, cookie := setupPanel(t)
+	defer srv.Close()
+	defer db.Close()
+
+	cases := []struct{ name, user, pass string }{
+		{"password with space", "okuser", "my pass"},
+		{"username with space", "my user", "okpass"},
+		{"password with tab", "okuser", "my\tpass"},
+		{"password with newline", "okuser", "my\npass"},
+		{"password with {", "okuser", "p{ass"},
+		{"password with }", "okuser", "p}ass"},
+	}
+	for _, tc := range cases {
+		body, _ := json.Marshal(map[string]any{"target": "naive", "user": tc.user, "pass": tc.pass})
+		req, _ := http.NewRequest("POST", srv.URL+"/admin/api/key", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: "bv_sess", Value: cookie})
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST key (%s): %v", tc.name, err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		var got map[string]any
+		json.Unmarshal(out, &got)
+		if resp.StatusCode == 200 {
+			t.Errorf("case %q: expected 400 rejection, got 200 (would break Caddyfile). body=%s", tc.name, string(out))
+		}
+		if resp.StatusCode == 400 && got["error"] == nil {
+			t.Errorf("case %q: 400 but no error message", tc.name)
+		}
+		t.Logf("case %q: status=%d (correctly rejected)", tc.name, resp.StatusCode)
+	}
+
+	// Sanity: a clean alphanumeric password is accepted
+	body, _ := json.Marshal(map[string]any{"target": "naive", "user": "gooduser", "pass": "GoodPass2026"})
+	req, _ := http.NewRequest("POST", srv.URL+"/admin/api/key", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "bv_sess", Value: cookie})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("clean password POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		out, _ := io.ReadAll(resp.Body)
+		t.Errorf("clean alphanumeric password should be accepted, got %d: %s", resp.StatusCode, string(out))
+	} else {
+		t.Logf("clean password accepted (status 200) ✓")
+	}
+}

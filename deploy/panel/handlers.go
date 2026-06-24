@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -618,6 +619,14 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 400, "NaiveProxy 用户名和密码均不能为空")
 			return
 		}
+		// v1.5.23：NaiveProxy 凭证写入 Caddyfile 的 basic_auth 指令，
+		// 含空格/制表符/换行/{ }  会破坏 Caddyfile 语法 → caddy 重启失败
+		// （用户表现为「改密码/重装后 Naive 无法运行」）。前端 🎲 生成的凭证
+		// 都是纯字母数字，此校验主要拦截用户手动输入的特殊字符。
+		if strings.ContainsAny(u, " \t\r\n{}") || strings.ContainsAny(pw, " \t\r\n{}") {
+			jerr(w, 400, "NaiveProxy 用户名/密码不能包含空格、制表符、换行或花括号 {}（会破坏 Caddyfile 语法）")
+			return
+		}
 		if err := setSecret("NAIVE_USER", u); err != nil {
 			jerr(w, 500, "写入 NAIVE_USER 失败: "+err.Error())
 			return
@@ -641,8 +650,13 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 400, "target 必须为 ss/anytls/socks/naive/anytls2")
 		return
 	}
+	// v1.5.23：genconf 失败（如 Caddyfile 校验未过）时不重启服务——
+	// genconf 内部已回滚旧配置，服务继续用旧配置运行，避免无谓中断。
 	go func() {
-		_ = exec.Command(binGenConf, confTarget).Run()
+		if err := exec.Command(binGenConf, confTarget).Run(); err != nil {
+			log.Printf("keyHandler: genconf %s 失败（%v），跳过重启 %s（旧配置已回滚保留）", confTarget, err, confTarget)
+			return
+		}
 		_ = exec.Command("systemctl", "restart", confTarget).Run()
 	}()
 	c := configGet()

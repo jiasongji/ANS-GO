@@ -656,7 +656,15 @@ async function svcSave(target){
   if(target==='ss'){body.method=$('#k_ss_method').value;body.key=$('#k_ss_key').value}
   else if(target==='anytls'){body.pass=$('#k_at_pass').value}
   else if(target==='socks'){body.user=$('#k_sk_user').value;body.pass=$('#k_sk_pass').value}
-  else if(target==='naive'){body.user=$('#k_nv_user').value;body.pass=$('#k_nv_pass').value}
+  else if(target==='naive'){
+    // v1.5.23：NaiveProxy 凭证写入 Caddyfile basic_auth，含空格/{} 会破坏语法
+    // → caddy 重启失败。前端先拦，后端 keyHandler 也校验（双保险）。
+    const nu=$('#k_nv_user').value, np=$('#k_nv_pass').value;
+    if(/[ \t\r\n{}]/.test(nu)||/[ \t\r\n{}]/.test(np)){
+      toast('NaiveProxy 用户名/密码不能含空格或花括号 {}（会破坏 Caddyfile）');return;
+    }
+    body.user=nu;body.pass=np;
+  }
   else{toast('不支持的目标');return}
   const kr=await api('api/key',{method:'POST',body:JSON.stringify(body)});
   if(kr.error){toast('密钥保存失败: '+kr.error);return}

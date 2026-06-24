@@ -20,8 +20,10 @@ CONF="/etc/ansgo/panel.json"
 SECRETS="/etc/ansgo/secrets.env"
 CERTDIR="${BV_CERTDIR:-/etc/ssl/ansgo}"
 
-# 加载密钥到环境，供 python 读取
-if [ -f "$SECRETS" ]; then set -a; source "$SECRETS"; set +a; fi
+# 加载密钥到环境（尽力加载；python 段会直接读文件做权威解析，
+# 故此处 source 失败不致命——如某个值含空格未加引号时 source 会报错，
+# 但 python 的逐行 partition 解析不受影响）。v1.5.23: 加 || true 避免 set -e 退出。
+if [ -f "$SECRETS" ]; then set -a; source "$SECRETS" 2>/dev/null || true; set +a; fi
 
 case "${1:-all}" in
   sing-box|caddy|all|validate) ;;
@@ -29,7 +31,7 @@ case "${1:-all}" in
 esac
 
 python3 - "$@" <<'PYEOF'
-import json, os, sys
+import json, os, sys, subprocess
 
 CONF = "/etc/ansgo/panel.json"
 CERTDIR = os.environ.get("BV_CERTDIR", "/etc/ssl/ansgo")
@@ -296,8 +298,42 @@ def gen_caddy():
         blocks.append(f":80 {{\n  redir https://{DOMAIN}{{uri}} permanent\n}}\n")
 
     os.makedirs("/etc/caddy", exist_ok=True)
-    with open("/etc/caddy/Caddyfile", "w") as f:
-        f.write("\n".join(blocks))
+    # v1.5.23 防御：写新 Caddyfile 前备份旧文件，写完用 caddy validate 预检；
+    # 校验失败（如 naive 密码含空格/{} 破坏语法）则回滚旧文件并报错退出，
+    # 避免把坏配置喂给 caddy 导致「重启后无法运行」（用户表现为 Naive 装上就挂）。
+    CADDYFILE = "/etc/caddy/Caddyfile"
+    backup = None
+    if os.path.exists(CADDYFILE):
+        try:
+            backup = open(CADDYFILE).read()
+        except Exception:
+            backup = None
+    new_content = "\n".join(blocks)
+    with open(CADDYFILE, "w") as f:
+        f.write(new_content)
+    # 预检：仅当 caddy 二进制存在时才校验（裸金属首次安装可能还没装 caddy）
+    caddy_bin = "/usr/local/bin/caddy"
+    if os.path.exists(caddy_bin):
+        try:
+            r = subprocess.run([caddy_bin, "validate", "--config", CADDYFILE, "--adapter", "caddyfile"],
+                               capture_output=True, text=True, timeout=30)
+            ok = (r.returncode == 0)
+            err_out = (r.stderr or r.stdout or "").strip()
+        except Exception as e:
+            ok = False
+            err_out = str(e)
+        if not ok:
+            # 回滚旧配置，绝不把坏配置留下（caddy 重启会失败）
+            if backup is not None:
+                with open(CADDYFILE, "w") as f:
+                    f.write(backup)
+            err_tail = err_out.splitlines()
+            err_tail = err_tail[-1] if err_tail else "未知错误"
+            print(f"ansgo-genconf: ❌ Caddyfile 校验失败，已回滚旧配置（不会重启 caddy）：", file=sys.stderr)
+            print(f"  {err_tail}", file=sys.stderr)
+            print(f"  常见原因：NaiveProxy 用户名/密码含空格或 {{}} 等特殊字符。", file=sys.stderr)
+            print(f"  请在面板「服务管理」页改用不含空白的凭证后重试。", file=sys.stderr)
+            sys.exit(4)
     note = f":443 纯伪装={DISGUISE_PANEL}" if CADDY_ENABLE else "caddy_enable=false（跳过 80/443，nginx 等接管）"
     if SVC_NAIVE:
         note += f", :{NAIVE_PORT} naive伪装={DISGUISE_NAIVE}"
@@ -306,7 +342,6 @@ def gen_caddy():
 
 # ===================== 校验 =====================
 def do_validate():
-    import subprocess
     print("=== sing-box check ===")
     r = subprocess.run(["/usr/local/bin/sing-box", "check", "-c", "/etc/sing-box/config.json"])
     if r.returncode == 0:
