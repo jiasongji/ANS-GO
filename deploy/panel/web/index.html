@@ -73,6 +73,8 @@
   th{color:var(--mut);font-weight:500;font-size:12px}
   .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
   .dot.on{background:var(--ok)} .dot.off{background:var(--err)} .dot.unk{background:var(--mut)}
+  /* v1.5.20: 顶栏管理面板状态圆点（紧贴用户名右侧，纯展示，hover 显示状态+端口） */
+  #panelDot{margin:0 10px 0 4px;width:9px;height:9px;cursor:default;transition:background .2s}
   .uri-box{background:var(--card2);border:1px solid var(--bd);border-radius:6px;padding:10px;font-family:monospace;font-size:12px;word-break:break-all;margin:8px 0}
   .row{display:flex;gap:8px;align-items:center;margin-bottom:10px}
   .row label{width:120px;color:var(--mut);font-size:12px;flex-shrink:0}
@@ -157,7 +159,7 @@
       <button class="menu-btn" onclick="toggleSidebar()" title="菜单">☰</button>
       <div class="brand">⚡ ANS-GO 管理面板</div>
     </div>
-    <div><span class="mut" id="topuser"></span> <button id="themeBtn" onclick="toggleTheme()" title="切换主题">🌙</button> <button onclick="doLogout()">退出</button></div>
+    <div><span class="mut" id="topuser"></span><span id="panelDot" class="dot unk" title="管理面板状态加载中…"></span><button id="themeBtn" onclick="toggleTheme()" title="切换主题">🌙</button> <button onclick="doLogout()">退出</button></div>
   </div>
   <div class="main-wrap">
     <aside class="sidebar" id="sidebar">
@@ -191,7 +193,7 @@ function copy(t){navigator.clipboard.writeText(t).then(()=>toast('已复制到�
 function dot(s){const c=s==='active'?'on':(s==='inactive'||s==='failed')?'off':'unk';return `<span class="dot ${c}"></span>${s}`}
 async function checkAuth(){
   const j=await api('api/auth');
-  if(j.authed){$('#topuser').textContent='👤 '+j.user;showApp();showTab('dash')}
+  if(j.authed){$('#topuser').textContent='👤 '+j.user;showApp();showTab('dash');refreshPanelDot()}
   else{$('#login').style.display='flex';$('#app').style.display='none';$('#lu').focus()}
 }
 async function doLogin(){
@@ -207,9 +209,21 @@ async function doLogin(){
 }
 async function doLogout(){await api('api/logout',{method:'POST'});location.reload()}
 function showApp(){$('#login').style.display='none';$('#app').style.display='flex'}
+// v1.5.20: 刷新顶栏管理面板状态圆点（绿=运行中/红=未运行/灰=获取失败），title 显示状态+端口
+// 仅登录后 app 可见时执行；fire-and-forget，失败不阻塞调用方
+async function refreshPanelDot(){
+  const el=$('#panelDot');
+  if(!el)return;
+  const j=await api('api/dashboard');
+  if(j.error){el.className='dot unk';el.title='管理面板状态获取失败';return}
+  const active=(j.services||{}).panel==='active';
+  el.className='dot '+(active?'on':'off');
+  el.title='管理面板：'+(active?'运行中':'未运行')+' :'+(j.ports||{}).panel;
+}
 function showTab(t){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.t===t));
   ({dash:loadDash,node:loadNode,svc:loadSvc,mgmt:loadMgmt,install:loadInstall,port:loadPort,key:loadKey,landing:loadLanding,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)();
-  closeSidebar()  // 移动端选页后收起抽屉（桌面端 no-op）
+  closeSidebar();  // 移动端选页后收起抽屉（桌面端 no-op）
+  refreshPanelDot()  // v1.5.20: 切 tab 时静默刷新顶栏管理面板状态（fire-and-forget，不阻塞页面加载）
 }
 // 侧边栏：桌面端折叠/展开（记忆），移动端开关抽屉
 function isMobile(){return window.matchMedia('(max-width:760px)').matches}
@@ -246,9 +260,6 @@ async function loadDash(){
      ${svcCard('SOCKS5','socks','socks')}
    </div>
    <div class="grid g4" style="margin-top:12px">
-     ${svcCard('管理面板','panel','panel')}
-   </div>
-   <div class="grid g4">
      <div class="stat"><div class="lbl">内存占用</div><div class="val">${memPct}%</div><div class="sub">${Math.round(j.mem.used/1024)} / ${Math.round(j.mem.total/1024)} MB</div></div>
      <div class="stat"><div class="lbl">系统负载</div><div class="val">${(j.load||[]).map(x=>x.toFixed(2)).join(' ')}</div></div>
      <div class="stat"><div class="lbl">运行时长</div><div class="val">${Math.round(j.uptime)}h</div></div>
@@ -360,8 +371,6 @@ async function loadMgmt(){
   const ports=d.ports||{};
   const st=d.services||{};
   const ss=n.ss||{}, at=n.anytls||{}, sk=n.socks||{}, nv=n.naive||{};
-  const at2=n.anytls2||{};
-  const g2=n.group2_enabled;
   // 状态标签：未安装（灰色）/ 已安装·active（绿）/ 已安装·inactive（橙）
   const statusTag=(enabled,active)=>{
     if(!enabled)return '<span class="tag">未安装</span>';
@@ -430,21 +439,6 @@ async function loadMgmt(){
      ${frow('SOCKS 密码','k_sk_pass',sk.pass,'密码')}
      ${opsRow('socks',en.socks,st.socks)}
    </div>
-
-   ${g2?`
-   <div class="card">
-     <h3>🔀 AnyTLS-2 <span class="tag" style="background:var(--ok);color:#fff">出口经 SS 落地</span></h3>
-     ${frow('AnyTLS-2 密码','k_at2_pass',at2.password,'任意字符串')}
-     <div class="ops-row">
-       <button class="primary" onclick="saveKey('anytls2')">💾 保存</button>
-       <button class="mut" onclick="genField('k_at2_pass')">🎲 随机</button>
-       <button class="mut" onclick="checkHealth('anytls2',this)">🔍 检测</button>
-       <span class="mut" style="font-size:12px">端口在「落地服务」页配置</span>
-     </div>
-     <div id="health-anytls2" style="margin-top:6px"></div>
-   </div>
-   `:''}
-
 
    <div class="card">
      <h3>⚙️ 管理面板 <span class="tag" style="background:${st.panel==='active'?'var(--ok)':'var(--err)'};color:#fff">${st.panel==='active'?'运行中':'未运行'}</span></h3>
@@ -667,15 +661,18 @@ async function svcSave(target){
 //   下半部分：远端 SS 落地服务器（host/port/method/password）
 // 启用时若密钥未生成，后端会自动调 ansgo-admin regen2 生成（无需用户先点「生成」）
 async function loadLanding(){
-  const [g,l]=await Promise.all([api('api/group2'),api('api/landing')]);
+  // v1.5.20: 三路并行拉取 —— group2（启用/端口/密钥状态）+ landing（远端 SS）+ node（AnyTLS-2 密码）
+  const [g,l,n]=await Promise.all([api('api/group2'),api('api/landing'),api('api/node')]);
   if(g.error)return $('#content').innerHTML=g.error;
   if(l.error)return $('#content').innerHTML=l.error;
   const g2En=g.enabled?'已启用':'未启用';
   const keyStat=g.has_keys?'<span style="color:var(--ok)">已生成</span>':'<span style="color:var(--err)">未生成（启用保存时自动生成）</span>';
   const landStat=l.enabled?'<span style="color:var(--ok)">已启用</span>':'<span style="color:var(--warn)">未启用（anytls-2 走 direct）</span>';
+  // v1.5.20: AnyTLS-2 密码从 node 接口取（anytls2.password）
+  const at2Pass=(n&&n.anytls2&&n.anytls2.password)||'';
   $('#content').innerHTML=`
    <div class="card"><h3>🛬 落地服务</h3>
-     <div class="help" style="margin-bottom:12px">在原服务基础上额外部署 AnyTLS-2（独立端口/凭证），由中转→远端落地 SS→目标站点。NaiveProxy 保留为普通服务，但不参与任何落地。</div>
+     <div class="help" style="margin-bottom:12px">在原服务基础上额外部署 AnyTLS-2（独立端口/凭证），由中转→远端落地 SS→目标站点。NaiveProxy 保留为普通服务，但不参与任何落地。<br><b>本页是 AnyTLS-2 的唯一管理入口</b>：启用/端口/密钥/检测/远端 SS 全在此。</div>
      <table>
        <tr><th>落地代理服务</th><td>${g2En} <span class="mut">·</span> 密钥 ${keyStat}</td></tr>
        <tr><th>远端 SS 落地</th><td>${landStat}</td></tr>
@@ -685,11 +682,15 @@ async function loadLanding(){
    <div class="card"><h3>🔀 落地代理服务（AnyTLS-2）</h3>
      <div class="row"><label>启用</label><div class="f"><select id="g2_en"><option value="false" ${!g.enabled?'selected':''}>关闭</option><option value="true" ${g.enabled?'selected':''}>启用</option></select></div></div>
      <div class="row"><label>AnyTLS-2 端口</label><div class="f"><input id="g2_anytls" type="number" value="${g.anytls2_port||''}" placeholder="10000-65535 随机"></div></div>
-     <div style="margin-top:8px">
+     <div class="row"><label>AnyTLS-2 密码</label><div class="f field-inline"><input id="k_at2_pass" value="${at2Pass}" placeholder="启用时自动生成，或手动填/🎲 随机"><button class="mut dice" title="随机生成（不自动保存）" onclick="genField('k_at2_pass')">🎲</button></div></div>
+     <div class="ops-row">
        <button class="mut" onclick="genG2Keys()">🎲 重新生成密钥</button>
-       <button class="primary" onclick="saveG2()">💾 保存并应用</button>
+       <button class="primary" onclick="saveKey('anytls2')">💾 保存密码</button>
+       <button class="primary" onclick="saveG2()">💾 保存启用/端口</button>
+       <button class="mut" onclick="checkHealth('anytls2',this)">🔍 检测</button>
      </div>
-     <div class="help" style="margin-top:10px">启用时若密钥未生成会<b>自动生成</b>（无需手动点）。密钥生成后可在「服务管理」页底部查看/修改。AnyTLS-2 端口为空时随机分配。</div>
+     <div id="health-anytls2" style="margin-top:6px"></div>
+     <div class="help" style="margin-top:10px">启用时若密钥未生成会<b>自动生成</b>（无需手动点）。「🎲 重新生成密钥」会备份配置并重启服务；「💾 保存密码」仅改密码不重生成 UUID。AnyTLS-2 端口为空时随机分配。</div>
    </div>
 
    <div class="card"><h3>🌐 远端 SS 落地服务器</h3>

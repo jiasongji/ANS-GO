@@ -79,7 +79,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.19"
+	version = "1.5.20"
 )
 
 func loadConfig() (Config, error) {

@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.19-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.20-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -556,6 +556,13 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ---
 
 ## ✨ 特性
+
+### v1.5.20 仪表盘精简 + AnyTLS-2 管理集中 ⭐
+
+- **【优化】仪表盘精简**：移除「管理面板」服务卡（与代理服务并列显示冗余），管理面板状态改为**顶栏用户名右侧的小圆点**显示（绿=运行中 / 红=未运行），鼠标悬浮显示状态 + 端口；登录及每次切换页面时静默刷新。仪表盘现仅保留 4 个主要代理服务（AnyTLS / NaiveProxy / Shadowsocks / SOCKS5）+ 系统统计 + 证书
+- **【优化】AnyTLS-2 管理集中到「落地服务」页**：原「服务管理」页底部的 AnyTLS-2 卡片移除（避免与落地服务页重复）；AnyTLS-2 的启用 / 端口 / 密码 / 🎲 随机 / 💾 保存 / 🔍 检测 / 远端 SS 落地配置全部统一在「落地服务」页单页管理
+- **【优化】零后端改动**：仅前端布局调整，`/api/key`、`/api/health` 已支持 `anytls2` target，落地服务页改为三路并行拉取 `group2` + `landing` + `node`
+- 详见 [v1.5.20 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.20)
 
 ### v1.5.19 面板 UI 细节优化 + Docker 升级根治 ⭐
 
