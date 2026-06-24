@@ -401,9 +401,13 @@ upgrade_docker(){
   ok "镜像已更新"
 
   # 重建容器（复用 volume，配置/密钥/证书不丢）
-  hr "3/4 重建容器"
-  ( cd "$DOCKER_DIR" && $COMPOSE up -d ) || { err "容器重建失败"; exit 1; }
-  ok "容器已重建"
+  # v1.5.19: 必须 --force-recreate。普通 `up -d` 在镜像 digest 未变（compose 配置哈希相同）
+  #   时会跳过 recreate → entrypoint 不重跑 → 旧二进制继续运行，升级"没变化"。
+  #   --force-recreate 强制销毁重建容器，volume 数据不丢，entrypoint 重新执行：
+  #     ① ansgo-genconf 重新生成配置 ② systemd 全新状态拉起新版 caddy/sing-box/ansgo-panel
+  hr "3/4 重建容器（--force-recreate 确保 entrypoint 重跑 + 新二进制生效）"
+  ( cd "$DOCKER_DIR" && $COMPOSE up -d --force-recreate ) || { err "容器重建失败"; exit 1; }
+  ok "容器已重建（entrypoint 已重新执行）"
 
   # 验证
   hr "4/4 验证"
@@ -424,7 +428,9 @@ upgrade_docker(){
     if [ "$logged_ver" = "$VER" ]; then
       ok "面板版本: ${logged_ver}（目标 ${VER} ✓）"
     else
-      warn "面板日志版本: ${logged_ver}（目标 ${VER}，镜像可能未同步发版）"
+      err "面板日志版本: ${logged_ver}（目标 ${VER}）—— 镜像可能未同步发版，或容器未真正重建"
+      err "排查：docker exec ansgo md5sum /usr/local/bin/ansgo-panel 对比 release 资产"
+      err "强制重建：cd $DOCKER_DIR && $COMPOSE up -d --force-recreate"
     fi
   else
     warn "未能从容器日志读取版本号（docker logs ansgo 2>&1 | grep 'ansgo-panel v'）"

@@ -147,6 +147,25 @@ else
   fi
 fi
 
+# v1.5.19: 幂等补全 panel.json 新增字段（容器重建后旧 panel.json 可能缺字段）
+#   - server_ip（v1.5.18 新增，VPC 公网 IP，缺则空串走探测，Go 端兼容）
+#   与裸金属 upgrade.sh 的补字段逻辑保持一致，避免 Docker 形态字段滞后。
+if [ -f "$CONF" ] && command -v python3 >/dev/null 2>&1; then
+  python3 -c "
+import json
+p = '$CONF'
+c = json.load(open(p))
+changed = False
+# v1.5.18: server_ip（用户手动填写的公网 IP，默认空）
+if 'server_ip' not in c:
+    c['server_ip'] = ''
+    changed = True
+if changed:
+    json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
+    print('[entrypoint] panel.json 已补全新字段: server_ip')
+" 2>/dev/null || true
+fi
+
 # 生成 sing-box / caddy 配置（幂等；失败时写兜底 Caddyfile，避免 caddy 起不来）
 if /usr/local/bin/ansgo-genconf all >/var/log/ansgo-genconf.log 2>&1; then
   log "已生成 sing-box + caddy 配置"
