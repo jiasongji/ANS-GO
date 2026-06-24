@@ -348,10 +348,12 @@ PY
 
   echo
   hr "升级完成"
-  echo "  备份目录 : ${C_B}${BK}${C_0}"
-  echo "  回滚命令 : ${C_B}cp -a \"${BK}/_usr_local_bin_ansgo-panel\" ${METAL_PANEL_BIN} && systemctl restart ansgo-panel${C_0}"
+  # 注意：必须用 printf 而非 echo。bash 的 echo 默认不解释 \033 转义，
+  # 会把颜色码原样输出成字面 "\033[36m..."（即"乱码"）。printf 会正确解释。
+  printf '  备份目录 : %b%s%b\n' "$C_B" "$BK" "$C_0"
+  printf '  回滚命令 : %bcp -a "%s/_usr_local_bin_ansgo-panel" %s \&\& systemctl restart ansgo-panel%b\n' "$C_B" "$BK" "$METAL_PANEL_BIN" "$C_0"
   echo
-  echo "  ${C_Y}SOCKS5 默认未启用${C_0}。启用方式："
+  printf '  %bSOCKS5 默认未启用%b。启用方式：\n' "$C_Y" "$C_0"
   echo "    1. 登录面板 →「服务管理」页 → SOCKS5 卡片 → 点「安装」"
   echo "    2. 或 SSH 执行: ansgo-admin regen socks（生成/重置凭证，sing-box 自动重载）"
   echo "    3. 查看连接 URI: ansgo-admin info"
@@ -438,7 +440,8 @@ upgrade_docker(){
 
   echo
   hr "升级完成"
-  echo "  ${C_Y}SOCKS5 默认未启用${C_0}。启用方式："
+  # 注意：必须用 printf 而非 echo（同 metal 分支，bash echo 不解释 \033 转义）
+  printf '  %bSOCKS5 默认未启用%b。启用方式：\n' "$C_Y" "$C_0"
   echo "    1. 登录面板 →「服务管理」页 → SOCKS5 卡片 → 点「安装」"
   echo "    2. 或进容器执行: docker exec ansgo ansgo-admin regen socks"
   echo "    3. 查看连接 URI: docker exec ansgo ansgo-admin info"
