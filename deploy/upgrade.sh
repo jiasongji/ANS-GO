@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.20
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.21
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh | bash
-#   bash upgrade.sh [--docker | --metal] [--ver v1.5.20] [--yes]
+#   bash upgrade.sh [--docker | --metal] [--ver v1.5.21] [--yes]
 #
 # 设计要点（与 install.sh / ansgo-admin 保持一致）：
 #   - VER 与 install.sh 顶部硬编码一致，发新版只需改这一行 + commit
 #   - 复用 install.sh 的 bootstrap（解决 curl|bash 的 SIGPIPE/进程替换卡死）
 #   - panel 二进制无 -version flag（main.go 仅 -setpass），用 md5 对比判断是否真更新，
-#     启动后用 journalctl 日志行 "ansgo-panel v1.5.20 监听..." 验证版本
+#     启动后用 journalctl 日志行 "ansgo-panel v1.5.21 监听..." 验证版本
 #   - 裸金属 panel 替换走 .new→md5→.bak→mv→restart 安全流程（AGENTS.md §9 铁律）
 #   - 备份目录命名 /etc/ansgo-backup-upgrade-{TS}，遵循 ansgo-admin 约定
 # =============================================================================
@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.20"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.21"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -116,9 +116,9 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
-  - 仪表盘精简：移除管理面板卡片，状态改为顶栏用户名旁圆点显示
-  - AnyTLS-2 管理集中到「落地服务」页（密码/检测/远端 SS 统一管理）
-  - 服务管理页移除 AnyTLS-2 卡片（避免与落地服务页重复）
+  - 修复「面板设置保存无反应」：前端每次都回传 url_path，旧逻辑无条件 needRestart
+    导致改标题/IP 等也重启面板（表现为点保存无反应/状态异常）。改为仅在 url_path
+    真正变化时才重启（与 panel_port 的 != 守卫一致）。
 
 注意:
   - SOCKS5 升级后默认不启用（svc_socks_enabled=false），需登录面板「服务管理」页

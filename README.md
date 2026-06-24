@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.20-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.21-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -556,6 +556,12 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ---
 
 ## ✨ 特性
+
+### v1.5.21 修复面板设置保存无反应 ⭐
+
+- **【修复】面板设置「保存无反应」根治**：前端 `saveSet()` 每次都把当前 `url_path` 原样回传给后端，而 `settingsHandler` 只要 POST 体里出现 `url_path` 就置 `needRestart=true`（无条件重启）——导致**只改网页标题或服务器 IP 也会触发面板重启**。重启覆盖层闪现 + 重定向到正在重启的面板（连接被拒），用户表现为「点保存无反应 / 刷新后状态异常」。修复：改为仅在 `url_path` 真正变化时才重启（与 `panel_port` 的 `!= 守卫` 一致），未变化时返回 `{ok:true}` 前端正常 toast「设置已保存」。
+- **【健壮】`confPath`/`secretsPath` 由常量改为变量**：便于单元测试覆盖路径（生产运行时值不变，零行为影响），新增 `TestSettingsSave_UntouchedFieldsDoNotRestart` / `TestSettingsSave_UrlPathChangeStillRestarts` 回归测试
+- 详见 [v1.5.21 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.21)
 
 ### v1.5.20 仪表盘精简 + AnyTLS-2 管理集中 ⭐
 

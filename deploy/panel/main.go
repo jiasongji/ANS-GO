@@ -24,9 +24,13 @@ import (
 // ===================== 配置 =====================
 
 const (
+	defCertDir = "/etc/ssl/ansgo"
+)
+
+// confPath / secretsPath 设为变量而非常量，便于测试覆盖路径（生产运行时值不变）。
+var (
 	confPath    = "/etc/ansgo/panel.json"
 	secretsPath = "/etc/ansgo/secrets.env"
-	defCertDir  = "/etc/ssl/ansgo"
 )
 
 type Config struct {
@@ -79,7 +83,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.20"
+	version = "1.5.21"
 )
 
 func loadConfig() (Config, error) {

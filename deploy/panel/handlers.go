@@ -820,9 +820,16 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&b)
 	needRestart := false
 	needCaddyReload := false
+	// v1.5.21 修复：仅在 url_path 真正变化时才触发重启。
+	// 前端 saveSet() 每次都把当前 url_path 原样回传（不是"改动"），旧逻辑只要
+	// 字段存在就 needRestart=true，导致每次保存设置都重启面板（改个标题/IP 也重启），
+	// 用户表现为「点保存无反应 / 刷新后状态异常」。改为与 PanelPort 一致的 != 守卫。
 	if b.URLPath != nil {
-		c.URLPath = normalizePath(*b.URLPath)
-		needRestart = true
+		newPath := normalizePath(*b.URLPath)
+		if newPath != c.URLPath {
+			c.URLPath = newPath
+			needRestart = true
+		}
 	}
 	if b.PanelTitle != nil {
 		c.PanelTitle = strings.TrimSpace(*b.PanelTitle)
