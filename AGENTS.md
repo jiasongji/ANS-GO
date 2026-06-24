@@ -3,62 +3,31 @@
 > 本文件是项目的**唯一事实来源**。新窗口执行、GitHub 教程撰写、服务器部署均以本文件为准。
 > 敏感凭证见 `.secrets.local`（已 gitignore，不入库）。
 >
-> **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §12。
+> **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前版本：v1.5.17**（install.sh 脚本版本 v1.5.16；**面板 Go 二进制 v1.5.17 + release 资产齐全**，Docker manual 证书三根因根治）。版本历史见 GitHub Releases。
+> **当前版本：v1.5.17**（install.sh 脚本版本 v1.5.16；**面板 Go 二进制 v1.5.17 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
 >
-> - **v1.5.17**：**根治 Docker `--no-caddy` + manual 证书模式部署后服务全挂 + 证书页误显示 acme + 版本号 `vv` 双 v + 容器重建后代理服务不自动恢复四个根因**（中转服务器端到端验证通过：sing-box/caddy active ✅，证书页正确显示「手动模式」✅，`docker compose up -d` 重建后代理自动恢复 ✅）。
->   ① **【Bug修复】Docker manual 证书模式 entrypoint 强制把 `cert_mode` 改成 acme，导致面板证书页误显示「acme 自动签发」**（`deploy/docker/entrypoint.sh`）：**根因**：v1.5.10 为规避 sing-box/caddy 读不了宿主 `600` 证书目录，entrypoint 启动时把宿主证书 cp 到 `/etc/ssl/ansgo/` 卷（正确），但**同时把 `panel.json` 的 `cert_mode` 强制改成 `acme`**（错误）——本意是让 genconf 用卷内路径，副作用是面板证书页据此显示「acme 自动签发」，与用户「手动指定证书」的实际配置矛盾。**用户为修正**进证书管理页把模式改回 `manual` 并重新填宿主路径 `/www/server/...` → `certConfigHandler` 保存后 regen+restart → 证书路径变回宿主 `600` 目录 → 见根因②。**修复**：entrypoint manual 模式**保持 `cert_mode=manual`**，但把 `cert_fullchain`/`cert_privkey` 指向**卷内副本** `/etc/ssl/ansgo/fullchain.pem`+`privkey.pem`（644 可读），不再依赖宿主路径。genconf/Go `certPaths()` 据此生成 sing-box/caddy 配置指向可读卷内文件；面板证书页正确显示「手动模式」。续期仍走 `docker restart ansgo`（重跑 entrypoint 自动同步卷内副本）。
->   ② **【Bug修复】`sing-box.service`/`caddy.service` 的 `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` 收窄掉 `CAP_DAC_READ_SEARCH`，导致 manual 证书指向宿主 `600`（无 x 位）目录时即便 root 也读不了**（`deploy/systemd/{sing-box,caddy}.service`）：**根因**：systemd unit 设 `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`（只留这一个 cap）+ `NoNewPrivileges=true`。**关键**：一旦 capability 被 bounding set 收窄，**root 不再隐式拥有 `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH`**，即无法绕过文件权限。宝塔/aaPanel 签发的证书目录是 `drw-------`（600，无 x 位），无 DAC cap 的 root 既不能 search 目录也不能 open 文件 → `read certificate: open .../fullchain.pem: permission denied` → sing-box/caddy 进入 restart 循环（实测 NRestarts=270+）。**诊断关键**：`docker exec ansgo sing-box check`（交互式，完整 cap）通过，但 `systemctl start sing-box`（unit，收窄 cap）失败 —— 用 `systemd-run --property=CapabilityBoundingSet=CAP_NET_BIND_SERVICE --property=NoNewPrivileges=yes sing-box check` 复现即可确认是 cap 问题而非文件本身。**修复**：两 unit 的 `CapabilityBoundingSet`/`AmbientCapabilities` 加 `CAP_DAC_READ_SEARCH`（只读不加写，最小化提权）。⚠️ 与根因①形成**双层防御**：① entrypoint 让默认路径指向可读卷副本（治本，常态生效）；② unit 加 cap 让用户即便手动改回宿主路径也能读（兜底，防误操作）。**触发条件**：任何会 regen+restart sing-box/caddy 的操作（装服务/改端口/改落地/改证书）都会暴露此问题——用户实测「配置落地服务后所有服务起不来」，实质是落地配置触发了 sing-box restart，卡死点在证书读取而非落地本身。
->   ③ **【Bug修复】面板日志打印 `ansgo-panel vv1.5.16`（双重 v）**（`main.go` + 构建命令）：**根因**：`log.Printf("ansgo-panel v%s", version)` 已带 `v` 前缀，而 ldflags `-X main.version=v1.5.16` 又注入带 `v` 的值 → 拼出 `vv1.5.16`。`main.go` 默认值 `1.5.16`（无 v）是对的，但 release/Dockerfile 构建命令的 ldflags 参数都带 v 覆盖了它。**修复**：所有 `-X main.version=...` 的值去掉 `v` 前缀（`1.5.17`），`log.Printf("v%s")` 负责加 v。涉及 `deploy/Dockerfile.allinone`（`ARG PANEL_VERSION=1.5.17`）、根 `README.md` 构建示例。⚠️ **教训**：ldflags `-X` 注入的字符串是「原始值」，不要预先加格式前缀；格式化（`v`/`version-` 等）统一在消费端（`Printf`）做，避免双重拼接。
->   ④ **【Bug修复】Docker 容器重建（`docker compose pull && up -d`）后代理服务不自动恢复**（`deploy/docker/entrypoint.sh`）：**根因**：容器重建后容器内 systemd 是**全新状态**，`sing-box.service`（以及默认模式的 `caddy.service`）默认 `disabled`，即使 `panel.json` 里 `svc_*_enabled=true` 也不会被拉起 → 用户拉新镜像后代理全断（面板能开但 SS/AnyTLS/Naive 端口不监听）。旧 entrypoint 只有 `--no-caddy` 模式下 naive 的 caddy enable 逻辑，**完全没有 sing-box 的自动启停**，也漏了默认模式的 caddy enable。**修复**：entrypoint 在 `ansgo-genconf all` 后，按 `panel.json` 的服务开关显式 enable+restart：① sing-box——`svc_ss_enabled`/`svc_anytls_enabled`/`svc_socks_enabled`/`group2_enabled` 任一 true 则 `enable+restart sing-box`（判断条件与 Go 端 `landingHandler`/`group2Handler` 的 `needSB` 一致）；② caddy——默认模式始终 `enable caddy`（:443 伪装站是域名基础设施），`--no-caddy` 模式维持 v1.5.10 的 naive 逻辑。⚠️ **教训**：容器重建 ≠ 容器重启——重启复用原 systemd 状态，重建是全新 systemd（所有 enable 状态归零）；entrypoint 必须幂等地重建服务的 enable 状态，不能假设 unit 还 enabled。**触发场景**：任何 `docker compose up -d`（含 `pull` 拉新镜像、改 compose 配置、`docker rm` 后重建）都会暴露。
->   ⚠️ **综合教训**：systemd `CapabilityBoundingSet` 是**收紧** cap，一旦设定 root 不再隐式绕过 DAC（这与传统「root 绕过一切权限」的直觉相悖）；Docker bind mount 宿主文件的权限位（尤其目录的 x 位）会被容器内收窄 cap 的服务真实感知到；诊断「交互式能跑、systemd 起不来」的权限问题，用 `systemd-run --property=CapabilityBoundingSet=...` 精确复现 unit 的 cap 上下文是关键。证书路径设计原则：**让服务读卷内可控副本（644），不直接依赖宿主 bind mount 原文件**，既规避权限坑也规避 SELinux/AppArmor 坑。容器重建（非重启）后 systemd 状态归零，entrypoint 必须幂等重建所有依赖 enable 的服务。
+> ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
-> - **v1.5.16**：**新增 SOCKS5 + 自定义网页标题 + NaiveProxy 落地简化**（裸金属 + Docker 同步生效）。
->   ① **【新功能】SOCKS5 支持**：作为 sing-box 第三个 inbound（`type: socks`，tag `socks-in`），**强制用户名/密码鉴权**（不支持无鉴权，避免开放代理风险）。面板「服务管理」页可安装/卸载/启停/改端口/改凭证/随机生成/节点信息 URI（`socks5://user:pass@host:port`）/健康检测。`panel.json` 加 `socks_port` + `svc_socks_enabled`，`secrets.env` 加 `SOCKS_USER`/`SOCKS_PASS`。install.sh/entrypoint.sh 新增 `--socks-port`/`--socks-user`/`--socks-password` 参数（留空随机）。`ansgo-admin` 新增 `regen socks` / `restart socks` / `info` 输出 SOCKS5 URI。
->   ② **【新功能】面板自定义网页标题**：`panel.json` 加 `panel_title` 字段，面板设置页新增「网页标题」输入项。`rootHandler` 返回首页时按 `PanelTitle` 注入 `<title>`（HTML escape 防注入），刷新页面不会先闪默认标题；保存后前端立即 `document.title = ...`。
->   ③ **【架构调整】NaiveProxy 落地简化**：经多轮测试确认 NaiveProxy 无法参与远端落地（caddy forward_proxy 与 sing-box ss-out 是两个独立进程，跨进程路由不可行）。**保留 NaiveProxy 第一组作为普通可选代理服务**，但**移除 NaiveProxy-2**（不再生成 naive-2 Caddy site、不再返回 naive2 节点、`group2Handler`/`regen2`/`ansgo-admin group2` 只处理 AnyTLS-2）。落地服务简化为 **AnyTLS-2 → 远端 SS**，所有 UI/文档/注释明确标注「NaiveProxy/SOCKS5 不参与落地」。
->   ④ **【清理】移除本地过期归档**：删除 `.build/`（120M 旧版构建副本，含早期旧命名）、`deploy/panel/out/`、`deploy/panel/ansgo-panel-linux-*`（编译产物，走 release）、`.debug-task-prompt.md`/`.merge-menu-task-prompt.md`（含敏感信息的本地提示词）。完善 `.gitignore` 通配任务提示词、删除已不存在的旧命名规则。
->   ⚠️ **教训**：caddy（NaiveProxy）与 sing-box（SS/AnyTLS/SOCKS5）是两个独立进程，任何「Naive 流量走 sing-box ss-out 落地」的设计在物理上都不可行——v1.5.12 曾尝试在 sing-box 路由规则里引用不存在的 `naive-in2` inbound tag 导致校验失败，v1.5.16 直接从产品层面移除 naive-2，落地仅保留 AnyTLS-2。SOCKS5 公网部署必须强制鉴权。
->
-> - **v1.5.15**：**根治「节点信息页一直显示『加载中…』」**（生产服务器端到端验证通过：刷新页面后 3 张服务卡正常渲染 ✅）。
->   ① **【Bug修复】前端 `row()` 函数对 number 调 `.replace` 抛 TypeError 中断 `loadNode`**（`web/index.html`）：**根因**：`row(label, val, copyVal)` 函数体里直接 `(copyVal||val).replace(/`/g,'\\`')`，但 `val` 可能是 `number`（如 `n.port=33899`，从 `api/node` 返回的 JSON 里 port 是数字而非字符串），**number 没有 `.replace()` 方法**，抛 `TypeError: ...replace is not a function`。该调用发生在 `card()` 模板插值 `${row('端口',n.port)}` 里，而 `card()` 又在 `loadNode` 的 `forEach` 内被调用——**异常让整个 `loadNode` 函数终止在 forEach 中间，`$('#content').innerHTML=html`（最末行）永远走不到**，content 停留在第 3 行写入的「加载中…」占位符。用户感知为「点了节点信息页一直转圈」。修复：`row()` 内部对 `val` 先 `String(val)` 强转（`copyVal||val` 同样处理），`.replace` 只在 string 上调用。**触发条件**：只要任意一个服务 `enabled=true`（SS/AnyTLS/Naive 任一），`card` 就会渲染，`row('端口',n.port)` 就会触发——即**几乎所有用户都中招**（默认部署后 SS/AnyTLS/Naive 全启用）。⚠️ **教训**：JS 模板字符串里的 `${obj.field}` 插值，如果 field 是 number/bool 而后续对该插值做 `.replace/.match/.split` 等 string-only 操作，必须先 `String()` 强转；async 函数内的 forEach 异常会直接 reject 整个函数 promise，**让 `await loadNode()` 静默失败**——前端 `api()` 封装虽 catch 了 fetch 异常，但**没 catch 业务代码异常**，导致 DOM 停在「加载中」占位符无法被发现（用户感知是"卡住"而非"报错"）。诊断法：浏览器 Console 看是否有 `TypeError: ...replace is not a function`；或本地用 Node 抽 `<script>` 块喂真实 API 数据跑（见本仓 `/tmp/verify-loadnode.js` 思路）。
-> - **v1.5.14**：**修复中转服务器（Docker + `--no-caddy` + manual 证书）落地服务部署后 caddy 重启循环 + svcActive 误报 unknown + 落地服务器磁盘填满 + 落地链路 SS 时钟不同步四大根因**（中转 + 落地双服务器端到端验证通过：anytls2→落地 SS 出口返回 `<落地服务器IP>` ✅）。
->   ① **【Bug修复】`svcActive()` 丢弃 stdout 致状态全报 `unknown`**（`handlers.go`）：`systemctl is-active` 对 inactive/failed/activating 都返回非0退出码，但 stdout 仍输出正确状态文本。旧版 `if err != nil { return "unknown" }` 把 stdout 丢弃，用户在面板「检测」看到 `caddy: unknown`，实际 caddy 处于 `activating`（重启循环中）。修复：保留 stdout 按真实状态返回，仅当 stdout 为空才回退 unknown。诊断价值极大——用户实测看到 `activating` 立刻知道是重启循环。
->   ② **【Bug修复】`ansgo-genconf` 不校验端口冲突致 Caddyfile 生成两个 `:PORT` 块**（`ansgo-genconf`）：用户中转服务器 `naive_port=naive2_port=<同一端口>`，genconf 无脑生成两个 `:<同一端口>` Caddyfile 块 → caddy `ambiguous site definition: :<端口>` → 进入 restart 循环（counter 257 次）→ 该端口永不监听。修复：新增 `check_port_conflicts()`，naive/naive2 撞 caddy 端口或 ss/anytls/anytls2 撞 sing-box 端口时 `exit=3` 拒绝生成，避免坏 Caddyfile 污染磁盘。
->   ③ **【防御】`portHandler` / `group2Handler` 写入前校验 + 回滚**（`handlers.go`）：新增 `portConflicts(c Config)` 函数，handler 在 configSet 后立即调用，若冲突则回滚到原端口值并返回 400 错误。与 genconf 形成双层防御——handler 拦截用户输入，genconf 兜底防止任何路径写入的坏配置。
->   ④ **【Bug修复】install.sh xcaddy 编译填满小盘 VPS 磁盘**（`install.sh`）：根因是 release 漏传 caddy-naive 预编译产物（v1.5.0 release 起的历史遗留），所有裸金属部署都被迫走 xcaddy 现场编译 → 下载 caddy v2.11.4 依赖树 + Go 工具链 ~1.5GB → 小盘 VPS（如 3.86GB）填满 → sing-box 配置写不进去 → 后续步骤全失败。修复双保险：① **release 补齐 `caddy-naive-linux-{amd64,arm64}` 预编译产物**（v1.5.14 release 上传，裸金属部署秒级拉取不再编译）；② **install.sh xcaddy 分支前加磁盘预检**：可用 <1500MB 直接 `exit 3` 拒绝编译，提示用户清理磁盘或确保 release 有预编译产物。
->   ⑤ **【构建优化】`main.go` version 改用 `-ldflags "-X main.version=v1.5.14"` 构建时注入**（取代 v1.5.13 把硬编码 `1.5.0` 改成 `1.5.12` 的过渡方案）。从此每次发版只需改 release 命令的 ldflags 参数，不用改源码。
->   ⑥ **【线上修复】中转 + 落地链路时钟不同步**（运行时问题，非代码 bug）：SS2022 协议（`2022-blake3-aes-128-gcm`）把时间戳编进 nonce 防重放，两端系统时钟差 >30s 就报 `bad timestamp: diff 100s` 拒绝。**中转机是 LXC 容器**，`systemd-timesyncd` 不存在 + `timedatectl set-ntp` 报 `NTP not supported`（LXC 宿主控制时钟），系统时钟慢落地机 100s。**修复**：中转机装 `openntpd`（轻量 NTP，~200KB）+ `systemctl enable`；临时用 `date -s "$(curl -sI https://google.com | grep -i ^date: | sed 's/^[Dd]ate: //')"` 立即同步。⚠️ **教训：SS2022 / WireGuard / Kerberos 等协议都依赖时钟同步，LXC 部署必须单独配 NTP（容器内 `timedatectl set-ntp` 无效），裸金属/KVM 无此问题**。
->   ⑦ **【线上修复】中转宿主 iptables policy=DROP 致服务端口外网不通**（aaPanel/宝塔加固默认 DROP）：止血时只放了部分端口，其余服务端口漏放，用户从中国大陆客户端连不上。修复：iptables 放行全部 5 个服务端口 + `iptables-save > /etc/iptables/rules.v4` 持久化。⚠️ **教训：宝塔/aaPanel 装 `paid-firewall` 插件会把 INPUT policy 改成 DROP，install.sh 的 nft 放行规则在 iptables 后端下不生效，必须在 iptables 层放行**。
->   ⚠️ **综合教训**：`systemctl is-active` 非 active 状态都返回非0退出码但 stdout 仍有正确状态文本，`err!=nil 时丢弃 stdout` 是诊断信息丢失的典型坑；任何需要现场编译的部署步骤都必须预检磁盘空间；release 预编译产物必须随版本同步更新，不能依赖单一下载源兜底；LXC 容器时钟由宿主控制，部署依赖时钟同步的协议（SS2022/WireGuard）必须单独装 NTP。
-> - **v1.5.13**：**根治「重新部署后面板看不到」—— ghcr.io 镜像里固化的二进制版本严重滞后于源码**。**用户场景**：中转服务器（Docker + 宝塔 nginx + `--no-caddy` + manual 证书），用户昨天能访问面板，今天重新跑 install.sh v1.5.12 部署后面板"看不到"。**诊断结论**：① 面板实际可用（容器内 `https://127.0.0.1:<面板端口>/<面板URL路径>/` HTTP 200 + 外网 `https://<域名>:<面板端口>/<面板URL路径>/` 也 HTTP 200，HTML 含 v1.5.12 全部特征字符串）；② **真正的 bug**：ghcr.io/jiasongji/ansgo:latest 镜像里固化的 ansgo-panel 仍是 v1.5.0 旧二进制（上次只 push 了镜像 shell，没把 v1.5.1~v1.5.12 的 Go 代码改动重新编译进去），用户一旦 `docker compose pull && up -d` 重建容器，二进制回退到 v1.5.0——这就是"昨天好的、今天重新部署就不行"的根因。**修复三件套**：① `main.go:78` 硬编码 `version = "1.5.0"` → `"1.5.12"`（v1.5.1~v1.5.12 连续 11 个版本从未更新版本字符串，日志一直印 `ansgo-panel v1.5.0` 误导排查）；② 重新 `docker buildx build --platform linux/amd64,linux/arm64 --push` 多架构构建并推送 ghcr.io 镜像，把 v1.5.12 Go 二进制固化进镜像层；③ 构建器必须用 `docker-container` driver 并通过 `--driver-opt env.HTTPS_PROXY=...` 注入代理（buildkit 解析 `# syntax=docker/dockerfile:1` 前端镜像时就要访问 docker.io，`--build-arg HTTP_PROXY` 只作用于 Dockerfile 内的 `RUN`，覆盖不到这一层）。⚠️ **经验教训：每次发新版本 release 必须同步重新构建 ghcr.io 镜像**（`docker buildx build ... -t ghcr.io/jiasongji/ansgo:latest -t ghcr.io/jiasongji/ansgo:vX.Y.Z --push`），不能只 commit 源码——Docker 用户拉的是镜像，镜像不更新就等于没更新；版本字符串不要硬编码在 `var version = "..."`，应该用 `-ldflags "-X main.version=vX.Y.Z"` 在构建时注入（**v1.5.14 已改**）；排查"面板打不开"先 `docker exec ansgo md5sum /usr/local/bin/ansgo-panel` 对比镜像内 md5（`docker run --rm --entrypoint md5sum <img> /usr/local/bin/ansgo-panel`），md5 不一致就是镜像固化滞后
-> - **v1.5.12**：**5 项面板 UX 优化 + 4 个落地服务致命 bug 根治**（裸金属 + Docker 同步生效）。
->   ① **节点信息页重构**（前端 `loadNode`）：未启用的服务不再显示（之前空 URI 误导用户）；每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示，每行独立「📋 复制」按钮；URI 单独成行也带复制。落地服务启用时 anytls-2/naive-2 才显示（并标注 anytls-2 出口经 SS 落地 / naive-2 走 direct 的架构约束）。后端 `nodeHandler` 同步加 `enabled` 字段让前端据此过滤。
->   ② **「第二组服务」+「出口落地」合并为「落地服务」单页**（前端导航精简一项）：上半部分配置 AnyTLS-2/NaiveProxy-2（启用/端口/伪装），下半部分配置远端 SS 落地服务器（host/port/method/password）。`api/group2` + `api/landing` 两个后端端点保持不变（合并仅是前端表现层）。
->   ③ **端口全部随机生成**：`install.sh` + `entrypoint.sh` 默认端口从 23456/8443/44333/15608 改为**全部随机**（10000-65535，自动避开 80/443/25822/互相冲突/已占用）。`rand_port()` 在 `validate_inputs` 后填补空端口，部署完成横幅用 ╔═══╗ 边框 + ⚠️ 警示标突出显示。用户可通过 `--ss-port` 等参数显式指定（向后兼容）。
->   ④ **落地服务启用时自动生成密钥**：`group2Handler` 启用分支检测到 `ANYTLS2_PASS`/`NAIVE2_USER` 任一为空时**自动调 `ansgo-admin regen2`** 生成（原代码要求用户先手动点「生成密钥」按钮 → 用户反馈启用后无法用）。生成的密钥可在「服务管理」页底部查看/修改。同时启用 sing-box + caddy 显式 `enable`（之前可能被 disable 起不来）。
->   ⑤ **所有服务加端口监听检测**（新 `api/health` + 前端 UI）：每服务检测 ① systemd active ② 端口 LISTEN（`ss -tln`）③ TCP 自连握手（`net.DialTimeout`）。仪表盘/服务管理页每张卡加「🔍 检测」按钮，结果就近渲染（✅/❌ 行级显示 + 综合诊断）。
->   ⑥ **【Bug修复】sing-box 路由规则引用不存在的 `naive-in2` tag**：`ansgo-genconf` 之前在落地 SS outbound 的路由规则里把 `["anytls-in2", "naive-in2"]` 一起塞进去，但 NaiveProxy 由 **caddy** 承载，sing-box 里**根本没有 naive-in2 这个 inbound**。新版 sing-box 配置校验失败/规则被丢弃 → 第二组流量全部走 direct（用户实测"配置了落地但用不了"的核心根因）。修复：路由规则只引用 `anytls-in2`，并删除冗余的 `action: route` 字段（sing-box 1.11+ 默认 action 就是 route）。
->   ⑦ **【Bug修复】naive-2 走 direct 架构约束明确告知**：之前 UI 文档说"naive-2 出口经 SS 落地"，但 caddy 和 sing-box 是**两个独立进程**，caddy 收到 naive-2 流量后**直连目标站点**（无法转发给 sing-box 的 ss-out，这是 caddy/sing-box 分离架构的固有约束）。修复：节点信息页/服务管理页/落地服务页全部明确标注"naive-2 走 direct"，避免用户对"naive-2 出口 IP"产生错误预期。
->   ⑧ **【Bug修复】`landingHandler` 启用时同步 enable sing-box**：原代码落地 SS 配置变化只 `restart sing-box`，但若 sing-box 之前因无启用服务被 `disable` 了，restart 会失败（unit 未 enable）。修复：检测到有启用服务时显式 `enable` + `restart`。同时返回 `note` 字段告知"未启用落地服务时 ss-out 不生效"。
->   ⚠️ **经验教训：caddy（NaiveProxy）与 sing-box（SS/AnyTLS）是两个独立进程，跨进程路由不可能**——任何"naive-2 流量走 sing-box 的 ss-out 落地"的设计在物理上都不可行，UI/文档必须诚实告知。naive-2 永远走 caddy 的 direct 出口（中转机 IP），只有 anytls-2 能经 sing-box ss-out 落地到远端服务器
-> - **v1.5.11**：**前端 UX 重构——「服务安装」「端口管理」「密钥管理」三页合并为统一「服务管理」页**（裸金属 + Docker 同步生效，纯前端改动）。① **新增 `loadMgmt()` 函数**（`index.html`）：一次并行拉取 `api/dashboard` + `api/node`，每服务渲染一张卡片——状态标签（未安装/已安装·运行中/已安装·未运行）+ 端口输入 + 密钥/凭证输入 + 安装/卸载 + 启停按钮 + 🎲随机/💾保存密钥，一站式完成原先跨三页的全部操作。② **导航精简**：删除 `install/port/key` 三个 nav button，新增 `🗂️ 服务管理`（data-t="mgmt"）；`showTab` 派发表加 `mgmt:loadMgmt`（保留 `install:loadInstall/port:loadPort/key:loadKey` 映射不破坏潜在引用，但不再有 nav 入口）。③ **`reloadCurrentTab()` 抽象**：`svcInstall/svc/regen/saveKey` 完成回调从硬编码 `loadInstall/loadSvc/loadKey` 改为 `reloadCurrentTab()`（按当前激活 tab 自动刷新），让这些操作在 mgmt 页面也能正确刷新状态/密钥。④ 保留所有原字段 ID（`#p_ss` `#k_at_pass` 等），`setPort/saveKey/regen/svcInstall` 函数签名 0 改动，后端 API 0 改动。⚠️ **经验教训：HTML 经 `//go:embed` 编译进 Go 二进制，改前端必须重新 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 出包 + stop→rm→scp→md5→start 流程（AGENTS.md §9），浏览器硬刷新清缓存；动作函数完成回调统一走「刷新当前 tab」而非硬编码本页函数，避免后续合并/拆分页面时回调链断裂**
-> - **v1.5.10**：修复 v1.5.9 的 Docker 容器重启回归——**容器重启时 naive 已装但 caddy 被停的 bug**。根因：`entrypoint.sh` 第 143 行只看 `caddy_enable=false` 就 `systemctl stop caddy`，没看 `svc_naive_enabled`。容器重启（`docker-compose up -d`）后即使 naive 已装，caddy 仍被停 → NaiveProxy inactive。修复：`--no-caddy` 模式下检查 `svc_naive_enabled`：naive 已装 → `enable + restart caddy`（仅听 naive 端口，不碰 80/443）；naive 未装 → `disable + stop caddy`（80/443 由 nginx 接管）。`handlers.go` 同步把 caddy 启用条件对齐到 `CaddyEnable=="true" || SvcNaiveEnabled=="true"`。**测试**：`docker-compose pull && docker-compose up -d` 后 naive 应自动恢复 active。
-> - **v1.5.9**：修复用户反馈的 SS/AnyTLS 状态耦合 + caddy 自启动问题。**首次自 v1.5.0 改动 Go 面板代码**（main.go + handlers.go），Docker 镜像内面板二进制已更新（裸金属用户需等下一个面板 release tag 才能用上）。① **反馈 1：SS/AnyTLS 状态显示解耦**——`dashboardHandler` 服务状态改为 `enabled && 进程active`，未启用的服务显示 inactive（不再因载体进程在跑而误报 active）。② **反馈 1：停止 SS 不停 AnyTLS**——`serviceHandler` 对 ss/anytls 单独处理：设 enabled=false + genconf + restart sing-box（genconf 按 enabled 生成 inbound，停 SS 后 config 只剩 AnyTLS），不再 systemctl stop sing-box 误伤其他服务。只有 SS+AnyTLS 都未启用时才 stop+disable sing-box。③ **反馈 3：caddy 智能启停**——`Config` struct 加 `CaddyEnable` 字段（解析 panel.json `caddy_enable`，默认 true 兼容旧部署）；`svcInstallHandler` caddy 启用条件改为 `CaddyEnable=="true" || SvcNaiveEnabled=="true"`（默认模式始终跑 :443 伪装站；--no-caddy 模式只在 naive 启用时才 enable+start caddy）。⚠️ **Go 编译坑：`exec.Command(...).CombinedOutput()` 返回 `(output, err)` 两个值，不能 `_ = ...` 赋给单值，用 `.Run()` 替代（只返回 err）**
-> - **v1.5.8**：根治 v1.5.7 `--no-caddy` + manual 证书模式部署后服务起不来的 4 个根因（实测：海外 VPS + 宝塔 nginx + manual 证书 + --no-caddy + --docker，部署后需要大量手动 SSH 修复才能跑通）。① **ansgo-genconf `caddy_enable=false` 加 `auto_https off`**——caddy 默认 auto_https on 会隐式监听 :80 做 ACME 挑战，--no-caddy 模式下 nginx 占着 80 → bind 失败；修复后 global block 自动加 `auto_https off`。② **install.sh manual 证书改由 entrypoint 同步**——v1.5.7 让 genconf 直接读宿主 `/www/server/...` 路径，但容器内 SELinux/权限 denied；改为 install.sh 只注入 bind mount，实际 cp 由 entrypoint 完成。③ **entrypoint.sh manual 证书启动时同步到 `/etc/ssl/ansgo/` + 改 panel.json 为 acme**——启动时 cp 宿主证书 → 卷（644 权限），清理 panel.json 的 `cert_fullchain/cert_privkey`，`cert_mode` 改 acme，让 genconf 用 `/etc/ssl/ansgo/`（容器完全控制，无权限问题）。续期只需 `docker restart ansgo`。④ **entrypoint.sh `--no-caddy` 模式 `mask` → `disable`**——v1.5.7 用 mask 让 systemctl 无法操作，naive 装上时无法 unmask 启动；改 disable + stop（不 mask），允许面板手动 start caddy。**实测验证**：部署后 caddy/sing-box/ansgo-panel 全 active，AnyTLS + NaiveProxy + 面板端口全部监听，nginx 继续占 80/443 无冲突。
-> - **v1.5.7**：修复 v1.5.6 `--no-caddy` + manual 证书模式部署后面板打不开的 3 个根因（实测场景：海外 VPS + 宝塔 nginx + manual 证书 + --no-caddy + --docker）。① **entrypoint.sh 在 --no-caddy 模式 mask caddy.service**——原问题：panel.json 写了 `caddy_enable=false`，但镜像里 caddy.service 已 enable，systemd 仍会拉起 caddy 占 443（无证书起不来导致整体 systemd 状态混乱）；修复：NO_CADDY=1 时显式 `systemctl disable + mask caddy.service`，systemd 永远拉不起。② **install.sh manual 证书模式自动注入 bind mount**——原问题：宝塔证书在宿主 `/www/server/...`，容器内看不到 → entrypoint 报「证书文件不存在」；修复：CERT_MODE=manual 时用 awk 在 docker-compose.yml 的 volumes 段追加 `- /宿主证书目录:/容器同路径:ro` 让 entrypoint 能读到（awk 跨平台，避免 macOS sed -i 与 GNU sed 语法差异）。③ **docker compose v1/v2 自动检测**——服务器装的是 `docker-compose` v1（独立二进制）而非 `docker compose` v2（子命令），原代码 `docker compose pull 2>/dev/null` 吞 stderr 误判为「拉取失败 → 本地构建」；修复：检测两个变体选可用那个，compose pull 失败再 docker pull 兜底，不吞 stderr。
-> - **v1.5.6**：① **新增 `--no-caddy` 模式**（nginx 共存）——caddy 不监听 `:80`/`:443`，让已装 nginx/宝塔/其它 web 服务器接管 80/443；ANS-GO 面板/SS/AnyTLS/Naive 仍按各自端口跑（naive 装上后 caddy 只听 naive 端口，不碰 80/443）。交互式模式检测到 80/443 占用时主动提示是否跳过 caddy。`panel.json` 新增 `caddy_enable` 字段（`true` 默认；`--no-caddy` 写 `false`），`ansgo-genconf gen_caddy()` 据此条件化生成 `:443`/`:80` 块。端口校验：`--no-caddy` 时 80/443 不再视为保留（用户可自由用）。② **修复 Docker 部署 2 个 bug**：(a) `dl_or_exit: command not found`——`dl_or_exit` 定义在 `do_docker_deploy` 调用之后（bash 单遍解析），移到文件顶部日志函数之后；(b) `lstat /etc/ansgo-docker/deploy`——`docker build -f deploy/Dockerfile.allinone` 用相对路径但 cwd 是 `/etc/ansgo-docker`，改绝对路径 `-f /tmp/ansgo-build/deploy/Dockerfile.allinone`。③ **发布 ghcr.io 多架构公开镜像** `ghcr.io/jiasongji/ansgo:latest`（amd64 + arm64，312MB，含 sing-box v1.13.13 + caddy-naive + 面板 + systemd 单容器）——所有服务器 `install.sh --docker` 直接 `docker compose pull` 成功，不再触发本地构建回退。Dockerfile 加 OCI labels（`org.opencontainers.image.source`）便于未来 GitHub 关联。⚠️ **经验教训：bash 函数必须先定义后调用，跨函数引用要确认定义顺序；docker build 的 `-f` 相对路径按 cwd 解析，跨目录构建必须用绝对路径；国内 docker buildx 多架构构建需要 `docker-container` driver + `--build-arg HTTP_PROXY=...` 注入代理（apt/go 不读环境变量但读 build-arg）；ghcr.io package visibility 修改 API 对 user-owned package 返回 404，必须 web UI 操作**
-> - **v1.5.5**：① **带参数安装支持指定端口 + 密码**——新增 7 个 CLI 参数：`--ss-password`（须 base64(16字节)）/`--anytls-password`/`--anytls-uuid`（标准 UUID）/`--naive-user`/`--naive-password`（不含冒号空白）/`--panel-password`（6-64 字符）/`--panel-url-path`（/xxxx/ 形式），全部可选，留空则随机生成（向后兼容）。裸金属 + Docker 双形态都支持（host ansgo.env 用 `SS_KEY_IN`/`ANYTLS_PASS_IN` 等 `_IN` 后缀变量透传给 entrypoint.sh，避免与容器内同名变量冲突）。② **新增 `validate_inputs()` 参数校验**——端口范围（1-65535）+ 互相冲突 + 与 caddy/SSH 固定端口（80/443/25822）冲突检测；SS2022 密钥 base64 解码长度校验；UUID 格式校验；NaiveProxy 用户名/密码字符校验；面板密码长度校验；URL 路径格式校验。校验仅对安装/部署场景生效，`--uninstall`/`--landing` 跳过。③ **顺手修 NaiveProxy 默认端口 443→44333**——项目长期存在 `install.sh`/`entrypoint.sh`/`ansgo-admin` 默认 443、但 AGENTS.md §3 明确警告「naive 不要用 443」的矛盾，本次统一为 44333（与文档/ansgo-genconf 默认一致）。⚠️ **经验教训：bash 的 `$var` 后紧跟非 ASCII 字符（如全角`）`）在 set -u 下会被当成 `var）` 变量名报 unbound，须用 `${var}` 显式界定；heredoc 里的反引号代码示例会被执行，文档示例改用单引号包裹**
-> - **v1.5.4**：修复**面板「服务安装」首次安装代理服务必失败**（`生成配置失败: FileNotFoundError: '/etc/sing-box/config.json'`）。**根因**：install.sh 装面板阶段（步骤 1-2）装了 sing-box 二进制和 systemd unit，但**从未创建 `/etc/sing-box/` 目录**；步骤 5/7 调 `ansgo-genconf all` 初始化占位配置时同样会失败，但被 `2>&1 | tail -3` 静默吞掉让部署继续走完，**问题被掩盖直到用户在面板点「安装」**才冒泡给前端（`exec.Command(genconf).CombinedOutput()` 直接把 traceback 返回给浏览器）。修复双保险：① `ansgo-genconf` 的 `gen_singbox()`/`gen_caddy()` 在 `open(...,"w")` 前 `os.makedirs(parent, exist_ok=True)` 治本（脚本自身不再依赖外部预建目录）② `install.sh` 步骤 2/8 预 `mkdir -p /etc/sing-box /etc/caddy /var/www/html` 防御（与 `Dockerfile.allinone:117` / `entrypoint.sh:31` 对齐，裸金属此前漏建）。⚠️ **经验教训：`ansgo-genconf` 这类「写配置」工具必须自建父目录，不能假定上游已建；install.sh 里 `cmd | tail` 这种吞错管道会掩盖致命错误，应在被吞的命令上加 `|| warn` 至少留诊断痕迹**
-> - **v1.5.3**：根治 `curl|bash` 系列问题。**三个根因**：① `curl: (23) Failure writing output`——v1.5.1/v1.5.2 都在治 `read` 读 stdin 的症状，但真正根因是 `curl | bash` 下脚本中途任何 `exit`（do_uninstall/--landing/--help/错误退出）让 bash 提前结束 → 管道读端关闭 → curl 写剩余字节收到 **SIGPIPE**；② **进程替换模式 `bash <(curl)` 卡死**——bootstrap 用 `[ -f /dev/fd/NN ]` 判断进程替换，但 fd 在 `-f` 测试中返回 false（非常规文件）→ 误走 `cat`（无参数）从 fd0 读 → fd0 是用户终端 → 吃掉用户输入卡死；③ **sing-box/caddy 二进制 404**——install.sh 从本项目 release 下载二进制，但 release 未上传这些资产。修复：① bootstrap 落地机制（检测管道/进程替换→落地临时文件→exec 重跑）② 进程替换判断改用 `[ -e ]`（fd 通过 `-e` 测试）+ `cat "$_ansi_self"`（从 /dev/fd/NN 读，不碰 fd0）③ sing-box 改从 **SagerNet 官方 release** 下载（与 Dockerfile/ansgo-admin 一致），caddy-naive 加 xcaddy 现场编译回退。同时①新增**交互式主菜单**（无参数运行显示：安装/卸载/彻底卸载/落地）②修复 `--landing` 首次执行下载 + `--port` 参数透传。⚠️ **经验教训：`curl | bash` 下 SIGPIPE 是 `exit` 引起的；进程替换下 `[ -f ]` 对 fd 失败必须用 `[ -e ]`；二进制下载不能依赖单一源**
-> - **v1.5.2**：（已被 v1.5.3 取代）曾用 `readtty()` 子 shell 局部 `</dev/tty` 修复 v1.5.1 回归（治对了 `read` 但没治 `exit` 的 SIGPIPE 根因）
-> - **v1.5.1**：（已被 v1.5.2 取代）曾尝试用 `exec 0</dev/tty` 修复 `curl|bash --uninstall` 确认失效，但该写法本身在管道下会截断脚本（见 v1.5.2）；文档改动（卸载命令拆分独立代码块）保留
-> - **v1.5.0**：①「密钥管理」页支持**手动设置**各服务密码（SS/AnyTLS/Naive + 第二组 AnyTLS-2/Naive-2，与随机生成并存，SS2022 自动校验密钥长度）②**手动指定证书**与私钥的完整路径（`cert_mode=manual`，与 acme 二选一；面板「证书管理」页可切换来源 + 重新加载；install.sh 新增 `--cert-mode/--cert-fullchain/--cert-privkey`）③全参数一键安装支持手动证书
-> - **v1.4.3**：面板导航改左侧可折叠侧边栏（桌面可折叠 + 移动端抽屉式，localStorage 记忆）+ 修复白天模式下字体不可读（active 项改蓝底白字 / `<code>` 显式着色 / overlay 阴影双主题适配 / `.logs` 终端风格双主题统一）
-> - **v1.4.2**：新增 `--uninstall` / `--purge` 彻底卸载（自动检测 Docker/裸金属，两级清理：默认保留配置/卷，`--purge` 全删）
-> - **v1.4.1**：修复 install.sh 架构判断 `x86_64: unbound variable` + 补全 release 二进制（sing-box/caddy-naive/panel 双架构）
-> - **v1.4.0**：移动端自适应 + 白天主题文字修复 + Docker all-in-one 一体化镜像
+> | 版本 | 要点 | 关键教训 / 约束 |
+> |------|------|----------------|
+> | **v1.5.17** | Docker manual 证书模式四根因根治：证书页误显示 acme / capability 收窄致读不了宿主证书目录 / 版本号 `vv` 双 v / 容器重建后代理不自动恢复 | systemd `CapabilityBoundingSet` 收窄后 root 不再隐式绕过 DAC；容器重建 ≠ 重启（systemd 状态归零，entrypoint 须幂等重建）；证书路径走卷内 644 副本不依赖宿主原文件 |
+> | **v1.5.16** | 新增 SOCKS5（强制鉴权）+ 自定义网页标题 + NaiveProxy 落地简化（移除 naive-2，落地仅 AnyTLS-2→SS） | caddy 与 sing-box 是两个独立进程，跨进程路由物理上不可行；SOCKS5 公网部署必须强制鉴权 |
+> | **v1.5.15** | 根治节点信息页一直「加载中」 | JS 模板插值 `${obj.field}` 若 field 是 number/bool 再做 string-only 操作须先 `String()` 强转；async forEach 异常会静默 reject 整个 promise |
+> | **v1.5.14** | genconf 端口冲突校验 + svcActive 保留 stdout + xcaddy 磁盘预检 + ldflags 注入 version + LXC 时钟/iptables 线上修复 | `systemctl is-active` 非 active 也返回非 0 但 stdout 仍有效，`err!=nil` 时勿丢弃 stdout；SS2022/WireGuard 依赖时钟，LXC 须单独装 NTP；宝塔会把 iptables policy 改 DROP |
+> | **v1.5.13** | 根治 ghcr.io 镜像二进制滞后于源码 | **每次发版必须同步 `docker buildx build --push` 重建镜像**，不能只 commit 源码；排查面板问题先 `docker exec md5sum` 对比镜像内二进制 |
+> | **v1.5.12** | 节点信息页重构 + 落地服务单页 + 端口全随机 + 健康检测 + 修 sing-box 路由引用不存在的 `naive-in2` tag | 改前端必须重新编译上传（stop→rm→scp→md5→start）+ 浏览器硬刷新；落地路由只引用 `anytls-in2`（naive 不在 sing-box） |
+> | **v1.5.11** | 三页（安装/端口/密钥）合并为「服务管理」单页 + `reloadCurrentTab()` 抽象 | 动作回调统一走「刷新当前 tab」而非硬编码本页函数，避免合并/拆分页面时回调链断裂 |
+> | **v1.5.10** | 修 Docker 容器重启后 naive 已装但 caddy 被停 | `--no-caddy` 模式须检查 `svc_naive_enabled`：naive 在则 enable caddy |
+> | **v1.5.9** | SS/AnyTLS 状态解耦 + 停 SS 不停 AnyTLS + caddy 智能启停（加 `CaddyEnable` 字段） | `exec.Command(...).CombinedOutput()` 返回 `(output, err)` 两值，不能单值赋值，用 `.Run()` |
+> | **v1.5.8** | 修 `--no-caddy`+manual 证书模式 4 根因（auto_https off / 证书改 entrypoint 同步 / mask→disable） | caddy 默认 auto_https on 会抢 80；manual 证书在容器内须走卷内副本 |
+> | **v1.5.7** | 修 `--no-caddy` 模式 caddy 被拉起占 443 + manual 证书 bind mount + compose v1/v2 检测 | bash 函数必须先定义后调用；`docker build -f` 相对路径按 cwd 解析，跨目录用绝对路径 |
+> | **v1.5.6** | 新增 `--no-caddy` 模式（nginx 共存）+ 发布 ghcr.io 多架构镜像 | 国内 buildx 多架构构建须 `docker-container` driver + `--build-arg HTTP_PROXY` 注入 |
+> | **v1.5.5** | 7 个密码/端口 CLI 参数 + `validate_inputs()` 校验 + naive 默认端口改 44333 | bash `$var` 后紧跟全角标点在 `set -u` 下会被当成另一变量名，须 `${var}` 界定 |
+> | **v1.5.4** | 修首次安装代理服务必失败（`/etc/sing-box/` 目录未创建被 `cmd\|tail` 吞错） | 写配置工具必须自建父目录；`cmd \| tail` 吞错管道会掩盖致命错误，加 `\|\| warn` |
+> | **v1.5.3** | 根治 `curl\|bash` 的 SIGPIPE / 进程替换卡死 / 二进制 404（含 v1.5.1/v1.5.2 被取代的中间尝试） | `curl\|bash` 下 SIGPIPE 由 `exit` 引起；进程替换判断用 `[ -e ]` 非 `[ -f ]`；二进制下载不依赖单一源 |
+> | **v1.5.0** | 密钥手动设置 + 手动指定证书路径（`cert_mode=manual`） | — |
+> | **v1.4.x** | v1.4.0 移动端+白天主题+Docker all-in-one；v1.4.1 架构判断修复；v1.4.2 `--uninstall`/`--purge`；v1.4.3 左侧可折叠侧边栏 | `bash -n` 只查语法不执行，查不出运行时变量错误，改完务必实际执行 |
 
 ---
 
@@ -149,12 +118,12 @@
 | SOCKS5 (sing-box) | **随机** 10000-65535（默认 10808）| SOCKS5（强制鉴权）| 按需安装（不参与落地）| ✅ |
 | 落地服务 anytls-2 | **随机** 10000-65535（v1.5.12 前 21112）| TLS | 按需（经 SS 落地）| ✅ |
 | caddy HTTP（重定向）| `80` TCP | HTTP | 固定 | ❌ |
-| SSH | `25822` TCP | SSH | **已加固**（公钥+禁密码，见 §15）| ❌ |
+| SSH | `25822` TCP | SSH | **已加固**（公钥+禁密码，见 §14）| ❌ |
 
 > :443 是**域名直访伪装站**（纯反代，不提供代理），随面板一起启动。NaiveProxy 用独立端口，不要用 443。
 > v1.5.12 起：所有服务端口**部署时随机生成**（10000-65535，避开 80/443/25822/已占用），可通过 `--ss-port` 等参数显式指定。已部署服务器端口不变（仅新部署默认值改变）。
 >
-> ⚠️ **SSH 端口已从默认 22 改为 25822**（2026-06-22 加固，见 §15）。`install.sh` 仍装在 22，加固属部署后动作；新部署若需复刻，加固步骤见 §15。
+> ⚠️ **SSH 端口已从默认 22 改为 25822**（加固属部署后动作，见 §14）。`install.sh` 仍装在 22；新部署若需复刻，加固步骤见 §14。
 
 防火墙（nftables）policy=accept 全放行；部署时仅确保新端口可达，不加 drop 规则（避免锁死 SSH，LXC 安全由宿主负责）。
 
@@ -370,9 +339,9 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 
 /etc/ansgo-deploy/          # install.sh 下载的脚本副本（含 ansgo-landing.sh 等）
 /etc/ansgo-backup-{ts}/     # 每次改配置前的备份
-/etc/sysctl.d/99-proxy-tune.conf   # stage1 网络调优（+ 2026-06-22 安全加固段）
+/etc/sysctl.d/99-proxy-tune.conf   # stage1 网络调优（+ SSH 加固 sysctl 段，见 §14）
 /etc/security/limits.d/99-proxy.conf  # stage1 fd 上限
-/etc/ssh/sshd_config.d/10-hardening.conf  # 2026-06-22 SSH 加固 drop-in（见 §15）
+/etc/ssh/sshd_config.d/10-hardening.conf   # SSH 加固 drop-in（见 §14）
 ```
 
 ---
@@ -413,136 +382,42 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 - **caddy 始终运行**：:443 伪装站 + :80 跳转是域名基础设施，不随代理服务卸载而停（sing-box 无 inbound 时才会停）
 - **服务开关持久化**：`panel.json` 的 `svc_ss_enabled` / `svc_anytls_enabled` / `svc_naive_enabled` 字段控制 genconf 生成对应配置
 
-### 实战备注（历次部署沉淀）
-- **scp 覆盖运行中二进制会失败**（sftp报 `dest open Failure`），且后续 restart 只重启旧文件。正确流程：`systemctl stop` → `rm` → `scp` → `md5sum` 对比 → `systemctl start`。md5 是判断"是否真更新"的唯一手段。
-  - v1.4.3 升级实战范例（2026-06-22 验证）：旧 md5 `9379fe9a...`（v1.4.0 期），新 md5 `8113f1b2...`，按上述流程上传后远端 md5 精确匹配，服务秒级 active。
+### 实战备注（通用运维规律）
+- **scp 覆盖运行中二进制会失败**（sftp 报 `dest open Failure`），且后续 restart 只重启旧文件。正确流程：`systemctl stop` → `rm` → `scp` → `md5sum` 对比 → `systemctl start`。md5 是判断"是否真更新"的唯一手段。
 - **caddy reload 必失败**（Caddyfile 设 `admin off`），改配置用 restart。
-- **前端 SPA"点击无反应"=JS 语法错误**：整块 `<script>` 不解析→所有函数未定义→静默。诊断：`node --check` 查语法。
+- **前端 SPA「点击无反应」= JS 语法错误**：整块 `<script>` 不解析 → 所有函数未定义 → 静默。诊断：`node --check` 查语法。
 - **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
-- **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`。升级二进制前也手动备份：`cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-update-vX.Y.Z-{ts}/ansgo-panel.old`（v1.4.3 升级时即用此方式）。
-- **前端改动后必须重新编译 + 上传**：HTML 经 `//go:embed` 编译进 Go 二进制，改 `deploy/panel/web/index.html` 后须 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 重新出包 + 上面的 stop→rm→scp→md5→start 流程，浏览器硬刷新。改完前端用 headless Chrome 截图多主题 × 多视口 × 多状态交叉验证（v1.4.3 即用此法验证 6 场景）。
+- **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`。升级二进制前手动备份：`cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-update-vX.Y.Z-{ts}/ansgo-panel.old`。
+- **前端改动后必须重新编译 + 上传**：HTML 经 `//go:embed` 编译进 Go 二进制，改 `deploy/panel/web/index.html` 后须 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 重新出包 + 上面的 stop→rm→scp→md5→start 流程，浏览器硬刷新。
 
 ---
 
-## 10. 部署后产物（线上现状回填）
+## 10. 风险与回滚
 
-> ⚠️ 密钥与密码等敏感值不写本文件（§13 约束，本文件会进 git）。
-> 完整凭证见服务器 `/etc/ansgo/secrets.env`、`/etc/ansgo/panel.json`，
-> 本地镜像见 `.secrets.local`（已 gitignore）的「部署产出」段。
-
-### 客户端连接 URI（结构，密钥见 `.secrets.local`）
-```
-[1] Shadowsocks : ss://<base64url(method:key)>@your-domain.com:33899#ANS-GO-SS
-                  method = 2022-blake3-aes-128-gcm
-[2] AnyTLS      : anytls://<password>@your-domain.com:21111/?sni=your-domain.com#ANS-GO-AnyTLS
-[3] SOCKS5      : socks5://<user>:<pass>@your-domain.com:10808#ANS-GO-SOCKS5
-[4] NaiveProxy  : naive+https://<user>:<pass>@your-domain.com:44333#ANS-GO-Naive
-[5] 落地(可选)  : anytls2 :21112 → 出口走 SS 落地
-```
-> 一键获取完整 URI：服务器执行 `ansgo-admin info`，或面板「节点信息」页。
-> 端口均为默认值，可在面板「端口管理」改。
-
-### Web 面板访问
-```
-URL:      https://your-domain.com:15608/<随机URL路径>/
-用户名:   ad_admin
-密码:     （部署时一次性显示，存 .secrets.local；遗忘用 `ansgo-admin panel-pass` 重置）
-URL路径:  /<随机URL路径>/  （面板内可改；遗忘用 `ansgo-admin panel-path` 重置）
-```
-> 线上现状：URL 路径已自定义，凭证见 `.secrets.local`。HTTPS 直访正常（HTTP 200），左侧可折叠侧边栏 + 白天模式字体修复已生效。
-
-### 当前端口（默认值，可面板内改）
-```
-caddy :443 伪装站:  443（始终运行，域名直访）
-NaiveProxy(caddy):  44333
-AnyTLS(sing-box):   21111
-Shadowsocks:        33899
-SOCKS5(sing-box):   10808
-落地(可选):         anytls2=21112（走 SS 落地）
-面板(ansgo-panel):  15608
-caddy HTTP(重定向): 80
-SSH:                25822（2026-06-22 加固：原 22，已改非标端口 + 公钥登录 + 禁密码，见 §15）
-```
-
-### 证书
-```
-签发机构: Let's Encrypt (CN=YE1)
-成功路径: A（Dynu API Key，自定义钩子 dns_dynukey.sh）
-有效期:   <部署日期> ~ <+90 天>（部署时剩余约 89 天）
-自动续期: acme.sh cron 每日 23:58，ARI 窗口自动驱动
-续期后:   ansgo-cert-reload 自动 restart caddy/sing-box/ansgo-panel
-```
-
-### 服务器文件清单（与 §8 对照，均已落地）
-```
-/usr/local/bin/{sing-box, caddy, ansgo-admin, ansgo-genconf, ansgo-panel, ansgo-cert-reload, ansgo-cert-issue.sh}
-/etc/ansgo/{panel.json, sessions.db, secrets.env}
-/etc/ssl/ansgo/{fullchain.pem, privkey.pem}
-/root/.acme.sh/{dnsapi/dns_dynukey.sh, account.conf, your-domain.com_ecc/}
-/etc/sing-box/config.json   /etc/caddy/Caddyfile   /var/www/html/index.html
-/etc/systemd/system/{sing-box, caddy, ansgo-panel}.service
-/etc/sysctl.d/99-proxy-tune.conf   /etc/security/limits.d/99-proxy.conf
-/etc/ssh/sshd_config.d/10-hardening.conf   # SSH 加固 drop-in（见 §15）
-/etc/ansgo-backup-ssh-harden-<TIMESTAMP>/   # SSH 加固前备份（sshd_config + sshd_config.d + 99-proxy-tune.conf）
-/etc/ansgo-backup-update-v1.4.3-{ts}/   # v1.4.3 升级前的二进制+配置备份
-```
-
----
-
-## 11. 风险与回滚
+> 只列**与当前代码仍相关、操作时仍可能踩**的通用风险。历史 bug 的根因诊断见对应版本的 GitHub Release notes。
 
 | 风险 | 应对 |
 |------|------|
-| 证书签发失败 | acme.sh 详细日志；失败时保留现有自签证书继续服务，不影响运行；A 失败自动 B |
+| 证书签发失败 | acme.sh 详细日志；失败时保留现有自签证书继续服务，不影响运行；A（API Key）失败自动降级 B（OAuth2）|
 | 改配置导致服务起不来 | 每次改动前 `ansgo-admin backup` 到 `/etc/ansgo-backup-{ts}/`，`ansgo-admin restore` 一键回滚 |
-| 面板 Go 二进制崩溃 | systemd `Restart=on-failure` 自动重启；`ansgo-admin` 兜底 |
-| 改面板端口后失联 | SSH 进去 `ansgo-admin panel-port` 重置；或改 panel.json 后 restart。**注意 SSH 端口已改 25822（见 §15），走密钥登录** |
-| SSH 加固后失联（密钥丢失/端口遗忘）| drop-in 备份在 `/etc/ansgo-backup-ssh-harden-<TIMESTAMP>/`；密钥登录走 `~/.ssh/your_key` + 端口 25822（见 `.secrets.local`）；完全失联只能通过 Proxmox 宿主 LXC console 修复 |
-| API Key 泄露 | 只存服务器 root 独占文件；可 `ansgo-admin` 旋转（重新填 Dynu 凭证）|
-| IPv6 入站不可用 | 宿主防火墙限制，容器侧无解；仅用 IPv4 |
-| 面板二进制更新不生效 | scp 覆盖运行中二进制会静默失败；必须 stop→rm→scp→md5 校验→start（见 §9 实战备注，v1.4.3 升级时已用 md5 `8113f1b2...` 校验通过）|
-| 面板点击无反应 | 前端 JS 语法错误致整块脚本失效；改完 HTML 需重新编译上传，清浏览器缓存硬刷新 |
+| 面板 Go 二进制崩溃 | systemd `Restart=on-failure` 自动重启；`ansgo-admin` SSH 兜底 |
+| 改面板端口/路径后失联 | SSH 进去 `ansgo-admin panel-port` / `panel-path` 重置（**走密钥 + 非标端口，见 §14**）。v1.5.12 起面板端口默认随机，新部署务必记下 install.sh 输出（或读 `/etc/ansgo/panel.json`）|
+| SSH 加固后失联 | drop-in 备份在 `/etc/ansgo-backup-ssh-harden-{ts}/`；密钥登录走 `~/.ssh/your_key` + 非标端口（见 `.secrets.local`）；完全失联只能通过宿主 console 修复 |
+| 面板二进制更新不生效 | scp 覆盖运行中二进制会静默失败；必须 **stop→rm→scp→md5 校验→start**（见 §9）。容器改前端/二进制须 `docker compose up -d --build` 重 build 镜像 |
+| 面板点击无反应 | 前端 JS 语法错误致整块脚本失效；改完 HTML 须重新编译上传 + 浏览器硬刷新清缓存 |
 | 续期 reload 失败 | caddy `admin off` 无法 reload；`ansgo-cert-reload` 已改用 restart，续期闪断 1-2s |
-| 第二组落地密钥错误 | sing-box `bad key length` 崩溃；面板对 2022-blake3 密钥做长度校验拒错；SSH 改正确后重启 |
-| 服务卸载后 :443 打不开 | 旧版本会误停 caddy；v1.3.0+ caddy 始终运行（:443 伪装与代理解耦），不受服务卸载影响 |
-| 服务安装后面板显示未生效 | ansgo-panel HTML 经 `//go:embed` 编译，改前端必须重新编译上传（stop→rm→scp→md5→start）+ 硬刷新 |
+| 落地密钥错误 | sing-box `bad key length` 崩溃；面板对 2022-blake3 密钥做长度校验拒错；SSH 改正确后重启 |
+| 手动证书路径错误 | manual 模式证书路径不存在/不可读会让三服务启动失败；面板与 install.sh 写入前预校验；改坏可 SSH 把 `panel.json` 的 `cert_mode` 改回 `acme` 后重启。Docker manual 证书路径必须挂进容器（或走卷内副本，见 §4）|
 | Docker 容器 systemd 起不来 | 必须 `privileged: true` + `cgroup: host` + tmpfs `/run`；host 网络下端口与宿主冲突需先释放 |
-| 容器改前端/二进制不生效 | 改 `web/index.html` 需重 build 镜像（`docker build -f deploy/Dockerfile.allinone .`）后 `docker compose up -d --build` |
-| 移动端/白天主题显示异常 | v1.4.0 全面适配（侧边栏抽屉 / label 上置 / 网格单列 / 白天文字 `var(--txt)`）；v1.4.3 进一步修复 active 项白字（改蓝底白字）、`<code>` 显式着色、overlay 阴影双主题适配。若仍异常，硬刷新清浏览器缓存 |
-| 卸载不干净（Docker 卷/镜像残留）| v1.4.2 `--uninstall` 用 `docker compose down -v` + `docker rm -f ansgo` 兑底 + 卷名模式匹配(`*_ansgo_(etc\|ssl\|caddy\|sb\|acme)`)兑底删卷；先删容器再删镜像避免 “image is being used” 错误 |
-| install.sh 首行报 `x86_64: unbound variable` | 旧版 `ARCH_MAP=( [x86_64]=amd64 )` 缺 `declare -A`，bash 把它当索引数组，`x86_64` 在算术上下文求值 + `set -u` 触发报错；v1.4.1 改用 `case` 写法（零关联数组）。⚠️ `bash -n` 只查语法不执行，查不出此类运行时变量错误，改完务必**实际执行**开头几行验证 |
-| 手动设置密钥含特殊字符破坏配置 | v1.4.x 的 `_setsecret` 用 `sed -i "s\|^...|...|"`，密钥含 `\|` 会破坏分隔符；v1.5.0 「密钥管理」页手动设置走 Go `setSecret()`（读全文→替换/追加→tmp→rename 原子写，绕开 sed），随机生成仍走 ansgo-admin（生成值无特殊字符，安全） |
-| 手动证书路径错误致三服务全起不来 | manual 模式 `cert_fullchain/cert_privkey` 指向不存在或不可读文件会让 caddy/sing-box/panel 启动失败；面板「证书来源设置」和 install.sh 在写入前都做 `os.ReadFile`/`[ -f ]` 预校验拒绝错误路径；`certPaths()` 对 manual 但路径缺失的情况安全回退 `cert_dir`（不会崩）。若已在服务器上改坏，SSH 改 `/etc/ansgo/panel.json` 的 `cert_mode` 回 `acme` 后重启 |
-| Docker manual 模式证书路径未挂载 | 容器内看不到 host 路径；entrypoint.sh 会记录 `ERROR: 证书文件不存在` 日志。部署前需在 `docker-compose.yml` 的 volumes 把证书目录挂进容器，或改用 cert_dir 卷内路径 |
-| 卸载用 `curl ... \| bash -s -- --uninstall` 报 `curl: (23) Failure writing output` / 完全无输出 / 「已取消」 | **v1.5.3 根治**。三层历史问题演进：① v1.5.0 及之前「已取消」：管道下 `read` 读到 curl 输出 → `$a ≠ yes`；② v1.5.1 回归「完全无输出」：`exec 0</dev/tty` 切走 fd0；③ **v1.5.2 仍报 `curl: (23)`（本次用户实测）**：治对了 `read` 但没治根因——真正根因是 `curl \| bash` 下脚本中途任何 `exit`（do_uninstall/--landing/--help）让 bash 提前结束 → 管道读端关闭 → curl 写剩余字节收到 **SIGPIPE** → `(23)`。**v1.5.3 修复**：脚本最开头加 bootstrap，检测到管道/进程替换运行时先落地到临时文件再 `exec` 重跑，bash 从文件读，curl 能完整输出，二者解耦。已通过 PTY 端到端 + 8 项回归测试验证 |
-| 面板「服务安装」页首次安装 SS/AnyTLS/Naive 必失败，提示 `生成配置失败: ...FileNotFoundError: [Errno 2] No such file or directory: '/etc/sing-box/config.json'` | **v1.5.4 根治**。根因：install.sh 装面板阶段（步骤 1-2）装了 sing-box 二进制和 systemd unit，但**从未创建 `/etc/sing-box/` 配置目录**；步骤 5/7 调 `ansgo-genconf all` 初始化占位配置时本应同样失败，但被 `ansgo-genconf all 2>&1 \| tail -3` **静默吞掉**让部署继续走完，问题被掩盖，直到用户在面板点「安装」时才冒泡给前端（`exec.Command(genconf).CombinedOutput()` 把 traceback 直接返回浏览器）。**修复双保险**：① `ansgo-genconf` 的 `gen_singbox()`/`gen_caddy()` 在 `open(...,"w")` 前 `os.makedirs(parent, exist_ok=True)` 治本（脚本自身不再依赖外部预建目录）② `install.sh` 步骤 2/8 预 `mkdir -p /etc/sing-box /etc/caddy /var/www/html` 防御（与 `Dockerfile.allinone:117` / `entrypoint.sh:31` 对齐，裸金属此前漏建）③ 步骤 5/7 的吞错管道加 `\|\| warn` 留诊断痕迹。已通过沙盒模拟目录缺失场景验证（sing-box/caddy/all 三模式 + 幂等性 + naive 安装场景全 exit=0；对照组复现原 traceback）。**线上修复方式**：已部署的服务器只需更新 `/usr/local/bin/ansgo-genconf`（重启面板），或 SSH 手动 `mkdir -p /etc/sing-box /etc/caddy` 即可立即恢复 |
-| 端口写错导致服务起不来（如 SS 端口=443 与 caddy 冲突、端口超 65535、两个服务用同端口）| **v1.5.5 根治**。install.sh 此前对端口零校验（`--ss-port 99999` 或 `--naive-port 443` 都照单全收，部署后服务起不来才知道）。新增 `validate_inputs()` 函数：① 端口范围 1-65535 整数 ② 四个可配端口（SS/AnyTLS/Naive/Panel）互相不得重复 ③ 不得占用 caddy 固定端口（80 HTTP 跳转、443 伪装站）和 SSH 加固端口 25822。校验在参数解析后立即执行，失败直接 exit 1 列出所有错误，不进入实际部署。**仅对安装/部署场景生效**，`--uninstall`/`--landing`/`--purge` 跳过 |
-| NaiveProxy 默认端口 443 与 caddy :443 伪装站冲突 | **v1.5.5 根治**。项目长期存在矛盾：install.sh/entrypoint.sh/ansgo-admin 默认 `NAIVE_PORT=443`，但 AGENTS.md §3 明确警告「NaiveProxy 端口不要用 443，默认 44333」（443 是 caddy 纯反代伪装站）。v1.5.5 统一为 44333（与 ansgo-genconf 默认一致），影响：install.sh L94、usage 文档、entrypoint.sh L50、ansgo-admin L81。**注意：已部署服务器的 panel.json 不受影响**（仅新部署默认值改变） |
-| 手动指定 SS/AnyTLS/Naive/Panel 密码含特殊字符破坏配置 | **v1.5.5 防御**。install.sh 新增 `validate_inputs()` 对用户密码做格式校验：SS_KEY 必须 base64(16字节)（`openssl rand -base64 16` 生成）；AnyTLS UUID 须标准格式；NaiveProxy 用户名/密码不含冒号和空白（caddy basic_auth 限制）；面板密码 6-64 字符；URL 路径 `/xxxx/` 形式。secrets.env 用 heredoc 整体写入（不走 sed），避免 v1.4.x `_setsecret` 的 `\|` 分隔符陷阱 |
-| 已装 nginx 的服务器上部署 ANS-GO（80/443 冲突）| **v1.5.6 解决**。新增 `--no-caddy` 参数：caddy 不监听 80/443，让现有 nginx/宝塔接管；ANS-GO 面板/SS/AnyTLS/Naive 按各自端口跑。`panel.json` 的 `caddy_enable=false` 让 `ansgo-genconf gen_caddy()` 跳过 `:443`/`:80` 块，caddy 即使启动也只听 naive 端口（如 44333），不冲突 nginx。交互式模式自动检测 80/443 占用并提示是否跳过 caddy。**典型场景**：`--no-caddy --cert-mode manual --cert-fullchain /www/server/panel/vhost/cert/x.com/fullchain.pem --cert-privkey .../privkey.pem --docker`（宝塔签发的证书直接喂给 ANS-GO，nginx 仍跑 443） |
-| Docker 部署 `dl_or_exit: command not found` + 本地构建 `lstat .../deploy` 失败 | **v1.5.6 根治**。两个 bug：(a) `dl_or_exit` 函数定义在 `do_docker_deploy` 调用之后（bash 单遍解析，调用时函数未进表）→ 移到文件顶部日志函数之后；(b) `docker build -f deploy/Dockerfile.allinone` 用相对路径，docker 按 cwd（`/etc/ansgo-docker`）解析为不存在 → 改绝对路径 `-f /tmp/ansgo-build/deploy/Dockerfile.allinone`。两个 bug 让 Docker 一体化部署在 ghcr 拉取失败后走本地构建时彻底卡死 |
-| Docker `--no-caddy` 模式部署后 caddy 仍占 443 / 面板打不开 | **v1.5.7 根治**。根因：v1.5.6 加了 `caddy_enable=false` 字段，但镜像里 `caddy.service` 已 `systemctl enable`，容器内 systemd 启动时无视 panel.json 仍拉起 caddy → caddy 占 443 又因无证书起不来 → 整体 systemd 状态混乱 → ansgo-panel 也受影响。修复：entrypoint.sh 在 NO_CADDY=1 时显式 `systemctl disable + mask caddy.service`，让 systemd 永远拉不起 caddy（naive 装上后面板手动 unmask + start） |
-| Docker manual 证书模式 `ERROR: 证书文件不存在` | **v1.5.7 根治**。根因：宝塔/已有证书在宿主 `/www/server/...`，docker volume 只挂了 `/etc/ssl/ansgo`（命名卷），容器内看不到宿主证书路径。修复：install.sh 在 CERT_MODE=manual 时用 awk 在 docker-compose.yml 的 volumes 段自动追加 `- /宿主证书目录:/容器同路径:ro` bind mount（去重；awk 跨平台避免 macOS sed -i 与 GNU sed 语法差异） |
-| Docker 部署 `docker compose pull` 失败但 `docker pull` 手动成功 | **v1.5.7 根治**。根因：服务器装的是 `docker-compose` v1（独立二进制）而非 `docker compose` v2（子命令），原代码 `docker compose pull 2>/dev/null` 吞掉「'compose' is not a docker command」错误 → 误判失败 → 走本地构建 → 本地构建又失败。修复：检测 `docker compose version` / `command -v docker-compose` 自动选用可用那个（COMPOSE 变量）；compose pull 失败用 `docker pull` 直拉兜底；不吞 stderr（用 `tail -N` 保留诊断） |
-| 合并/拆分菜单页后操作回调不刷新数据 | **v1.5.11 抽象**。原先 `svcInstall/svc/regen/saveKey` 完成后硬编码 `setTimeout(loadInstall/loadSvc/loadKey, ...)` 回调，一旦操作按钮被搬到别的页面（v1.5.11 合三为一为「服务管理」），原回调刷新的还是旧独立页而不是当前页 → 用户点了「安装」但当前页状态不更新。修复：新增 `reloadCurrentTab()`（按 `.nav button.active` 的 `data-t` 派发对应 `loadXxx`），所有动作函数完成回调统一走它，避免后续合并/拆分页面时回调链断裂 |
-| 落地服务配置后能起但实际无法用（naive-2/anytls-2 流量全部走 direct）| **v1.5.12 根治**。**根因1（致命）**：`ansgo-genconf` 落地 SS outbound 的路由规则错误引用了 `["anytls-in2", "naive-in2"]`，但 NaiveProxy 由 caddy 承载，sing-box 里**根本没有 naive-in2 这个 inbound tag**。新版 sing-box 配置校验失败/规则被丢弃 → 第二组流量全部走 direct（用户实测核心问题）。**修复**：路由规则只引用 `anytls-in2`，删除冗余 `action: route` 字段。**根因2（架构性）**：naive-2 在 caddy（独立进程），物理上无法转发给 sing-box 的 ss-out，永远走 direct 出口。**修复**：UI/文档全部明确告知"naive-2 走 direct"，避免错误预期。**根因3**：`group2Handler` 启用时要求用户先手动点「生成密钥」，用户直接启用 → 密钥缺失报错。**修复**：启用分支自动调 `ansgo-admin regen2` 生成密钥。**根因4**：`landingHandler` 改配置只 `restart sing-box`，但 sing-box 之前可能被 `disable` 起不来。**修复**：有启用服务时显式 `enable` + `restart`。⚠️ **教训：caddy（NaiveProxy）与 sing-box（SS/AnyTLS）是两个独立进程，跨进程路由不可能**——任何"naive-2 流量走 sing-box 的 ss-out"的设计在物理上都不可行 |
-| 改面板端口/路径后失联 | SSH 进去 `ansgo-admin panel-port` / `panel-path` 重置（走密钥 + 25822 端口，见 §15）。**v1.5.12 起：部署默认面板端口也随机**，新部署务必记下 install.sh 输出的端口（或读 `/etc/ansgo/panel.json`） |
-| **重新部署后面板"看不到"/功能回退** | **v1.5.13 根治**。根因：ghcr.io 镜像里固化的 ansgo-panel 二进制滞后于源码版本（历史遗留：v1.5.0 后多次 commit 改 Go 代码，但只 push 了源码，没同步 `docker buildx build --push` 重建镜像）。用户 `docker compose pull && up -d` 拉到的是旧镜像 → 二进制回退到 v1.5.0，所有新功能消失（用户感知为"昨天好的今天重装就不行"）。**诊断法**：`docker exec <容器> md5sum /usr/local/bin/ansgo-panel` vs `docker run --rm --entrypoint md5sum ghcr.io/jiasongji/ansgo:latest /usr/local/bin/ansgo-panel`——md5 一致说明镜像就是旧的，不一致说明已被 docker cp 临时修复但重建会丢。**修复**：v1.5.13 已重新构建多架构镜像并 push（`ghcr.io/jiasongji/ansgo:v1.5.12` + `:latest` 同步更新）。**预防**：发新版本必须同步重建镜像（命令见 §12），不能只 commit 源码。⚠️ 另：`main.go` 的 `version` 变量 v1.5.1~v1.5.12 连续 11 版硬编码为 `1.5.0`（日志误导排查），v1.5.13 已改为 `1.5.12`；**v1.5.14 已改用 `-ldflags "-X main.version=vX.Y.Z"` 构建时注入**，根治版本字符串滞后问题 |
-| 落地服务配置后 caddy 疯狂重启（restart counter 飙升）| **v1.5.14 根治**。根因：`ansgo-genconf` 之前不校验端口冲突，naive/naive2 同走 caddy 但端口撞了会生成两个 `:PORT` 块 → caddy `ambiguous site definition: :PORT` → 进入 restart 循环（用户实测 `naive_port=naive2_port=<同一端口>`，NRestarts=257）。**诊断法**：① `journalctl -u caddy -n 30` 看是否报 ambiguous site definition；② `systemctl show caddy -p NRestarts` 看 counter；③ `grep "^:" /etc/caddy/Caddyfile | sort | uniq -d` 看重复端口块。**修复**：① `ansgo-genconf` 新增 `check_port_conflicts()`，撞端口 `exit=3` 拒绝生成；② `portHandler`/`group2Handler` 写入前 `portConflicts()` 校验 + 回滚。双层防御确保坏 Caddyfile 永远不会落盘 |
-| 面板「🔍 检测」按钮显示 `caddy: unknown` 但服务实际在跑（或正在重启循环）| **v1.5.14 根治**。根因：`svcActive()` 用 `exec.Command("systemctl", "is-active", svc).Output()`，`is-active` 对 inactive/failed/activating 都返回**非0退出码但 stdout 仍有正确状态文本**。旧代码 `if err != nil { return "unknown" }` 把 stdout 丢弃，用户无法区分「服务没装」「服务挂了」「服务在重启循环」三种情况。**修复**：保留 stdout 按真实状态返回（activating/inactive/failed/maintenance），仅 stdout 为空才回退 unknown。⚠️ **教训**：Go `exec.Command.Output()` 返回的 `(stdout, err)` 要分开判断——`err != nil` 不代表 stdout 没有有用数据 |
-| 裸金属部署小盘 VPS（≤4GB 磁盘）时 xcaddy 填满磁盘致部署中断 | **v1.5.14 根治**。根因：v1.5.0 release 起历史遗留——release 漏传 `caddy-naive-linux-{amd64,arm64}` 预编译产物 → 所有裸金属部署被迫走 xcaddy 现场编译 → 下载 caddy v2.11.4 依赖树 + Go 1.22 工具链 ~1.5GB → 小盘 VPS（如 3.86GB）填满 → `/etc/sing-box/config.json` 写不进去 → 后续步骤全失败（用户实测 sing-box 配置丢失 + unit 文件消失）。**修复双保险**：① v1.5.14 release 补齐预编译产物（裸金属部署秒级拉取，不再编译）；② `install.sh` xcaddy 分支前加磁盘预检（可用 <1500MB 直接 `exit 3`）。⚠️ **诊断法**：部署中途失败先 `df -h /` 看磁盘占用，>95% 就是这个问题 |
-| 落地服务 SS2022 协议 `bad timestamp: diff Ns` 拒绝连接 | **v1.5.14 线上修复**（非代码 bug，运行时环境问题）。SS2022（`2022-blake3-aes-128-gcm`）把时间戳编进 nonce 防重放，两端系统时钟差 >30s 就拒绝。**触发场景**：中转机是 LXC 容器，`systemd-timesyncd` 不存在 + `timedatectl set-ntp` 报 `NTP not supported`（LXC 宿主控制时钟），系统时钟慢落地机 100s。**诊断法**：落地机 `journalctl -u sing-box | grep "bad timestamp"` 看 diff 值；`date -u` 两端对比。**修复**：① 临时：`date -s "$(curl -sI https://www.google.com \| grep -i ^date: \| sed 's/^[Dd]ate: //')"` 立即同步；② 持久：装 `openntpd` + `systemctl enable --now openntpd`（轻量 NTP，~200KB）。⚠️ **教训**：SS2022 / WireGuard / Kerberos / TLS 证书校验都依赖时钟同步，LXC 容器部署这些协议必须单独配 NTP（容器内 `timedatectl` 无效）|
-| 宝塔/aaPanel 服务器 iptables policy=DROP 致服务端口外网不通 | **v1.5.14 线上修复**。宝塔/aaPanel 装安全插件后把 `iptables INPUT policy=DROP`，install.sh 的 nft 放行规则在 iptables-legacy 后端下不生效。**症状**：容器内 `curl :PORT` 200，外网 `curl :PORT` 000 或超时（说明是防火墙拦截而非服务问题）。**诊断法**：`iptables -nL INPUT \| head -3` 看 policy；若 DROP 则需逐端口放行。**修复**：`iptables -I INPUT -p tcp --dport <PORT> -j ACCEPT` + `iptables-save > /etc/iptables/rules.v4` 持久化（Debian 12 装 `iptables-persistent` 后 `netfilter-persistent save`）。⚠️ 中转服务器实测需放行全部 5 个服务端口（含面板端口）|
-| **节点信息页一直显示「加载中…」**（其他页面正常）| **v1.5.15 根治**。根因：前端 `row(label, val, copyVal)` 函数体里 `(copyVal\|\|val).replace(...)` 直接对 `val` 调 string-only 方法，但 `val` 可能是 number（`api/node` 返回的 `port: 33899` 是 JSON 数字），`number.replace` 抛 `TypeError: ...replace is not a function`。该调用在 `card()` 模板插值 `${row('端口',n.port)}` 内，而 `card()` 又在 `loadNode` 的 `forEach` 内——**异常让整个 async `loadNode` 在 forEach 中终止，最末行 `$('#content').innerHTML=html` 永远走不到**，content 停在第 3 行写入的「加载中…」占位符。**触发条件**：SS/AnyTLS/Naive 任一 `enabled=true`（默认部署后全启用 → 几乎所有用户都中招）。**诊断法**：① 浏览器 Console 看是否有 `TypeError: ...replace is not a function`；② `curl api/node` 拿真实 JSON 看 port 字段是 number 还是 string；③ 本地用 Node 抽 `<script>` 块喂真实 API 数据跑 loadNode 复现。**修复**：`row()` 内部对 `val` 先 `String(val)` 强转，`.replace` 只在 string 上调用。⚠️ **教训**：JS 模板字符串 `${obj.field}` 若 field 是 number/bool 而后续做 string-only 操作，必须先 `String()` 强转；async 函数内 forEach 异常会让整个 promise reject 静默失败（`api()` 封装只 catch fetch 异常，不 catch 业务代码异常），DOM 停在占位符上无法被发现 |
-| **如何把已部署服务器升级到新版本** | **v1.5.16 起用 `deploy/upgrade.sh`**（见 §12「已部署服务器升级」）。此前升级方式有三条：① 重跑 install.sh（全新部署逻辑，不补跨版本新字段如 `socks_port`）；② `ansgo-admin update panel <本地二进制>`（仅更新单二进制，不更新 genconf/admin 脚本，不补配置字段）；③ 手动 stop→rm→scp→md5→start（最繁琐）。**upgrade.sh 把三条路径的不足一次补齐**：自动检测裸金属/Docker、更新 3 组件（genconf+admin 脚本 + panel 二进制）、python3 幂等补 panel.json 新字段、幂等补 secrets.env 凭证、升级前自动备份。⚠️ **设计要点**：脚本自包含不依赖服务器旧版 ansgo-admin（避免「用旧 admin 更新新 admin」的鸡生蛋）；`ansgo-panel` 无 `-version` flag 靠 md5 对比判断是否真更新；bash `set -u` 下 `$VAR` 后紧跟全角标点会被当成另一个变量名（v1.5.5 教训），脚本内一律用 `${VAR}` 界定。SOCKS5 升级后默认 `svc_socks_enabled:"false"`（不启用，符合「面板内按需装服务」架构），需用户在面板点「安装」或 `ansgo-admin regen socks` |
-| **Docker manual 证书模式：面板证书页显示「acme 自动签发」（与实际手动证书不符）** | **v1.5.17 根治**。根因：`entrypoint.sh` manual 模式把宿主证书 cp 到 `/etc/ssl/ansgo/` 卷（正确），但**同时强制把 `panel.json` 的 `cert_mode` 改成 `acme`**（v1.5.10 的设计缺陷，本意让 genconf 用卷内路径，副作用是证书页误显示 acme）。**诊断法**：`docker exec ansgo cat /etc/ansgo/panel.json \| grep cert_mode`，若部署时用了 `--cert-mode manual` 但这里显示 `acme` 即为此 bug。**修复**：entrypoint 保持 `cert_mode=manual`，`cert_fullchain`/`cert_privkey` 改指卷内副本 `/etc/ssl/ansgo/{fullchain,privkey}.pem`（644 可读）。**线上修复**：已部署服务器把 panel.json 的 `cert_fullchain`/`cert_privkey` 改成 `/etc/ssl/ansgo/fullchain.pem`+`/etc/ssl/ansgo/privkey.pem`，`cert_mode` 改 `manual`，然后 `docker exec ansgo ansgo-genconf all && docker exec ansgo systemctl restart sing-box caddy` |
-| **Docker manual 证书模式：配置落地服务（或任何 regen+restart sing-box/caddy 的操作）后服务全挂，sing-box/caddy 疯狂重启** | **v1.5.17 根治**。**根因**：`sing-box.service`/`caddy.service` 设 `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`（只留这一个 cap）+ `NoNewPrivileges=true`，**capability 被 bounding set 收窄后 root 不再隐式拥有 `CAP_DAC_READ_SEARCH`**，无法绕过文件权限。manual 证书若指向宿主 bind mount 的 `600`（无 x 位）目录（宝塔默认），无 DAC cap 的 root 既不能 search 也不能 open → `read certificate: open .../fullchain.pem: permission denied` → restart 循环（实测 NRestarts=270+）。**关键诊断**：`docker exec ansgo sing-box check`（交互式完整 cap）能过，但 `systemctl start sing-box`（unit 收窄 cap）失败——用 `docker exec ansgo systemd-run --property=CapabilityBoundingSet=CAP_NET_BIND_SERVICE --property=NoNewPrivileges=yes --service-type=oneshot --wait /usr/local/bin/sing-box check -c /etc/sing-box/config.json` 精确复现 unit 的 cap 上下文即可确认。**修复双层**：① entrypoint 默认让证书路径指向卷内 644 副本（治本）；② 两 unit 的 `CapabilityBoundingSet`/`AmbientCapabilities` 加 `CAP_DAC_READ_SEARCH`（兜底，用户即便手动改回宿主路径也能读）。⚠️ **教训**：systemd `CapabilityBoundingSet` 是「收紧」cap，一旦设定 root 不再隐式绕过 DAC（与传统直觉相悖）；Docker bind mount 宿主文件的权限位会被容器内收窄 cap 的服务真实感知。**线上修复**：见上一行的 panel.json 改法（指向卷内副本即可恢复，无需改 unit 也能跑） |
-| **面板日志/启动信息显示 `ansgo-panel vv1.5.17`（版本号双重 v）** | **v1.5.17 根治**。根因：`log.Printf("ansgo-panel v%s", version)` 已带 `v`，而 release/Dockerfile 构建命令的 ldflags `-X main.version=v1.5.17` 又注入带 `v` 的值 → 拼成 `vv`。**诊断法**：`docker exec ansgo journalctl -u ansgo-panel \| grep "ansgo-panel v"` 看是否有双 v。**修复**：所有 `-X main.version=...` 的值去掉 `v` 前缀（裸 `1.5.17`），`Printf("v%s")` 负责加 v。涉及 `deploy/Dockerfile.allinone`（`ARG PANEL_VERSION=1.5.17`）+ 根 README 构建示例 |
-| **Docker 容器重建（`docker compose pull && up -d` / `docker rm` 后重建）后代理服务全断（面板能开但 SS/AnyTLS/Naive 端口不监听）** | **v1.5.17 根治**。**根因**：容器重建后容器内 systemd 是**全新状态**，`sing-box.service` 默认 `disabled`，即使 `panel.json` 里 `svc_*_enabled=true` 也不会被拉起。旧 entrypoint 只有 `--no-caddy` 模式下 naive 的 caddy enable 逻辑，完全没有 sing-box 的自动启停。**诊断法**：`docker exec ansgo systemctl is-active sing-box` 报 `inactive`、`is-enabled` 报 `disabled`，但 `panel.json` 的 `svc_*_enabled=true` → 即为此 bug（注意与「服务起不来=failed/restart 循环」区分：这里是根本没 enable，不是启动失败）。**修复**：entrypoint 在 genconf 后按服务开关显式 `enable+restart sing-box`（ss/anytls/socks/group2 任一启用），默认模式 `enable caddy`。**线上修复**：已部署服务器只需 `docker exec ansgo systemctl enable --now sing-box`（有启用服务时）即可恢复，下次重建会自动处理。⚠️ **教训**：容器重建 ≠ 重启——重建是全新 systemd，enable 状态归零，entrypoint 必须幂等重建 |
+| 落地服务架构约束 | caddy（NaiveProxy）与 sing-box（SS/AnyTLS/SOCKS5）是**两个独立进程**，跨进程路由物理上不可行；只有 anytls-2 经 ss-out 落地，naive/socks5 走 direct |
+| IPv6 入站不可用 | 宿主防火墙限制，容器侧无解；仅用 IPv4 |
+| 已装 nginx 的服务器（80/443 冲突）| 用 `--no-caddy` 模式让 nginx 接管 80/443，caddy 只听 naive 端口 |
+| LXC 时钟不同步致 SS2022 `bad timestamp` | LXC 容器时钟由宿主控制，`timedatectl set-ntp` 无效；须单独装 `openntpd`（SS2022/WireGuard 都依赖时钟）|
+| 宝塔/aaPanel iptables policy=DROP | 安全插件会把 INPUT policy 改 DROP，install.sh 的 nft 规则在 iptables-legacy 后端不生效；须 `iptables -I INPUT -p tcp --dport <PORT> -j ACCEPT` 逐端口放行 |
 
 ---
 
-## 12. 一键部署（推荐入口）
+## 11. 一键部署（推荐入口）
 
 仓库根目录提供 `install.sh`，支持**交互式**与**带参数一键**两种模式，所有资源取自本仓库 GitHub。
 
@@ -675,16 +550,16 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrad
 
 ---
 
-## 13. 后续流程
+## 12. 后续流程
 
-1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 三协议从中国大陆公网连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
+1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 多协议连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
 2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. ✅ **服务器部署（已完成 + 持续迭代）**：生产服务器已部署并通过 `https://your-domain.com:<面板端口>/<面板URL路径>/` 访问。面板版本迭代走 §9「stop→rm→scp→md5→start」流程，已升级至 v1.4.3（左侧可折叠侧边栏 + 白天模式字体修复）
+3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.17
 4. **客户端实测（可选）**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
 
 ---
 
-## 14. 约束与原则（给执行 AI）
+## 13. 约束与原则（给执行 AI）
 
 - 默认使用简体中文
 - 优先最小修改，完成后自行验证并汇报
@@ -693,35 +568,33 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrad
   - **真实公网 IP**（服务器/中转机/落地机/攻击源）→ `<服务器IP>` / `<中转服务器IP>` / `<落地服务器IP>` / `<攻击者IP>`
   - **真实域名**（主域/中转域/落地域）→ `your-domain.com` / `your-relay-domain.com` / `your-landing-domain.com`
   - **真实端口**（部署实例端口，非 install.sh 默认值）→ `<服务端口>` / `<面板端口>`；文档里列默认端口（15608/33899/21111 等）属脚本默认值不算泄露
-  - **面板 URL 路径** / 节点标签 → `<面板URL路径>` / `#ANS-GO-SS`（用项目名，禁用服务器代号如 <面板URL路径>/<面板URL路径> 或 #ANS-GO-SS）
-  - **密钥文件名 / SSH 别名 / 服务器代号** → `~/.ssh/your_key` / `ansgo-server`（禁用 `your_key` / `ansgo-server` 等真实命名）
+  - **面板 URL 路径** / 节点标签 → `<面板URL路径>` / `#ANS-GO-SS`（用项目名，禁用服务器代号）
+  - **密钥文件名 / SSH 别名 / 服务器代号** → `~/.ssh/your_key` / `ansgo-server`（禁用真实命名）
   - **第三方伪装反代目标域名**（caddy `disguise_*` 默认值）→ `example.com`（禁用任何真实第三方域名作为代码默认值）
-  - **具体部署时间戳/备份目录名/证书有效期** → `<TIMESTAMP>` / `<部署日期>`（禁用 `<TIMESTAMP>`、`2026-06-19~09-17` 等真实日期）
-  - **云厂商/地理位置**（LXC 容器/海外 VPS 等）→ `LXC 容器` / `海外 VPS`（不点名厂商与机房位置）
+  - **具体部署时间戳/备份目录名/证书有效期** → `<TIMESTAMP>` / `<部署日期>`（禁用真实日期）
+  - **云厂商/地理位置**（如腾讯云/硅谷）→ `LXC 容器` / `海外 VPS`（不点名厂商与机房位置）
   - changelog 记录排障经验时**只保留技术结论与触发条件**，抹掉所有可定位服务器的实例信息（IP/域名/端口/路径/时间戳/厂商）。
-  - **提交前自检**：`grep -rnE "<真实IP>|<真实域名>|<面板URL路径>|<面板URL路径>|bv_lax|<真实时间戳>|<真实第三方域名>" --include="*.md" --include="*.sh" --include="*.go" --include="*.html" --include="LICENSE" .` 必须 0 命中。
-  - ⚠️ 已发生过的泄露：v1.5.13/14 changelog 嵌了真实 IP（`<落地服务器IP>`/`<中转服务器IP>`/`<攻击者IP>`）+ 真实域名（`example.com`）+ 面板路径（`<面板URL路径>`/`<面板URL路径>`）+ 实例端口（21002/21008/21018/21112/10568）+ 私钥名（`your_key`）+ 伪装目标域名（`example.com`）+ 备份时间戳（`<TIMESTAMP>`），已于后续清理全部脱敏。新增 changelog 条目严禁重蹈覆辙。
+  - **提交前自检**：对全仓做真实 IP/域名/面板路径/私钥名/伪装域名/时间戳的 grep 扫描，必须 0 命中（§14 规则示例行本身除外）。
+  - ⚠️ 历史教训：v1.5.13/14 的 changelog 曾嵌入大量真实 IP/域名/面板路径/实例端口/私钥名/伪装域名/备份时间戳，已用 git-filter-repo 改写全历史清理。新增 changelog 条目严禁重蹈覆辙。
 - 每个高风险操作（改配置、重启服务）前自动备份
 - 不擅自加防火墙 drop 规则（避免锁死 SSH）
 - 所有生成密钥用 `openssl rand`，base64 密钥用标准 base64（不是 urlsafe）
 - Go 交叉编译用 `CGO_ENABLED=0`（纯静态，无 libc 依赖）
-- 执行前先读本文件 §0-§15：§12（一键部署）为推荐入口，§9（部署架构）说明面板优先设计，§15（SSH 加固）为部署后动作，每步报告进度
+- 执行前先读本文件 §0-§14：§11（一键部署）为推荐入口，§9（部署架构）说明面板优先设计，§14（SSH 加固）为部署后动作，每步报告进度
 
 ---
 
-## 15. SSH 加固（部署后动作）
+## 14. SSH 加固（部署后动作）
 
-> 触发：安全检查发现 `<攻击者IP>` 持续暴破 root/admin SSH 字典（`lastb` 显示密集失败）。原配置 `Port 22 + PermitRootLogin yes + PasswordAuthentication yes` 是首要攻击面。
->
-> ⚠️ **本章节的加固是"部署后动作"，不在 `install.sh` 流程内。** 新部署仍是默认 22 端口，需手动复刻下述步骤。后续可考虑把 `--ssh-port` 参数并入 install.sh。
+> ⚠️ **本章节是"部署后动作"，不在 `install.sh` 流程内。** 新部署仍是默认 22 端口，需手动复刻下述步骤。触发原因是原配置 `Port 22 + PermitRootLogin yes + PasswordAuthentication yes` 是首要攻击面（暴破日志密集）。
 
-### 加固范围（已确认决策）
+### 加固范围
 
 | 项 | 决策 | 说明 |
 |----|------|------|
 | 认证方式 | ✅ 公钥登录 + 禁密码 | ED25519，密钥不入 git（见 `.secrets.local`）|
 | root 登录 | ✅ 保持直登 | `PermitRootLogin prohibit-password`（仅公钥，禁密码）|
-| 防火墙 | ❌ 不动 | nftables 规则集仍空、policy=accept（LXC 安全由宿主负责）|
+| 防火墙 | ❌ 不动 | nftables policy=accept（LXC 安全由宿主负责）|
 | MACs | ❌ 不限制 | 确保任意 IP + 任意客户端 + 密钥均可登录 |
 | 新软件 | ❌ 不装 | 零额外开销，纯 drop-in 配置 + sysctl 追加 |
 
@@ -739,7 +612,7 @@ X11Forwarding no
 AllowAgentForwarding no
 ```
 
-**`ssh.socket` 已 mask**：Debian 12 用 socket activation，`ssh.socket` 配置 `ListenStream=22`——若不 mask，重启后 22 端口会被重新拉起，绕过 drop-in。已 `systemctl mask ssh.socket`（软链到 `/dev/null`），保证 22 永久关闭。
+**`ssh.socket` 必须 mask**：Debian 12 用 socket activation，`ssh.socket` 配置 `ListenStream=22`——若不 mask，重启后 22 端口会被重新拉起，绕过 drop-in。`systemctl mask ssh.socket`（软链到 `/dev/null`），保证 22 永久关闭。
 
 **sysctl 追加**（`/etc/sysctl.d/99-proxy-tune.conf` 末尾）：
 ```
@@ -748,9 +621,9 @@ net.ipv4.conf.default.send_redirects = 0
 net.ipv4.conf.all.log_martians = 1
 net.ipv4.conf.default.log_martians = 1
 ```
-> `kernel.kptr_restrict` / `kernel.kexec_load_disabled` 因 LXC 宿主只读已移除（容器内 `permission denied`，留着只污染 `sysctl -p` 日志）。
+> `kernel.kptr_restrict` / `kernel.kexec_load_disabled` 因 LXC 宿主只读无法设置（容器内 `permission denied`），勿加。
 
-### 下次登录方式（重要）
+### 下次登录方式
 ```bash
 ssh ansgo-server                                    # 已配 ~/.ssh/config 别名
 # 或
@@ -769,10 +642,10 @@ systemctl restart sshd
 cp /etc/ansgo-backup-ssh-harden-<TIMESTAMP>/99-proxy-tune.conf /etc/sysctl.d/
 sysctl -p /etc/sysctl.d/99-proxy-tune.conf
 
-# 若密钥也丢了（完全失联）：只能通过 Proxmox 宿主 LXC console 进入容器修复
+# 若密钥也丢了（完全失联）：只能通过宿主 LXC console 进入容器修复
 ```
 
-### 安全流程参考（本次实施顺序，可复刻）
+### 复刻要点（新服务器加固时务必）
 1. 本地 `ssh-keygen -t ed25519 -f ~/.ssh/your_key -N ""`
 2. 上传公钥到 `/root/.ssh/authorized_keys`（**密码仍开**，保命）
 3. **新终端验证密钥 + 22 登录成功** → 才能进入下一步（关键防失联）

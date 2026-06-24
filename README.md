@@ -624,7 +624,7 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ```
 .
 ├── install.sh              # ⭐ 一键部署（交互式 + 带参数 + 卸载）
-├── AGENTS.md               # ⭐ 唯一事实来源（方案/架构/部署顺序/约束/历史 changelog）
+├── AGENTS.md               # ⭐ 唯一事实来源（方案/架构/部署顺序/约束/版本演进摘要）
 ├── README.md               # ⭐ 本文档（用户教程入口）
 ├── deploy/                 # 全部部署产物
 │   ├── README.md           #    手动部署 / 复现指南
@@ -648,7 +648,7 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 | 文档 | 内容 |
 |------|------|
 | [README.md](README.md) | **用户教程入口**：安装 / 交互 / 带参数 / 更新 / 卸载 / 故障排查 |
-| [AGENTS.md](AGENTS.md) | **唯一事实来源**：项目目标、架构、端口、证书方案、多协议配置、面板设计、部署顺序、风险回滚、约束原则、版本历史 changelog |
+| [AGENTS.md](AGENTS.md) | **唯一事实来源**：项目目标、架构、端口、证书方案、多协议配置、面板设计、部署顺序、风险回滚、约束原则、版本演进摘要 |
 | [deploy/README.md](deploy/README.md) | 手动部署 / 复现指南：文件清单、各步骤命令、配置模板、实战注意事项 |
 
 ---
