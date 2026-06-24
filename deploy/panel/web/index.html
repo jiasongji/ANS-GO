@@ -396,7 +396,7 @@ async function loadMgmt(){
   };
   // 操作行：按可用性自适应。顺序：[应用][启停][重启][装卸][检测]
   // 未安装：仅 [安装]
-  // 已安装：[应用] + [启动/停止] + [重启] + [卸载] + [检测]
+  // 已安装：[应用] + [启动/停止] + [重启] + [卸载] + [检测] + [修复]
   const opsRow=(target,enabled,active)=>{
     if(!enabled){
       return `<div class="ops-row"><button class="primary" onclick="svcInstall('${target}','install')">📥 安装</button></div>`;
@@ -404,12 +404,15 @@ async function loadMgmt(){
     const toggleBtn=active==='active'
       ?`<button onclick="svc('${target}','stop')">⏹ 停止</button>`
       :`<button class="primary" onclick="svc('${target}','start')">▶️ 启动</button>`;
+    // v1.5.24：修复配置按钮——target 映射到 carrier（naive→caddy，其余→sing-box）
+    const carrier=target==='naive'?'caddy':'sing-box';
     return `<div class="ops-row">
       <button class="primary" onclick="svcSave('${target}')">💾 应用</button>
       ${toggleBtn}
       <button class="ok" onclick="svc('${target}','restart')">🔄 重启</button>
       <button class="danger" onclick="svcInstall('${target}','uninstall')">📤 卸载</button>
       <button class="mut" onclick="checkHealth('${target}',this)">🔍 检测</button>
+      <button class="mut" onclick="repairSvc('${carrier}',this)" title="从 secrets.env 重新生成配置并重启（修复凭证不同步）">🔧 修复</button>
     </div>
     <div id="health-${target}" style="margin-top:6px"></div>`;
   };
@@ -484,7 +487,7 @@ async function svcInstall(name,act){
   toast(`正在${verb}…`);
   const j=await api('api/svc-install',{method:'POST',body:JSON.stringify({service:name,action:act})});
   if(j.ok){toast(`${verb}完成`);setTimeout(reloadCurrentTab,500)}
-  else toast(j.error||'操作失败');
+  else toast((act==='install'?'安装失败: ':'操作失败: ')+(j.error||'未知')+(j.hint?'（'+j.hint+'）':''));
 }
 // 刷新当前激活 tab（svcInstall/setPort/saveKey/regen 完成后无差别刷新）
 function reloadCurrentTab(){
@@ -667,9 +670,36 @@ async function svcSave(target){
   }
   else{toast('不支持的目标');return}
   const kr=await api('api/key',{method:'POST',body:JSON.stringify(body)});
-  if(kr.error){toast('密钥保存失败: '+kr.error);return}
-  toast('已保存，服务正在重启');
+  if(kr.error){
+    // v1.5.24：keyHandler 现在同步验证 caddy active，失败时返回详细诊断
+    toast('保存失败: '+kr.error+(kr.hint?'（'+kr.hint+'）':''));
+    return;
+  }
+  toast('已保存，服务已重启并验证运行');
   setTimeout(reloadCurrentTab,800);
+}
+
+// v1.5.24：一键修复代理配置——从 secrets.env 重新生成配置 + 重启 + 验证 active。
+// 解决「反代正常但代理不能用」：通常是 secrets.env 与 Caddyfile 不同步（旧版
+// 异步写 secrets 再 genconf 中途失败留下不一致），配合 NaiveProxy probe_resistance
+// 认证失败静默走伪装，极具迷惑性。修复按钮强制同步 secrets↔配置。
+async function repairSvc(target,btn){
+  const lbl={caddy:'Caddy(NaiveProxy)',sing_box:'sing-box(AnyTLS/SS/SOCKS5)'}[target]||target;
+  if(!confirm(`🔧 修复 ${lbl} 配置？\n\n将从 secrets.env 重新生成配置并重启服务（现有连接断开）。\n适用于「检测正常但代理不能用」的凭证不同步问题。`))return;
+  const old=btn?btn.textContent:'';
+  if(btn){btn.textContent='⏳ 修复中…';btn.disabled=true}
+  toast('正在修复（重新生成配置+重启+验证，约 2-5 秒）…');
+  try{
+    const j=await api('api/repair',{method:'POST',body:JSON.stringify({target})});
+    if(j.ok){
+      toast('✓ '+lbl+' 配置已修复并验证 active，请用节点信息页最新凭证配置客户端');
+      setTimeout(reloadCurrentTab,1000);
+    }else{
+      const r=(j.results&&(j.results[target]||j.results[target.split('_')[0]]))||{};
+      toast('修复失败: '+(r.error||j.error||'未知错误')+'（查看 journalctl 日志）');
+    }
+  }catch(e){toast('修复异常: '+e.message)}
+  if(btn){btn.textContent=old;btn.disabled=false}
 }
 
 // 落地服务（v1.5.12 合并页：原「第二组服务」+「出口落地」）

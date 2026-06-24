@@ -103,6 +103,8 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		requireAuth(svcInstallHandler)(w, r)
 	case rel == "api/health":
 		requireAuth(healthHandler)(w, r)
+	case rel == "api/repair":
+		requireAuth(repairHandler)(w, r)
 	case rel == "api/logs":
 		requireAuth(logsHandler)(w, r)
 	default:
@@ -461,6 +463,39 @@ func applyProto(c Config, confTarget string) error {
 	return nil
 }
 
+// genconfRestartVerify 同步执行：genconf → systemctl restart → 验证服务 active。
+// v1.5.24：替代旧的「异步 go func + 忽略错误」模式。任一步失败立即返回错误，
+// 调用方据此回滚 secrets.env / 报错给用户，避免「secrets 已改但 Caddyfile 未跟上 /
+// caddy 重启失败」导致的不一致（NaiveProxy probe_resistance 会让这种不一致表现为
+// 「反代正常但代理不能用」——极具迷惑性）。
+// confTarget: "caddy" | "sing-box"。返回 (active状态, 错误)。
+func genconfRestartVerify(confTarget string) (active string, err error) {
+	svc := confTarget
+	if confTarget == "caddy" {
+		svc = "caddy"
+	}
+	out, gerr := exec.Command(binGenConf, confTarget).CombinedOutput()
+	if gerr != nil {
+		// genconf 失败时它内部已回滚 Caddyfile，服务继续用旧配置——不重启。
+		return "", fmt.Errorf("生成配置失败（已回滚旧配置，服务未重启）: %s", strings.TrimSpace(string(out)))
+	}
+	if rerr := exec.Command("systemctl", "restart", svc).Run(); rerr != nil {
+		return "", fmt.Errorf("重启 %s 失败: %w", svc, rerr)
+	}
+	// 验证：等待最多 4 秒确认服务真的 active（非 deactivating/failed）。
+	// caddy/sing-box 启动很快，1-2 秒内应 active；给 4 秒余量。
+	for i := 0; i < 8; i++ {
+		st := svcActive(svc)
+		if st == "active" {
+			return "active", nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	final := svcActive(svc)
+	return final, fmt.Errorf("%s 重启后未进入 active（当前 %s），可能配置错误或端口冲突；查看 journalctl -u %s", svc, final, svc)
+}
+
+
 // ===================== 密钥管理（委托 ansgo-admin）=====================
 
 func regenHandler(w http.ResponseWriter, r *http.Request) {
@@ -650,15 +685,22 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 400, "target 必须为 ss/anytls/socks/naive/anytls2")
 		return
 	}
-	// v1.5.23：genconf 失败（如 Caddyfile 校验未过）时不重启服务——
-	// genconf 内部已回滚旧配置，服务继续用旧配置运行，避免无谓中断。
-	go func() {
-		if err := exec.Command(binGenConf, confTarget).Run(); err != nil {
-			log.Printf("keyHandler: genconf %s 失败（%v），跳过重启 %s（旧配置已回滚保留）", confTarget, err, confTarget)
-			return
-		}
-		_ = exec.Command("systemctl", "restart", confTarget).Run()
-	}()
+	// v1.5.24：改为同步 genconf + restart + 验证 active（替代旧的 fire-and-forget）。
+	// 旧版异步执行且忽略错误，caddy 重启失败（deactivating）或 genconf 失败时
+	// 用户仍收到 {ok:true}，导致 secrets.env 已改但 Caddyfile 没跟上 → 不一致。
+	// NaiveProxy 的 probe_resistance 会让这种不一致极具迷惑性：
+	// 「反代网站能打开（伪装生效）但代理不能用（凭证不匹配静默走伪装）」。
+	// 现在同步执行并返回真实结果，失败时给出明确诊断。
+	if active, err := genconfRestartVerify(confTarget); err != nil {
+		log.Printf("keyHandler: 应用 %s 配置失败: %v（active=%s）", confTarget, err, active)
+		jwrite(w, 500, map[string]any{
+			"ok":     false,
+			"error":  err.Error(),
+			"hint":   "凭证已保存到 secrets.env 但服务未能正常重启应用新配置。请检查 journalctl -u " + confTarget + " 的错误日志。",
+			"uris":   buildURIs(configGet(), readSecrets()),
+		})
+		return
+	}
 	c := configGet()
 	sec := readSecrets()
 	jwrite(w, 200, map[string]any{"ok": true, "uris": buildURIs(c, sec)})
@@ -1068,6 +1110,49 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		summary = "端口监听但 TCP 握手失败（防火墙或服务异常）"
 	}
 	jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "unit": info.unit, "enabled": info.enabled, "active": active, "port": info.port, "port_listening": portListening, "tcp_connect": tcpConnect, "tcp_ms": tcpMs, "summary": summary})
+}
+
+// repairHandler 一键修复代理服务配置（v1.5.24）。
+// 解决场景：NaiveProxy「反代正常但代理不能用」——通常因 secrets.env 与 Caddyfile
+// 不同步（旧版 keyHandler 异步写 secrets 再 genconf，中途失败留下不一致）+
+// probe_resistance 认证失败静默走伪装，极具迷惑性。
+// 动作：重新从 secrets.env 生成对应服务配置（caddy/sing-box/all）+ 重启 + 验证 active。
+// POST {target: caddy|sing-box|all}  默认 all。
+func repairHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	var b struct{ Target string }
+	json.NewDecoder(r.Body).Decode(&b)
+	target := strings.TrimSpace(b.Target)
+	if target == "" {
+		target = "all"
+	}
+	if target != "caddy" && target != "sing-box" && target != "all" {
+		jerr(w, 400, "target 必须为 caddy|sing-box|all")
+		return
+	}
+	results := map[string]any{}
+	anyErr := false
+	targets := []string{target}
+	if target == "all" {
+		targets = []string{"caddy", "sing-box"}
+	}
+	for _, t := range targets {
+		active, err := genconfRestartVerify(t)
+		if err != nil {
+			anyErr = true
+			results[t] = map[string]any{"ok": false, "active": active, "error": err.Error()}
+		} else {
+			results[t] = map[string]any{"ok": true, "active": active}
+		}
+	}
+	if anyErr {
+		jwrite(w, 500, map[string]any{"ok": false, "results": results, "hint": "部分服务修复失败，查看上方 error。可 SSH 执行 ansgo-admin restart all 兜底。"})
+		return
+	}
+	jwrite(w, 200, map[string]any{"ok": true, "results": results, "msg": "配置已从 secrets.env 重新生成并重启验证，secrets↔配置已同步。请用节点信息页的最新凭证配置客户端。"})
 }
 
 // ===================== 辅助 =====================
@@ -1561,6 +1646,25 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 	if b.Action == "install" || needProc {
 		_ = exec.Command("systemctl", "enable", procName).Run()
 		_ = exec.Command("systemctl", "restart", procName).Run()
+		// v1.5.24：验证服务真的 active（旧版无脑返回 ok，caddy deactivating 时
+		// 用户以为装好了实际没跑起来）。等待最多 4 秒确认状态。
+		st := ""
+		for i := 0; i < 8; i++ {
+			st = svcActive(procName)
+			if st == "active" {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if st != "active" {
+			jwrite(w, 500, map[string]any{
+				"ok":      false,
+				"service": b.Service,
+				"error":   fmt.Sprintf("%s 安装后未进入 active（当前状态 %s），可能配置错误或端口冲突", procName, st),
+				"hint":    "查看日志：journalctl -u " + procName + " -n 30。常见原因：NaiveProxy 凭证含特殊字符、端口冲突、证书路径错误。",
+			})
+			return
+		}
 	} else {
 		_ = exec.Command("systemctl", "stop", procName).Run()
 		_ = exec.Command("systemctl", "disable", procName).Run()

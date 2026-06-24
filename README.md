@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.23-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.24-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -557,7 +557,14 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ## ✨ 特性
 
-### v1.5.23 修复 NaiveProxy 改密码/重装后无法运行 ⭐
+### v1.5.24 修复 NaiveProxy「反代正常但代理不能用」+ 一键修复按钮 ⭐
+
+- **【修复】NaiveProxy 凭证应用改为同步验证（根治 deactivating + 代理失效）**：旧版 `keyHandler` 改 NaiveProxy 凭证时是 **异步 fire-and-forget**（`go func { genconf; systemctl restart }` 且忽略错误）→ 任一步失败仍返回 `{ok:true}`，导致 **secrets.env 已改但 Caddyfile 没跟上 / caddy 重启失败进入 deactivating**。加上 NaiveProxy 的 `probe_resistance` 认证失败会**静默走伪装**（反代照常打开），用户表现为「反代正常但代理不能用」，极具迷惑性。修复：改为**同步** `genconf → restart → 等待验证 caddy 真的 active`（非 deactivating），失败立即返回错误诊断不再掩盖
+- **【新增】「🔧 修复」按钮**（每张服务卡操作行）：一键从 secrets.env 重新生成配置 + 重启 + 验证 active，强制同步 `secrets.env↔Caddyfile`，专治凭证不同步导致的「代理不能用」
+- **【修复】服务安装/卸载后验证 active**：`svcInstallHandler` 安装后等待最多 4 秒确认服务真的 active，失败报错（旧版无脑返回 ok，caddy deactivating 时用户以为装好了实际没跑）
+- 详见 [v1.5.24 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.24)
+
+### v1.5.23 修复 NaiveProxy 凭证破坏 Caddyfile 语法 ⭐
 
 - **【修复】NaiveProxy「无法运行」根治（三层防御）**：NaiveProxy 用户名/密码写入 Caddyfile 的 `basic_auth` 指令，**含空格/制表符/换行/花括号 `{}` 的密码会破坏 Caddyfile 语法** → caddy 重启失败 → Naive 无法运行（用户表现为「改密码或重装后 Naive 就挂了」，而 AnyTLS/SS 走 sing-box 不受影响）。修复三层防御：① 前端 `svcSave` 拦截非法字符并 toast 提示 ② 后端 `keyHandler` 校验拒绝（与 SOCKS5 一致）③ **`ansgo-genconf` 生成 Caddyfile 后用 `caddy validate` 预检，失败则回滚旧配置不重启**（终极兜底，永不把坏配置喂给 caddy）
 - **【健壮】`keyHandler` 生成配置失败时不重启服务**：`genconf` 失败（如校验未过）时跳过 `systemctl restart`，服务继续用旧配置运行，避免无谓中断
