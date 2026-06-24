@@ -11,7 +11,7 @@
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
-> | **v1.5.19** | 面板 UI 细节优化：①NaiveProxy 节点信息补 SNI 域名 + 密码字段（nodeHandler 缺字段致前端 row 不渲染）②二维码改为点击服务名旁「📱 二维码」按钮浮动展示，点空白关闭（默认不再占版面）③全局服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5（节点页/服务管理/仪表盘三处）④面板设置页 --no-caddy 模式（caddy_enable=false）时隐藏「直访伪装(:443)」（该站点由 nginx 等接管，caddy 不再生成） | 后端返回字段必须与前端模板变量名一一对应（前端取 `n.password`，后端只传 `pass` 则不渲染）；UI 条件渲染须后端先暴露开关字段（settings GET 补 `caddy_enable`/`cert_mode`，前端据此决定显隐）；二维码浮动用 overlay 复用，点空白关闭靠 `e.target===overlay` 判断 |
+> | **v1.5.19** | 面板 UI 细节优化 + Docker 升级根治：①NaiveProxy 节点信息补 SNI 域名 + 密码字段（nodeHandler 缺字段致前端 row 不渲染）②二维码改为点击服务名旁「📱 二维码」按钮浮动展示，点空白关闭（默认不再占版面）③全局服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5（节点页/服务管理/仪表盘三处）④面板设置页 --no-caddy 模式时隐藏「直访伪装(:443)」⑤Docker 升级「没变化」三根因根治（upgrade.sh 加 `--force-recreate` + entrypoint 补 server_ip 字段 + 版本验证升级为 err）⑥upgrade.sh 升级完成段 echo 改 printf 修颜色码 `\033` 乱码 | 后端返回字段必须与前端模板变量名一一对应（前端取 `n.password`，后端只传 `pass` 则不渲染）；UI 条件渲染须后端先暴露开关字段；二维码浮动用 overlay 复用，点空白关闭靠 `e.target===overlay`；**Docker `compose up -d` 在镜像 digest 未变时会跳过 recreate → entrypoint 不重跑 → 旧二进制继续运行**，升级必须 `--force-recreate`；**bash 的 `echo` 默认不解释 `\033` 转义**（输出字面 `\033[36m` 乱码），含颜色码的输出必须用 `printf '%b'` |
 > | **v1.5.18** | 面板 UI 优化四项 + VPC 公网 IP 修正：①节点信息「连接地址」显示服务器 IP（Go 端 UDP 探测公网出口，进程级缓存，失败回退域名）②删「服务控制」菜单，服务管理成唯一总操作页 ③🎲 随机按钮移到每个输入框右侧（纯前端 crypto.getRandomValues，不自动保存）④每张服务卡操作按钮集中一行自适应 `[应用][启停][重启][装卸][检测]` + VPC 修正：公网 IP 三层优先级（手动填写 > 公网探测 > 域名），内网 IP 自动丢弃 + 引导提示 + 主动检测按钮 | UDP 探测公网 IP 在 VPC/NAT 下只能拿内网网卡（公网 IP 在 NAT 网关做 SNAT 本机无从得知），必须 `isPrivateIP()` 过滤 RFC1918/CGNAT 后回退域名；主动调第三方 API（ipify 等）必须用户点击触发不在启动时自动外发；合并操作行时端口「应用」整合进 `svcSave`（串行调 portHandler+keyHandler，零新增端点）；前端随机必须 crypto.getRandomValues 且不自动保存 |
 > | **v1.5.17** | Docker manual 证书模式四根因根治：证书页误显示 acme / capability 收窄致读不了宿主证书目录 / 版本号 `vv` 双 v / 容器重建后代理不自动恢复 | systemd `CapabilityBoundingSet` 收窄后 root 不再隐式绕过 DAC；容器重建 ≠ 重启（systemd 状态归零，entrypoint 须幂等重建）；证书路径走卷内 644 副本不依赖宿主原文件 |
 > | **v1.5.16** | 新增 SOCKS5（强制鉴权）+ 自定义网页标题 + NaiveProxy 落地简化（移除 naive-2，落地仅 AnyTLS-2→SS） | caddy 与 sing-box 是两个独立进程，跨进程路由物理上不可行；SOCKS5 公网部署必须强制鉴权 |
@@ -394,6 +394,8 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 - **主动检测公网 IP 必须用户点击触发**（v1.5.18）：`/api/detect-public-ip` 调用第三方 echo 服务（ipify/ifconfig/icanhazip 三选一兜底），**仅当用户在面板设置页点「🔍 自动检测」按钮才外发一次**（不在启动时自动外发，避免每次启动把"这台机器存在"告知第三方）。检测结果填入输入框供用户确认后保存，不直接写配置。这与 §13「禁用真实第三方域名作为 disguise 默认值」不冲突——后者限制的是 caddy 反代目标硬编码默认值，这里是用户主动触发的运行时调用。
 - **Mac 本机无 Go 时的交叉编译**（v1.5.18）：用 `docker run --rm -v "$PWD":/src -w /src -e GOPROXY=https://goproxy.cn,direct -e HTTP_PROXY= -e HTTPS_PROXY= ... golang:1.26-alpine` 编译。**必须清空 `-e HTTP_PROXY=` 等环境变量**（orbstack/docker daemon 默认透传代理到容器内 `127.0.0.1:1666`，容器内访问不到会 `connection refused`）。go.mod 的 `go 1.26.4` 要求镜像版本 ≥ `golang:1.26`。
 - **合并操作按钮时优先复用现有 API 端点**（v1.5.18）：把端口「应用」+ 密钥「保存」整合成单个「💾 应用」按钮时，前端 `svcSave()` 串行调既有 `portHandler`+`keyHandler` 即可，**不要新增 `/api/svc-save` 端点**（重复实现校验 = 扩大回归面）。校验/重启逻辑已在两个 handler 内成熟稳定。
+- **Docker 升级必须 `--force-recreate`**（v1.5.19）：`docker compose up -d` 在镜像 digest 未变（或 compose 配置哈希相同）时会**跳过 recreate**，容器不重建 → entrypoint 不重跑 → 旧二进制继续运行，表现为「拉了新镜像但没变化」。upgrade.sh docker 分支改用 `up -d --force-recreate` 强制销毁重建（volume 数据不丢）。版本号验证从不匹配升级为 err（而非 warn），并给出 `md5sum` 对比 + force-recreate 排查命令。
+- **bash `echo` 不解释 `\033`，含颜色码必须用 `printf '%b'`**（v1.5.19）：upgrade.sh 末尾「升级完成」段用 `echo "${C_B}..."` 输出颜色码，bash 的 echo 默认把 `\033[36m` 原样输出成字面文本（用户看到的"乱码"）。前面的 `log/ok/hr` 用 `printf` 所以正常。修复：所有含颜色变量的输出统一 `printf '%b%s%b\n' "$C_B" "$val" "$C_0"`，`%b` 显式要求解释反斜杠转义。**教训：脚本里输出 ANSI 颜色一律用 printf，不用 echo。**
 
 ---
 
@@ -543,7 +545,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrad
 | 形态 | 升级动作 | 备份位置 |
 |------|---------|---------|
 | **裸金属** | ① 更新 `ansgo-genconf` + `ansgo-admin` 脚本（raw 拉取）② 更新 `ansgo-panel` 二进制（release，md5 对比相同则跳过重启）③ python3 幂等补 `panel.json`（`socks_port` 随机不冲突 / `svc_socks_enabled:"false"` / `panel_title`）④ 幂等补 `secrets.env`（`SOCKS_USER`/`SOCKS_PASS`）⑤ 重启 ansgo-panel | `/etc/ansgo-backup-upgrade-{TS}/` |
-| **Docker** | `$COMPOSE pull` → `$COMPOSE up -d`（复用 volume）| compose 目录 `ansgo-etc-vol-backup-{TS}.tgz` |
+| **Docker** | `$COMPOSE pull` → `$COMPOSE up -d --force-recreate`（复用 volume；**v1.5.19 起必须 `--force-recreate`**，否则镜像 digest 未变时跳过重建 → entrypoint 不重跑 → 旧二进制继续运行）| compose 目录 `ansgo-etc-vol-backup-{TS}.tgz` |
 
 **设计约束（脚本自包含，不依赖服务器旧版 ansgo-admin，避免鸡生蛋）**：
 - `VER` 硬编码（与 install.sh 一致），发新版只改这一行 + commit

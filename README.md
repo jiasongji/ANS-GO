@@ -219,7 +219,7 @@ docker exec ansgo ansgo-admin status                    # 服务状态
 docker exec ansgo ansgo-admin info                      # 节点连接参数
 docker exec ansgo ansgo-admin panel-pass                # 重置面板密码
 docker restart ansgo                                    # 重启容器（含证书续期后）
-docker compose pull && docker compose up -d             # 升级镜像
+docker compose pull && docker compose up -d --force-recreate   # 升级镜像（v1.5.19 起必须 --force-recreate，否则镜像 digest 未变时跳过重建）
 ```
 
 <details>
@@ -557,12 +557,14 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ## ✨ 特性
 
-### v1.5.19 面板 UI 细节优化 ⭐
+### v1.5.19 面板 UI 细节优化 + Docker 升级根治 ⭐
 
-- **【修复】NaiveProxy 节点信息补全 SNI + 密码**：后端 nodeHandler 给 naive 补 `sni`（域名）和 `password` 字段（与前端 `row('密码/密钥',n.password)` 变量名对齐）；SOCKS5 同步补 `password`
+- **【修复】NaiveProxy 节点信息补全 SNI + 密码**：后端 nodeHandler 给 naive 补 `sni`（域名）和 `password` 字段，与前端 `row('密码/密钥',n.password)` 变量名对齐；SOCKS5 同步补 `password`
 - **【优化】二维码改为点击浮动展示**：节点页每张服务卡标题旁加「📱 二维码」按钮，点击弹出 overlay 浮动展示 200×200 二维码 + URI + 复制按钮，点空白处自动关闭；默认不再常驻占版面
 - **【优化】全局服务顺序统一**：节点页 / 服务管理 / 仪表盘三处均调整为 **AnyTLS → NaiveProxy → Shadowsocks → SOCKS5**（原顺序 SS/AnyTLS/SOCKS/Naive）
 - **【优化】`--no-caddy` 模式隐藏「直访伪装(:443)」**：面板设置页在该模式下显示「已禁用（:443 由现有 web 服务器接管）」，避免用户误改不生效的字段；Naive 伪装始终显示
+- **【修复】Docker 升级「没变化」三根因根治**：① upgrade.sh docker 分支加 `--force-recreate`（普通 `up -d` 在镜像 digest 未变时跳过重建 → entrypoint 不重跑 → 旧二进制继续运行）② entrypoint.sh 幂等补全 `server_ip` 字段 ③ 版本号验证从 warn 升级为 err + 给出排查命令
+- **【修复】upgrade.sh 升级完成段颜色码乱码**：末尾「升级完成」段用 `echo` 输出含 `\033` 颜色码的字符串，bash 的 echo 默认不解释反斜杠转义 → 输出字面 `\033[36m` 乱码；改用 `printf '%b'` 修复
 - 详见 [v1.5.19 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.19)
 
 ### v1.5.18 面板 UI 优化 ⭐
