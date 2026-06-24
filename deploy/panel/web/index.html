@@ -77,6 +77,12 @@
   .row{display:flex;gap:8px;align-items:center;margin-bottom:10px}
   .row label{width:120px;color:var(--mut);font-size:12px;flex-shrink:0}
   .row .f{flex:1}
+  /* 输入框行内 + 右侧 🎲 随机按钮（v1.5.18） */
+  .field-inline{display:flex;gap:6px;align-items:center}
+  .field-inline input,.field-inline select{flex:1;min-width:0}
+  .field-inline .dice{flex-shrink:0;padding:7px 10px;line-height:1}
+  /* 服务卡操作行（应用/启停/重启/装卸/检测 一行，移动端自动换行） */
+  .ops-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
   .node-card{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
   .node-card .info{flex:1;min-width:240px}
   .node-card .qr{width:150px;text-align:center}
@@ -159,7 +165,6 @@
       <nav class="nav" id="nav">
         <button data-t="dash" class="active" onclick="showTab('dash')"><span class="ico">📊</span><span class="label">仪表盘</span></button>
         <button data-t="node" onclick="showTab('node')"><span class="ico">🌐</span><span class="label">节点信息</span></button>
-        <button data-t="svc" onclick="showTab('svc')"><span class="ico">🎛️</span><span class="label">服务控制</span></button>
         <button data-t="mgmt" onclick="showTab('mgmt')"><span class="ico">🗂️</span><span class="label">服务管理</span></button>
         <button data-t="landing" onclick="showTab('landing')"><span class="ico">🛬</span><span class="label">落地服务</span></button>
         <button data-t="cert" onclick="showTab('cert')"><span class="ico">📜</span><span class="label">证书管理</span></button>
@@ -260,6 +265,7 @@ async function loadNode(){
   const j=await api('api/node');
   if(j.error)return $('#content').innerHTML=j.error;
   const domain=j.domain||'';
+  const serverIp=j.server_ip||'';  // v1.5.18：连接地址优先显示服务器 IP，回退域名
   // 单条信息行（label + 值 + 复制按钮）
   // 注意：n.port 是 number、n.host 可能是 undefined，必须 String() 强转后再 .replace，
   // 否则 (number).replace() 抛 TypeError 让整个 forEach 中断，content 卡在「加载中…」
@@ -277,7 +283,7 @@ async function loadNode(){
   const card=(title,icon,n,extra='')=>{
     if(!n||!n.uri)return '';  // 未启用/无 URI 不渲染
     return `<div class="card"><h3>${icon} ${title} ${extra}</h3>
-      ${row('连接地址',n.host||domain)}
+      ${row('连接地址',serverIp||n.host||domain)}
       ${row('端口',n.port)}
       ${row('加密方式',n.method)}
       ${row('密码/密钥',n.password)}
@@ -312,9 +318,10 @@ async function loadNode(){
   });
 }
 
-// 服务管理（合并版：安装/卸载 + 端口 + 密钥 + 启停 一站式）
+// 服务管理（v1.5.18 重构：单菜单合并「服务控制」；每个输入框右侧带 🎲；
+//   操作行一行自适应：[应用][启停][重启][装卸][检测]）
 // 一次并行拉取 dashboard（状态/端口/svc_enabled）+ node（密钥/凭证），每服务渲染一张卡片。
-// 保留所有原有字段 ID（#p_ss / #k_at_pass 等），让 svcInstall/setPort/saveKey/regen 无需改动。
+// 保留所有原有字段 ID（#p_ss / #k_at_pass 等），让 svcInstall/svc/checkHealth 无需改动。
 async function loadMgmt(){
   $('#content').innerHTML='<div class="mut">加载中…</div>';
   const [d,n]=await Promise.all([api('api/dashboard'),api('api/node')]);
@@ -333,86 +340,79 @@ async function loadMgmt(){
       ?'<span class="tag" style="background:var(--ok);color:#fff">已安装·运行中</span>'
       :'<span class="tag" style="background:var(--warn);color:#fff">已安装·未运行</span>';
   };
-  // 启停按钮组（已安装才显示）
-  const ctrlBtns=(target,active)=>{
-    return `<button class="ok" onclick="svc('${target}','restart')">重启</button> `
-      +(active==='active'
-        ?`<button onclick="svc('${target}','stop')">停止</button>`
-        :`<button class="primary" onclick="svc('${target}','start')">启动</button>`);
+  // 带右侧 🎲 的输入框行（fieldId 传给 genField）
+  const frow=(label,fieldId,val,placeholder,type='text')=>{
+    const t=type==='number'?'type="number"':'';
+    return `<div class="row"><label>${label}</label><div class="f field-inline">
+      <input id="${fieldId}" ${t} value="${val||''}" placeholder="${placeholder}">
+      <button class="mut dice" title="随机生成（不自动保存）" onclick="genField('${fieldId}')">🎲</button>
+    </div></div>`;
   };
-  // 检测按钮（已安装才显示）+ 结果容器
-  const healthBtn=(target,enabled)=>enabled
-    ?`<button class="mut" onclick="checkHealth('${target}',this)">🔍 检测</button><div id="health-${target}" style="margin-top:6px"></div>`
-    :'';
+  // 操作行：按可用性自适应。顺序：[应用][启停][重启][装卸][检测]
+  // 未安装：仅 [安装]
+  // 已安装：[应用] + [启动/停止] + [重启] + [卸载] + [检测]
+  const opsRow=(target,enabled,active)=>{
+    if(!enabled){
+      return `<div class="ops-row"><button class="primary" onclick="svcInstall('${target}','install')">📥 安装</button></div>`;
+    }
+    const toggleBtn=active==='active'
+      ?`<button onclick="svc('${target}','stop')">⏹ 停止</button>`
+      :`<button class="primary" onclick="svc('${target}','start')">▶️ 启动</button>`;
+    return `<div class="ops-row">
+      <button class="primary" onclick="svcSave('${target}')">💾 应用</button>
+      ${toggleBtn}
+      <button class="ok" onclick="svc('${target}','restart')">🔄 重启</button>
+      <button class="danger" onclick="svcInstall('${target}','uninstall')">📤 卸载</button>
+      <button class="mut" onclick="checkHealth('${target}',this)">🔍 检测</button>
+    </div>
+    <div id="health-${target}" style="margin-top:6px"></div>`;
+  };
   $('#content').innerHTML=`
    <div class="card"><h3>🗂️ 服务管理</h3>
-     <div class="help">一站式管理各代理服务：安装/卸载、端口、密钥、启停。修改端口或密钥后对应服务会自动重启（断开现有连接）。落地服务（AnyTLS-2）在「落地服务」页启用后下方显示。</div></div>
+     <div class="help">一站式管理各代理服务：安装/卸载、端口、密钥、启停。修改端口或密钥后点「应用」保存（对应服务自动重启）。🎲 仅生成不保存。落地服务（AnyTLS-2）在「落地服务」页启用后下方显示。</div></div>
 
    <div class="card">
      <h3>🔐 Shadowsocks ${statusTag(en.ss,st.ss)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_ss" type="number" value="${ports.ss||''}" placeholder="10000-65535"></div><button class="primary" onclick="setPort('ss')">应用</button></div>
+     <div class="row"><label>端口</label><div class="f"><input id="p_ss" type="number" value="${ports.ss||''}" placeholder="10000-65535"></div></div>
      <div class="row"><label>加密方式</label><div class="f"><input id="k_ss_method" value="${ss.method||'2022-blake3-aes-128-gcm'}" placeholder="2022-blake3-aes-128-gcm"></div></div>
-     <div class="row"><label>SS 密钥</label><div class="f"><input id="k_ss_key" value="${ss.password||''}" placeholder="base64(16字节)密钥"></div></div>
-     <div style="margin-top:6px">
-       ${en.ss?'<button class="danger" onclick="svcInstall(\'ss\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\'ss\',\'install\')">安装</button>'}
-       ${en.ss?ctrlBtns('ss',st.ss):''}
-       <button class="mut" onclick="regen('ss')" style="margin-left:8px">🎲 随机</button>
-       <button class="primary" onclick="saveKey('ss')">💾 保存密钥</button>
-     </div>
-     ${healthBtn('ss',en.ss)}
+     ${frow('SS 密钥','k_ss_key',ss.password,'base64(16字节)密钥')}
+     ${opsRow('ss',en.ss,st.ss)}
    </div>
 
    <div class="card">
      <h3>🛡️ AnyTLS ${statusTag(en.anytls,st.anytls)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_anytls" type="number" value="${ports.anytls||''}" placeholder="10000-65535"></div><button class="primary" onclick="setPort('anytls')">应用</button></div>
-     <div class="row"><label>AnyTLS 密码</label><div class="f"><input id="k_at_pass" value="${at.password||''}" placeholder="任意字符串"></div></div>
-     <div style="margin-top:6px">
-       ${en.anytls?'<button class="danger" onclick="svcInstall(\'anytls\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\'anytls\',\'install\')">安装</button>'}
-       ${en.anytls?ctrlBtns('anytls',st.anytls):''}
-       <button class="mut" onclick="regen('anytls')" style="margin-left:8px">🎲 随机</button>
-       <button class="primary" onclick="saveKey('anytls')">💾 保存密钥</button>
-     </div>
-     ${healthBtn('anytls',en.anytls)}
+     <div class="row"><label>端口</label><div class="f"><input id="p_anytls" type="number" value="${ports.anytls||''}" placeholder="10000-65535"></div></div>
+     ${frow('AnyTLS 密码','k_at_pass',at.password,'任意字符串')}
+     ${opsRow('anytls',en.anytls,st.anytls)}
    </div>
 
    <div class="card">
      <h3>🧦 SOCKS5 ${statusTag(en.socks,st.socks)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_socks" type="number" value="${ports.socks||''}" placeholder="10000-65535"></div><button class="primary" onclick="setPort('socks')">应用</button></div>
-     <div class="row"><label>SOCKS 用户名</label><div class="f"><input id="k_sk_user" value="${sk.user||''}" placeholder="用户名"></div></div>
-     <div class="row"><label>SOCKS 密码</label><div class="f"><input id="k_sk_pass" value="${sk.pass||''}" placeholder="密码"></div></div>
-     <div style="margin-top:6px">
-       ${en.socks?'<button class="danger" onclick="svcInstall(\'socks\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\'socks\',\'install\')">安装</button>'}
-       ${en.socks?ctrlBtns('socks',st.socks):''}
-       <button class="mut" onclick="regen('socks')" style="margin-left:8px">🎲 随机</button>
-       <button class="primary" onclick="saveKey('socks')">💾 保存密钥</button>
-     </div>
-     ${healthBtn('socks',en.socks)}
+     <div class="row"><label>端口</label><div class="f"><input id="p_socks" type="number" value="${ports.socks||''}" placeholder="10000-65535"></div></div>
+     ${frow('SOCKS 用户名','k_sk_user',sk.user,'用户名')}
+     ${frow('SOCKS 密码','k_sk_pass',sk.pass,'密码')}
+     ${opsRow('socks',en.socks,st.socks)}
    </div>
 
    <div class="card">
      <h3>🌀 NaiveProxy ${statusTag(en.naive,st.naive)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_naive" type="number" value="${ports.naive||''}" placeholder="10000-65535"></div><button class="primary" onclick="setPort('naive')">应用</button></div>
-     <div class="row"><label>Naive 用户名</label><div class="f"><input id="k_nv_user" value="${nv.user||''}" placeholder="用户名"></div></div>
-     <div class="row"><label>Naive 密码</label><div class="f"><input id="k_nv_pass" value="${nv.pass||''}" placeholder="密码"></div></div>
-     <div style="margin-top:6px">
-       ${en.naive?'<button class="danger" onclick="svcInstall(\'naive\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\'naive\',\'install\')">安装</button>'}
-       ${en.naive?ctrlBtns('naive',st.naive):''}
-       <button class="mut" onclick="regen('naive')" style="margin-left:8px">🎲 随机</button>
-       <button class="primary" onclick="saveKey('naive')">💾 保存密钥</button>
-     </div>
-     ${healthBtn('naive',en.naive)}
+     <div class="row"><label>端口</label><div class="f"><input id="p_naive" type="number" value="${ports.naive||''}" placeholder="10000-65535"></div></div>
+     ${frow('Naive 用户名','k_nv_user',nv.user,'用户名')}
+     ${frow('Naive 密码','k_nv_pass',nv.pass,'密码')}
+     ${opsRow('naive',en.naive,st.naive)}
    </div>
 
    ${g2?`
    <div class="card">
      <h3>🔀 AnyTLS-2 <span class="tag" style="background:var(--ok);color:#fff">出口经 SS 落地</span></h3>
-     <div class="row"><label>AnyTLS-2 密码</label><div class="f"><input id="k_at2_pass" value="${at2.password||''}" placeholder="任意字符串"></div></div>
-     <div style="margin-top:6px">
-       <button class="mut" onclick="regen('g2')">🎲 随机全部第2组</button>
+     ${frow('AnyTLS-2 密码','k_at2_pass',at2.password,'任意字符串')}
+     <div class="ops-row">
        <button class="primary" onclick="saveKey('anytls2')">💾 保存</button>
-       <span class="mut" style="font-size:12px;margin-left:8px">端口在「落地服务」页配置</span>
+       <button class="mut" onclick="genField('k_at2_pass')">🎲 随机</button>
+       <button class="mut" onclick="checkHealth('anytls2',this)">🔍 检测</button>
+       <span class="mut" style="font-size:12px">端口在「落地服务」页配置</span>
      </div>
-     ${healthBtn('anytls2',true)}
+     <div id="health-anytls2" style="margin-top:6px"></div>
    </div>
    `:''}
 
@@ -421,7 +421,10 @@ async function loadMgmt(){
      <h3>⚙️ 管理面板 <span class="tag" style="background:${st.panel==='active'?'var(--ok)':'var(--err)'};color:#fff">${st.panel==='active'?'运行中':'未运行'}</span></h3>
      <div class="row"><label>面板端口</label><div class="f"><input id="p_panel" type="number" value="${ports.panel||''}" placeholder="10000-65535"></div><button class="danger" onclick="setPort('panel')">应用并重启</button></div>
      <div class="help" style="margin-top:8px">⚠️ 改面板端口会让当前会话断开，需用 <code>https://${d.domain}:${ports.panel}<URL路径>/</code> 新地址重新登录。</div>
-     ${healthBtn('panel',true)}
+     <div class="ops-row">
+       <button class="mut" onclick="checkHealth('panel',this)">🔍 检测</button>
+    </div>
+    <div id="health-panel" style="margin-top:6px"></div>
    </div>`;
 }
 
@@ -570,6 +573,64 @@ async function saveKey(t){
   const j=await api('api/key',{method:'POST',body:JSON.stringify(body)});
   if(j.ok){toast('密钥已保存，服务正在重启');reloadCurrentTab()}
   else toast(j.error||'保存失败');
+}
+// ---- v1.5.18 新增：前端随机生成（不保存）+ svcSave（一次保存端口+密钥）----
+// base64(n 字节)，与 openssl rand -base64 n 等价（SS2022 密钥格式）
+function randB64Bytes(n){
+  const b=new Uint8Array(n);
+  crypto.getRandomValues(b);
+  let s='';for(let i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);
+  return btoa(s);
+}
+// 可读随机串：默认大小写字母+数字，可传 alphabet 限定字符集
+function randStr(len,alphabet){
+  const A=alphabet||'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const b=new Uint8Array(len);crypto.getRandomValues(b);
+  let s='';for(let i=0;i<len;i++)s+=A[b[i]%A.length];
+  return s;
+}
+// 按 input id 在前端生成并回填（不保存，需用户点「应用」）
+function genField(id){
+  let v='';
+  switch(id){
+    case 'k_ss_key':    v=randB64Bytes(16);break;                                  // base64(16) SS2022
+    case 'k_at_pass':                                                    // AnyTLS 密码
+    case 'k_at2_pass':   v=randStr(20);break;                                       // 20 位混合
+    case 'k_sk_pass':
+    case 'k_nv_pass':    v=randStr(18);break;                                       // 18 位混合
+    case 'k_sk_user':
+    case 'k_nv_user':    v=randStr(8,'abcdefghijklmnopqrstuvwxyz0123456789');break;  // 8 位小写
+    default: return;  // 加密方式等不随机
+  }
+  const el=document.getElementById(id);
+  if(el){el.value=v;el.focus();toast('已生成，需点「应用」保存')}
+}
+// 保存全部：串行调 portHandler（端口 + 冲突校验 + 重启）+ keyHandler（密钥 + 长度校验 + 异步重启）
+// 面板端口（panel）特殊，不走此函数（会断会话，走 setPort + overlay）
+async function svcSave(target){
+  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy'}[target]||target;
+  if(!confirm(`⚠️ 确认保存 ${lbl} 的全部改动？\n\n端口与密钥将一起更新，对应服务会重启，现有连接断开。`))return;
+  toast('正在保存…');
+  // 1) 端口（仅在用户实际改动了端口输入框时才发端口请求）
+  const portEl=document.getElementById('p_'+target);
+  if(portEl){
+    const v=parseInt(portEl.value);
+    if(v && v>=1 && v<=65535){
+      const pr=await api('api/port',{method:'POST',body:JSON.stringify({target,port:v})});
+      if(pr.error){toast('端口保存失败: '+pr.error);return}
+    }
+  }
+  // 2) 密钥/凭证（按 target 拼 body）
+  let body={target};
+  if(target==='ss'){body.method=$('#k_ss_method').value;body.key=$('#k_ss_key').value}
+  else if(target==='anytls'){body.pass=$('#k_at_pass').value}
+  else if(target==='socks'){body.user=$('#k_sk_user').value;body.pass=$('#k_sk_pass').value}
+  else if(target==='naive'){body.user=$('#k_nv_user').value;body.pass=$('#k_nv_pass').value}
+  else{toast('不支持的目标');return}
+  const kr=await api('api/key',{method:'POST',body:JSON.stringify(body)});
+  if(kr.error){toast('密钥保存失败: '+kr.error);return}
+  toast('已保存，服务正在重启');
+  setTimeout(reloadCurrentTab,800);
 }
 
 // 落地服务（v1.5.12 合并页：原「第二组服务」+「出口落地」）

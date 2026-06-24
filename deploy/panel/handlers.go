@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "embed"
@@ -211,12 +212,40 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 
 // ===================== 节点信息 =====================
 
+// 服务器公网出口 IP 探测（进程级缓存，一次性）。
+// 用 UDP "连接" 8.8.8.8:80 触发内核路由表选出口地址，不真正发包；
+// 容器/主机运行期 IP 固定，故 sync.Once 缓存。探测失败返回 ""（前端回退域名）。
+// 不调任何第三方公网 API（避免外发 + 符合 §13 隐私偏好）。
+var (
+	serverIPCache  string
+	serverIPOnce_  sync.Once
+)
+
+func cachedServerIP() string {
+	serverIPOnce_.Do(func() {
+		conn, err := net.Dial("udp", "8.8.8.8:80")
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+			ip := a.IP.String()
+			// 过滤回环 / 链路本地，保留公网或私网均可（用户据此复制连接）
+			if ip != "" && !strings.HasPrefix(ip, "127.") && !strings.HasPrefix(ip, "169.254.") {
+				serverIPCache = ip
+			}
+		}
+	})
+	return serverIPCache
+}
+
 func nodeHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	sec := readSecrets()
 	uris := buildURIs(c, sec)
 	resp := map[string]any{
 		"domain":         c.Domain,
+		"server_ip":      cachedServerIP(),
 		"ss":             map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": sec.SSKey, "enabled": c.SvcSSEnabled == "true", "host": c.Domain},
 		"anytls":         map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": sec.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": c.Domain},
 		"socks":          map[string]any{"uri": uris["socks"], "port": c.SocksPort, "user": sec.SocksUser, "pass": sec.SocksPass, "enabled": c.SvcSocksEnabled == "true", "host": c.Domain},
