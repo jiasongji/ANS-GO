@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.21-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.22-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -557,11 +557,18 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ## ✨ 特性
 
-### v1.5.21 修复面板设置保存无反应 ⭐
+### v1.5.22 修复面板设置保存无反应 + 侧栏版本号 ⭐
 
-- **【修复】面板设置「保存无反应」根治**：前端 `saveSet()` 每次都把当前 `url_path` 原样回传给后端，而 `settingsHandler` 只要 POST 体里出现 `url_path` 就置 `needRestart=true`（无条件重启）——导致**只改网页标题或服务器 IP 也会触发面板重启**。重启覆盖层闪现 + 重定向到正在重启的面板（连接被拒），用户表现为「点保存无反应 / 刷新后状态异常」。修复：改为仅在 `url_path` 真正变化时才重启（与 `panel_port` 的 `!= 守卫` 一致），未变化时返回 `{ok:true}` 前端正常 toast「设置已保存」。
-- **【健壮】`confPath`/`secretsPath` 由常量改为变量**：便于单元测试覆盖路径（生产运行时值不变，零行为影响），新增 `TestSettingsSave_UntouchedFieldsDoNotRestart` / `TestSettingsSave_UrlPathChangeStillRestarts` 回归测试
-- 详见 [v1.5.21 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.21)
+- **【修复】面板设置「保存无反应」根治**：前端 `saveSet()` 每次都把当前 `url_path` 原样回传给后端，而 `settingsHandler` 只要 POST 体里出现 `url_path` 就置 `needRestart=true`（无条件重启）——导致**只改网页标题或服务器 IP 也会触发面板重启**。重启覆盖层闪现 + 重定向到正在重启的面板（连接被拒），用户表现为「点保存无反应 / 刷新后状态异常」。修复：改为仅在 `url_path` 真正变化时才重启（与 `panel_port` 的 `!= 守卫` 一致），未变化时返回 `{ok:true}` 前端正常 toast「设置已保存」
+- **【新增】侧栏底部常驻版本号**：左侧导航栏底部显示 `ANS-GO v1.5.22`（后端 `api/auth` 返回 `version` 字段，前端 `checkAuth` 渲染），用户升级后一眼可核实是否生效；折叠态自适应为居中小字
+- **【健壮】`saveSet()` 防御 `--no-caddy` 模式**：该模式下 `disguise_panel` 输入框不渲染，旧 `g()` 读取会抛 `TypeError` 中断整个保存；改为缺失元素返回空串
+- **【测试】新增 Go 集成测试** `TestAuthExposesVersion` + 前端 DOM 测试（jsdom 验证 `checkAuth` 渲染版本号 / `saveSet` 在 `--no-caddy` 下不抛异常）
+- 详见 [v1.5.22 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.22)
+
+### v1.5.21 修复面板设置保存无反应（源码修复，未单独发版，合入 v1.5.22）
+
+- 同 v1.5.22 第一条（url_path 无条件触发重启的修复）。v1.5.21 仅提交了源码未发布 release 资产/镜像，导致 `upgrade.sh` 拉不到新二进制；v1.5.22 补齐发布。
+- 详见 [v1.5.21 commit](https://github.com/jiasongji/ANS-GO/commit/72fb817)
 
 ### v1.5.20 仪表盘精简 + AnyTLS-2 管理集中 ⭐
 

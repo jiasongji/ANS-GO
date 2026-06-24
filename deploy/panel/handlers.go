@@ -114,10 +114,11 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 func authCheckHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	if cookie, err := r.Cookie("bv_sess"); err == nil && sessionValid(cookie.Value) {
-		jwrite(w, 200, map[string]any{"authed": true, "user": c.AdminUser})
+		// version 暴露给前端侧栏底部显示（v1.5.22），方便用户核实升级是否生效
+		jwrite(w, 200, map[string]any{"authed": true, "user": c.AdminUser, "version": version})
 		return
 	}
-	jwrite(w, 200, map[string]any{"authed": false})
+	jwrite(w, 200, map[string]any{"authed": false, "version": version})
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {

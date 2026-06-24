@@ -99,6 +99,31 @@ func postSettings(t *testing.T, srv *httptest.Server, cookie string, body map[st
 	return
 }
 
+// TestAuthExposesVersion verifies the auth endpoint returns the panel version
+// so the frontend sidebar footer can display it (v1.5.22 feature: lets users
+// confirm whether an upgrade actually took effect on the server).
+func TestAuthExposesVersion(t *testing.T) {
+	srv, _ := setupPanel(t)
+	defer srv.Close()
+	defer db.Close()
+
+	resp, err := http.Get(srv.URL + "/admin/api/auth")
+	if err != nil {
+		t.Fatalf("GET auth: %v", err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	var got map[string]any
+	json.Unmarshal(out, &got)
+	if got["version"] == nil {
+		t.Fatalf("auth response missing version field: %s", string(out))
+	}
+	if got["version"] != version {
+		t.Errorf("auth version = %v, want %q", got["version"], version)
+	}
+	t.Logf("auth returned version=%v (frontend will show v%v in sidebar)", got["version"], got["version"])
+}
+
 // TestSettingsSave_UntouchedFieldsDoNotRestart is the regression test for the bug:
 // "Docker deploy, fill in panel title + custom IP, click save → no reaction / reverts".
 //

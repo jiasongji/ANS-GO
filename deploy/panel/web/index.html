@@ -53,6 +53,11 @@
   .nav button.active{background:var(--acc);color:#fff}
   .nav button.active:hover{background:var(--acc);color:#fff;opacity:.92}
   .sidebar.collapsed .nav button{justify-content:center;padding:9px 0}
+  /* v1.5.22: 侧栏底部版本号（常驻可见，方便核实升级是否生效） */
+  .side-footer{padding:8px 14px 2px;color:var(--mut);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-top:1px solid var(--bd);margin-top:4px}
+  .side-footer #verTag{font-weight:600;color:var(--acc)}
+  .sidebar.collapsed .side-footer{padding:8px 0 2px;text-align:center;font-size:9px}
+  .sidebar.collapsed .side-footer #verTag{display:block}
   .sidebar.collapsed .nav button .label,.sidebar.collapsed .collapse-btn .lbl{display:none}
   .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:25}
   .content{flex:1;padding:18px;overflow:auto;max-width:1100px;margin:0 auto;width:100%}
@@ -173,6 +178,7 @@
         <button data-t="set" onclick="showTab('set')"><span class="ico">⚙️</span><span class="label">面板设置</span></button>
         <button data-t="log" onclick="showTab('log')"><span class="ico">📃</span><span class="label">日志</span></button>
       </nav>
+      <div class="side-footer" id="sideFooter">ANS-GO <span id="verTag">v-</span></div>
     </aside>
     <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
     <main class="content" id="content"></main>
@@ -193,6 +199,8 @@ function copy(t){navigator.clipboard.writeText(t).then(()=>toast('已复制到�
 function dot(s){const c=s==='active'?'on':(s==='inactive'||s==='failed')?'off':'unk';return `<span class="dot ${c}"></span>${s}`}
 async function checkAuth(){
   const j=await api('api/auth');
+  // v1.5.22: 侧栏底部显示面板版本号（来自后端 -ldflags 注入），方便核实升级是否生效
+  if(j.version){const vt=$('#verTag');if(vt)vt.textContent='v'+j.version}
   if(j.authed){$('#topuser').textContent='👤 '+j.user;showApp();showTab('dash');refreshPanelDot()}
   else{$('#login').style.display='flex';$('#app').style.display='none';$('#lu').focus()}
 }
@@ -831,7 +839,9 @@ async function detectPublicIP(btn){
   btn.textContent=old;btn.disabled=false;
 }
 async function saveSet(){
-  const g=id=>$('#s_'+id).value;
+  // v1.5.22: g() 防御元素缺失（如 --no-caddy 模式下 s_disguise_panel 不渲染），
+  // 返回空串而非抛 TypeError 中断整个保存（旧版会在该场景下「点保存无反应」）。
+  const g=id=>{const e=$('#s_'+id);return e?e.value:''};
   const body={panel_title:g('panel_title'),url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive'),server_ip:g('server_ip')};
   if(g('admin_pass'))body.admin_pass=g('admin_pass');
   // 只传发生变化的字段由后端处理；这里全传，后端按指针判断（空串/0 会触发改动）

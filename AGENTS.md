@@ -5,12 +5,14 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前版本：v1.5.21**（install.sh 脚本版本 v1.5.21；**面板 Go 二进制 v1.5.21 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
+> **当前版本：v1.5.22**（install.sh 脚本版本 v1.5.22；**面板 Go 二进制 v1.5.22 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
 >
 > ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
+> | **v1.5.22** | 面板设置保存无反应根治 + 侧栏版本号：①`settingsHandler` 的 `url_path` 分支改为仅在 `newPath != c.URLPath` 时才 `needRestart`（旧逻辑字段存在即重启，前端每次回传 url_path → 改标题/IP 也重启 → 用户「点保存无反应」）②侧栏底部常驻 `ANS-GO vX.Y.Z` 版本号（`api/auth` 返回 `version` 字段，`checkAuth` 渲染，折叠态自适应）③`saveSet()` 的 `g()` 健壮化：`--no-caddy` 模式下 `s_disguise_panel` 不渲染，旧 `$('#s_x').value` 抛 TypeError 中断保存，改为缺失返回空串 | **「只提交源码不发版」= 没修复**：`upgrade.sh` 裸金属从 release 拉二进制、Docker 从 ghcr.io 拉镜像，二者都依赖发版产物；只 commit 不创建 release + 不 `docker buildx --push`，服务器执行 upgrade 后 md5 不变跳过替换，bug 照旧。**发版必须三件套同步**：①创建 GitHub release ②上传 6 个资产（panel/caddy/sing-box × amd64/arm64）③重建 ghcr 镜像（`:latest` + `:vX.Y.Z`）。版本号必须**前端可见**（侧栏常驻）才能让用户/运维一眼核实升级是否生效，避免「我升级了但不知道成没成」；前端读 DOM 元素的 helper 必须防御 `null`（条件渲染的字段可能不存在） |
+> | **v1.5.21** | 面板设置保存无反应修复（源码已修复但**未发版**，合入 v1.5.22 补齐发布） | 教训同 v1.5.22 第一条根因；此版本仅 commit `72fb817` 未创建 release 资产/镜像，是「只改代码不发布」的反例 |
 > | **v1.5.21** | 修复面板设置「保存无反应」：`settingsHandler` 只要 POST 体含 `url_path` 就 `needRestart=true`（无条件重启），而前端 `saveSet()` 每次都把当前 `url_path` 原样回传 → **只改标题/IP 也会重启面板**，用户表现为「点保存无反应」。改为仅在 `url_path` 真正变化时才重启（与 `panel_port` 的 `!= 守卫` 一致） | 「重启触发条件」必须用真实**变化判断**而非「字段存在」判断：前端表单常把全量字段回传，后端按 `*ptr != 当前值` 守卫才安全；同函数内 `panel_port` 已是正确范式（`*b.PanelPort != c.PanelPort`），`url_path` 漏写守卫是复制粘贴遗漏。新增 Go 集成回归测试（`TestSettingsSave_UntouchedFieldsDoNotRestart` + `TestSettingsSave_UrlPathChangeStillRestarts`）覆盖两条路径；`confPath`/`secretsPath` 由 const 改 var 以支持测试覆盖路径（运行时零影响） |
 > | **v1.5.20** | 仪表盘精简 + AnyTLS-2 管理集中：①移除仪表盘「管理面板」服务卡（与代理服务并列冗余），状态改为**顶栏用户名右侧圆点**（绿=运行中/红=未运行/灰=获取失败），hover 显示状态+端口，登录及每次切 tab 静默刷新（fire-and-forget）②落地服务页集中 AnyTLS-2 全部管理（启用/端口/密码/🎲/💾保存/🔍检测/远端 SS），新增密码输入框 + 操作行（复用 `saveKey('anytls2')`+`checkHealth('anytls2')`，零新增端点）③服务管理页删除底部 AnyTLS-2 卡片（避免与落地服务页重复） | 管理面板状态「全局可见」需求可用顶栏常驻圆点实现（复用 `.dot` 类 + 原生 `title` 属性做 hover 提示，零额外浮层依赖）；同一服务的管理能力分散在多页是 UI 债（服务管理 + 落地服务都显示 AnyTLS-2 卡片），应收敛到单一入口；复用既有 `/api/key`+`/api/health` 端点（已支持 anytls2）而非新增端点，避免扩大回归面；顶栏状态刷新挂在 `showTab()` 末尾 fire-and-forget，不阻塞页面加载 |
 > | **v1.5.19** | 面板 UI 细节优化 + Docker 升级根治：①NaiveProxy 节点信息补 SNI 域名 + 密码字段（nodeHandler 缺字段致前端 row 不渲染）②二维码改为点击服务名旁「📱 二维码」按钮浮动展示，点空白关闭（默认不再占版面）③全局服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5（节点页/服务管理/仪表盘三处）④面板设置页 --no-caddy 模式时隐藏「直访伪装(:443)」⑤Docker 升级「没变化」三根因根治（upgrade.sh 加 `--force-recreate` + entrypoint 补 server_ip 字段 + 版本验证升级为 err）⑥upgrade.sh 升级完成段 echo 改 printf 修颜色码 `\033` 乱码 | 后端返回字段必须与前端模板变量名一一对应（前端取 `n.password`，后端只传 `pass` 则不渲染）；UI 条件渲染须后端先暴露开关字段；二维码浮动用 overlay 复用，点空白关闭靠 `e.target===overlay`；**Docker `compose up -d` 在镜像 digest 未变时会跳过 recreate → entrypoint 不重跑 → 旧二进制继续运行**，升级必须 `--force-recreate`；**bash 的 `echo` 默认不解释 `\033` 转义**（输出字面 `\033[36m` 乱码），含颜色码的输出必须用 `printf '%b'` |
@@ -263,9 +265,10 @@ https://your-domain.com:15608/<随机URL路径>/
    - **下半部分**：远端 SS 落地服务器配置（host/port/method/password + 开关），含 2022-blake3 密钥长度校验
    - ⚠️ **架构约束告知**：只有 AnyTLS-2 经 SS 落地（隐藏中转 IP）；NaiveProxy / SOCKS5 不参与远端落地
 6. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
-7. **面板设置**：网页标题 / URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 服务器公网 IP（v1.5.18，VPC 必填 + 🔍 自动检测按钮）/ 伪装站点。**v1.5.19 起 `--no-caddy` 模式（caddy_enable=false）时隐藏「直访伪装(:443)」**（该站点由 nginx 等接管，caddy 不再生成，改了也不会生效）；Naive 伪装始终显示
+7. **面板设置**：网页标题 / URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 服务器公网 IP（v1.5.18，VPC 必填 + 🔍 自动检测按钮）/ 伪装站点。**v1.5.19 起 `--no-caddy` 模式（caddy_enable=false）时隐藏「直访伪装(:443)」**（该站点由 nginx 等接管，caddy 不再生成，改了也不会生效）；Naive 伪装始终显示。**v1.5.22 起保存逻辑修复**：仅 url_path/panel_port 真正变化才重启（旧版每次保存都重启）；`saveSet()` 防御 disguise_panel 输入缺失（`--no-caddy` 场景）
 8. **日志查看**：tail 最近 N 行
 9. **顶栏管理面板状态圆点**（v1.5.20）：顶栏用户名右侧一个小圆点，绿=运行中 / 红=未运行 / 灰=获取失败，hover 显示「管理面板：运行中 :端口」。登录时 + 每次切换页面时静默刷新（`refreshPanelDot()` 拉 `api/dashboard`，fire-and-forget 不阻塞页面加载）。**管理面板状态从仪表盘移出**（避免与代理服务并列显示冗余），全局常驻顶栏可见
+10. **侧栏底部版本号**（v1.5.22）：左侧导航栏底部常驻显示 `ANS-GO vX.Y.Z`（`api/auth` 返回后端 `-ldflags` 注入的 `version` 字段，`checkAuth` 填入 `#verTag`）。用户升级后一眼可核实是否生效（折叠态自适应为居中小字）。**解决「我升级了但不知道成没成」**——之前版本号只在启动日志 `journalctl` 里，用户不一定会查
 
 ### 6.5 面板端口"可改"的技术机制（重要，必须诚实告知用户）
 面板端口写在 `config.json`，Go 二进制启动时读取。Web 改端口的流程：
@@ -400,6 +403,8 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 - **Docker 升级必须 `--force-recreate`**（v1.5.19）：`docker compose up -d` 在镜像 digest 未变（或 compose 配置哈希相同）时会**跳过 recreate**，容器不重建 → entrypoint 不重跑 → 旧二进制继续运行，表现为「拉了新镜像但没变化」。upgrade.sh docker 分支改用 `up -d --force-recreate` 强制销毁重建（volume 数据不丢）。版本号验证从不匹配升级为 err（而非 warn），并给出 `md5sum` 对比 + force-recreate 排查命令。
 - **bash `echo` 不解释 `\033`，含颜色码必须用 `printf '%b'`**（v1.5.19）：upgrade.sh 末尾「升级完成」段用 `echo "${C_B}..."` 输出颜色码，bash 的 echo 默认把 `\033[36m` 原样输出成字面文本（用户看到的"乱码"）。前面的 `log/ok/hr` 用 `printf` 所以正常。修复：所有含颜色变量的输出统一 `printf '%b%s%b\n' "$C_B" "$val" "$C_0"`，`%b` 显式要求解释反斜杠转义。**教训：脚本里输出 ANSI 颜色一律用 printf，不用 echo。**
 - **「重启触发条件」必须用真实变化判断，不能只判「字段存在」**（v1.5.21）：`settingsHandler` 的 `url_path` 分支写成 `if b.URLPath != nil { ... needRestart = true }`，而前端 `saveSet()` 每次都把当前 `url_path` 原样回传（非「改动」）→ **只改网页标题或服务器 IP 也会触发面板重启**。重启覆盖层闪现 + 重定向到正在重启的面板（连接被拒），用户表现为「点保存无反应 / 刷新后状态异常」。正确范式是同函数内 `panel_port` 的 `*b.PanelPort != c.PanelPort` 守卫——所有「副作用动作」（重启/重载/重建）一律按 `新值 != 当前值` 判断，前端表单全量回传字段是常态不能假设「字段出现=用户改动」。修复后新增 Go 集成回归测试（`TestSettingsSave_UntouchedFieldsDoNotRestart` + `TestSettingsSave_UrlPathChangeStillRestarts`）锁死两条路径。
+- **「只提交源码不发版」= 没修复**（v1.5.22，最高优先级教训）：v1.5.21 修复了源码并 commit，但**没创建 GitHub release + 没上传二进制资产 + 没 `docker buildx --push` 重建镜像**。用户在服务器执行 `upgrade.sh` 后，裸金属分支从 `releases/download/v1.5.21/` 拉 404（release 不存在）→ md5 对比无变化 → 跳过替换；Docker 分支拉 `ghcr.io/jiasongji/ansgo:latest`（digest 未变）→ `--force-recreate` 重建但镜像内还是旧二进制。**结果：bug 照旧，用户以为修复无效**。发版必须三件套同步：①`gh release create vX.Y.Z` ②上传 6 个资产（`ansgo-panel-linux-{amd64,arm64}` + `caddy-naive-linux-{amd64,arm64}` + `sing-box-linux-{amd64,arm64}.tar.gz`，sing-box 资产可复用上游不变则跳过）③`docker buildx build --push -t ghcr.io/jiasongji/ansgo:latest -t ghcr.io/jiasongji/ansgo:vX.Y.Z`。**自检**：发版后 `gh release view vX.Y.Z --json assets` 确认资产齐 + `docker pull` 后 `docker run --rm ... md5sum` 对比。为了让用户能自验，v1.5.22 起面板侧栏底部常驻显示版本号。
+- **前端读 DOM 的 helper 必须防御 null**（v1.5.22）：`saveSet()` 的 `g=id=>$('#s_'+id).value` 在 `--no-caddy` 模式下 `s_disguise_panel` 不渲染 → `$('#s_disguise_panel')` 返回 null → `.value` 抛 TypeError → 整个 `saveSet` 中断，用户「点保存无反应」且无 toast。条件渲染的字段（`disguise_panel` 随 `caddy_enable` 显隐）必须用 `const g=id=>{const e=$('#s_'+id);return e?e.value:''}`。**通用规律：任何 `.value`/`.textContent`/`.checked` 读取前都要确认元素存在**，条件渲染 + 全量读取是经典组合坑。
 
 ---
 
@@ -565,7 +570,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrad
 
 1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 多协议连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
 2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.21
+3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.22
 4. **客户端实测（可选）**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
 
 ---
