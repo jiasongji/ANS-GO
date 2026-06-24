@@ -31,6 +31,7 @@ const (
 
 type Config struct {
 	Domain             string `json:"domain"`
+	ServerIP           string `json:"server_ip"` // v1.5.18：用户手动填写的公网 IP（VPC 网络下 UDP 探测只能拿内网，此字段优先级最高）
 	PanelPort          int    `json:"panel_port"`
 	PanelTitle         string `json:"panel_title"`
 	URLPath            string `json:"url_path"`
@@ -78,7 +79,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.17"
+	version = "1.5.18"
 )
 
 func loadConfig() (Config, error) {

@@ -11,7 +11,7 @@
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
-> | **v1.5.18** | 面板 UI 优化四项：①节点信息「连接地址」显示服务器 IP（Go 端 UDP 探测公网出口，进程级缓存，失败回退域名）②删「服务控制」菜单，服务管理成唯一总操作页 ③🎲 随机按钮移到每个输入框右侧（纯前端 crypto.getRandomValues，不自动保存）④每张服务卡操作按钮集中一行自适应 `[应用][启停][重启][装卸][检测]` | 探测公网 IP 用 `net.Dial("udp","8.8.8.8:80")` 取 LocalAddr（不真正发包只走路由表，零依赖不外发）；合并操作行时端口「应用」整合进 `svcSave`（串行调 portHandler+keyHandler，零新增端点）；前端随机必须 crypto.getRandomValues 且不自动保存（与手动输入后须主动保存一致）|
+> | **v1.5.18** | 面板 UI 优化四项 + VPC 公网 IP 修正：①节点信息「连接地址」显示服务器 IP（Go 端 UDP 探测公网出口，进程级缓存，失败回退域名）②删「服务控制」菜单，服务管理成唯一总操作页 ③🎲 随机按钮移到每个输入框右侧（纯前端 crypto.getRandomValues，不自动保存）④每张服务卡操作按钮集中一行自适应 `[应用][启停][重启][装卸][检测]` + VPC 修正：公网 IP 三层优先级（手动填写 > 公网探测 > 域名），内网 IP 自动丢弃 + 引导提示 + 主动检测按钮 | UDP 探测公网 IP 在 VPC/NAT 下只能拿内网网卡（公网 IP 在 NAT 网关做 SNAT 本机无从得知），必须 `isPrivateIP()` 过滤 RFC1918/CGNAT 后回退域名；主动调第三方 API（ipify 等）必须用户点击触发不在启动时自动外发；合并操作行时端口「应用」整合进 `svcSave`（串行调 portHandler+keyHandler，零新增端点）；前端随机必须 crypto.getRandomValues 且不自动保存 |
 > | **v1.5.17** | Docker manual 证书模式四根因根治：证书页误显示 acme / capability 收窄致读不了宿主证书目录 / 版本号 `vv` 双 v / 容器重建后代理不自动恢复 | systemd `CapabilityBoundingSet` 收窄后 root 不再隐式绕过 DAC；容器重建 ≠ 重启（systemd 状态归零，entrypoint 须幂等重建）；证书路径走卷内 644 副本不依赖宿主原文件 |
 > | **v1.5.16** | 新增 SOCKS5（强制鉴权）+ 自定义网页标题 + NaiveProxy 落地简化（移除 naive-2，落地仅 AnyTLS-2→SS） | caddy 与 sing-box 是两个独立进程，跨进程路由物理上不可行；SOCKS5 公网部署必须强制鉴权 |
 > | **v1.5.15** | 根治节点信息页一直「加载中」 | JS 模板插值 `${obj.field}` 若 field 是 number/bool 再做 string-only 操作须先 `String()` 强转；async forEach 异常会静默 reject 整个 promise |
@@ -389,7 +389,8 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 - **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
 - **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`。升级二进制前手动备份：`cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-update-vX.Y.Z-{ts}/ansgo-panel.old`。
 - **前端改动后必须重新编译 + 上传**：HTML 经 `//go:embed` 编译进 Go 二进制，改 `deploy/panel/web/index.html` 后须 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 重新出包 + 上面的 stop→rm→scp→md5→start 流程，浏览器硬刷新。
-- **探测公网 IP 用 UDP "连接"而非第三方 API**（v1.5.18）：`net.Dial("udp","8.8.8.8:80")` 取 `LocalAddr()` 只触发内核路由表选出口、不真正发包，零依赖不外发不泄密（符合 §13）；探测结果进程级缓存（`sync.Once`），容器/主机运行期固定。失败返回 ""，前端回退域名。不要改用 `ifconfig.me` 等公网 API（外发 + 违反 §13 第三方域名偏好）。
+- **公网 IP 获取的三层优先级**（v1.5.18 VPC 修正）：① 用户在「面板设置」手动填写的 `server_ip`（最高，VPC/NAT 下唯一可靠来源）② UDP "连接" 8.8.8.8:80 探测本机出口（`net.Dial` 取 `LocalAddr`，不真正发包只走路由表，进程级缓存 `sync.Once`）③ 空 → 前端回退域名。**UDP 探测需过滤内网**：VPC/NAT 下出口走内网网卡（10./172.16-31./192.168./100.64.），公网 IP 在 NAT 网关做 SNAT 本机无从得知，`isPrivateIP()` 判定为内网则丢弃并回退域名，同时在节点页顶部和设置页显示引导提示。
+- **主动检测公网 IP 必须用户点击触发**（v1.5.18）：`/api/detect-public-ip` 调用第三方 echo 服务（ipify/ifconfig/icanhazip 三选一兜底），**仅当用户在面板设置页点「🔍 自动检测」按钮才外发一次**（不在启动时自动外发，避免每次启动把"这台机器存在"告知第三方）。检测结果填入输入框供用户确认后保存，不直接写配置。这与 §13「禁用真实第三方域名作为 disguise 默认值」不冲突——后者限制的是 caddy 反代目标硬编码默认值，这里是用户主动触发的运行时调用。
 - **Mac 本机无 Go 时的交叉编译**（v1.5.18）：用 `docker run --rm -v "$PWD":/src -w /src -e GOPROXY=https://goproxy.cn,direct -e HTTP_PROXY= -e HTTPS_PROXY= ... golang:1.26-alpine` 编译。**必须清空 `-e HTTP_PROXY=` 等环境变量**（orbstack/docker daemon 默认透传代理到容器内 `127.0.0.1:1666`，容器内访问不到会 `connection refused`）。go.mod 的 `go 1.26.4` 要求镜像版本 ≥ `golang:1.26`。
 - **合并操作按钮时优先复用现有 API 端点**（v1.5.18）：把端口「应用」+ 密钥「保存」整合成单个「💾 应用」按钮时，前端 `svcSave()` 串行调既有 `portHandler`+`keyHandler` 即可，**不要新增 `/api/svc-save` 端点**（重复实现校验 = 扩大回归面）。校验/重启逻辑已在两个 handler 内成熟稳定。
 

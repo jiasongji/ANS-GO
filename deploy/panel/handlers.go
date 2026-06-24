@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"html"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -91,6 +92,8 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		requireAuth(certReloadHandler)(w, r)
 	case rel == "api/settings":
 		requireAuth(settingsHandler)(w, r)
+	case rel == "api/detect-public-ip":
+		requireAuth(detectPublicIPHandler)(w, r)
 	case rel == "api/landing":
 		requireAuth(landingHandler)(w, r)
 	case rel == "api/group2":
@@ -212,40 +215,90 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 
 // ===================== 节点信息 =====================
 
-// 服务器公网出口 IP 探测（进程级缓存，一次性）。
-// 用 UDP "连接" 8.8.8.8:80 触发内核路由表选出口地址，不真正发包；
-// 容器/主机运行期 IP 固定，故 sync.Once 缓存。探测失败返回 ""（前端回退域名）。
-// 不调任何第三方公网 API（避免外发 + 符合 §13 隐私偏好）。
+// 服务器出口 IP 解析（v1.5.18 修正 VPC 问题）。
+// 优先级：① 用户在面板设置填写的 server_ip（最高，VPC 下唯一可靠来源）
+//        ② UDP "连接" 8.8.8.8:80 探测本机出口 IP（仅当为公网时才采用）
+//        ③ 空（前端回退域名）
+// VPC/NAT 网络下，UDP 探测只能拿到内网网卡 IP（10./172.16-31./192.168./100.64.），
+// 公网 IP 在 NAT 网关上做 SNAT，本机无从得知。故对内网 IP 直接丢弃并回退域名，
+// 同时通过 server_ip_hint 字段告知前端「需用户手动填写公网 IP」。
+// 不调任何第三方公网 API（避免默认外发 + 符合 §13 隐私偏好）。
 var (
-	serverIPCache  string
-	serverIPOnce_  sync.Once
+	probeIPCache  string // UDP 探测到的本机出口 IP（可能为空或内网）
+	probeIPOnce   sync.Once
 )
 
-func cachedServerIP() string {
-	serverIPOnce_.Do(func() {
+func probeLocalIP() string {
+	probeIPOnce.Do(func() {
 		conn, err := net.Dial("udp", "8.8.8.8:80")
 		if err != nil {
 			return
 		}
 		defer conn.Close()
 		if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
-			ip := a.IP.String()
-			// 过滤回环 / 链路本地，保留公网或私网均可（用户据此复制连接）
-			if ip != "" && !strings.HasPrefix(ip, "127.") && !strings.HasPrefix(ip, "169.254.") {
-				serverIPCache = ip
-			}
+			probeIPCache = a.IP.String()
 		}
 	})
-	return serverIPCache
+	return probeIPCache
+}
+
+// isPrivateIP 判定一个 IPv4 字符串是否为内网（RFC1918 / CGNAT / 回环 / 链路本地）。
+func isPrivateIP(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return true // 非法 IP 视为不可用
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		// 10.0.0.0/8
+		if ip4[0] == 10 {
+			return true
+		}
+		// 172.16.0.0/12
+		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			return true
+		}
+		// 192.168.0.0/16
+		if ip4[0] == 192 && ip4[1] == 168 {
+			return true
+		}
+		// 100.64.0.0/10 (CGNAT)
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveServerIP 按「手动填写 > 公网探测」优先级返回展示用 IP + hint。
+func resolveServerIP(c Config) (ip string, hint string) {
+	// ① 用户手动填写的公网 IP（最高优先级）
+	if manual := strings.TrimSpace(c.ServerIP); manual != "" {
+		return manual, ""
+	}
+	// ② UDP 探测本机出口
+	probe := probeLocalIP()
+	if probe != "" && !isPrivateIP(probe) {
+		return probe, ""
+	}
+	// ③ 探测失败或为内网 → 返回空，提示前端引导用户手动填写
+	if probe != "" && isPrivateIP(probe) {
+		return "", "检测到内网 IP（" + probe + "），VPC/NAT 网络下无法自动获取公网 IP，请在「面板设置」填写公网 IP"
+	}
+	return "", "无法探测服务器 IP，请在「面板设置」填写公网 IP（留空则连接地址显示域名）"
 }
 
 func nodeHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	sec := readSecrets()
 	uris := buildURIs(c, sec)
+	ip, hint := resolveServerIP(c)
 	resp := map[string]any{
 		"domain":         c.Domain,
-		"server_ip":      cachedServerIP(),
+		"server_ip":      ip,
+		"server_ip_hint": hint,
 		"ss":             map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": sec.SSKey, "enabled": c.SvcSSEnabled == "true", "host": c.Domain},
 		"anytls":         map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": sec.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": c.Domain},
 		"socks":          map[string]any{"uri": uris["socks"], "port": c.SocksPort, "user": sec.SocksUser, "pass": sec.SocksPass, "enabled": c.SvcSocksEnabled == "true", "host": c.Domain},
@@ -729,8 +782,12 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 func settingsHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	if r.Method == "GET" {
+		ip, hint := resolveServerIP(c)
 		jwrite(w, 200, map[string]any{
 			"domain":               c.Domain,
+			"server_ip":            c.ServerIP,
+			"server_ip_resolved":   ip,
+			"server_ip_hint":       hint,
 			"panel_port":           c.PanelPort,
 			"panel_title":          c.PanelTitle,
 			"url_path":             c.URLPath,
@@ -756,6 +813,7 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		LoginLockMinutes   *int    `json:"login_lock_minutes"`
 		DisguisePanel      *string `json:"disguise_panel"`
 		DisguiseNaive      *string `json:"disguise_naive"`
+		ServerIP           *string `json:"server_ip"`
 	}
 	json.NewDecoder(r.Body).Decode(&b)
 	needRestart := false
@@ -822,6 +880,23 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 			needCaddyReload = true
 		}
 	}
+	// v1.5.18：服务器公网 IP（VPC 下手动填写）。允许空（清空则回退自动探测/域名）。
+	if b.ServerIP != nil {
+		ip := strings.TrimSpace(*b.ServerIP)
+		if ip != "" {
+			// 校验为合法 IPv4/IPv6，且非回环/链路本地
+			parsed := net.ParseIP(ip)
+			if parsed == nil {
+				jerr(w, 400, "服务器 IP 格式非法（须为 IPv4 或 IPv6）")
+				return
+			}
+			if parsed.IsLoopback() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() {
+				jerr(w, 400, "服务器 IP 不能是回环或链路本地地址")
+				return
+			}
+		}
+		c.ServerIP = ip
+	}
 	if err := configSet(c); err != nil {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
@@ -839,6 +914,37 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jwrite(w, 200, map[string]bool{"ok": true})
+}
+
+// detectPublicIPHandler 主动检测公网 IP（v1.5.18）。
+// 仅当用户在面板设置页点「🔍 自动检测公网 IP」按钮时才触发，
+// 默认不做任何外发（避免每次启动都外发，符合 §13 隐私偏好）。
+// 依次尝试多个公网 echo 服务（互为兜底），取第一个有效结果返回。
+// 返回的 IP 由前端填入输入框供用户确认后保存，不直接写配置。
+func detectPublicIPHandler(w http.ResponseWriter, r *http.Request) {
+	clients := []string{
+		"https://api.ipify.org?format=text",
+		"https://ifconfig.me/ip",
+		"https://4.icanhazip.com",
+	}
+	client := &http.Client{Timeout: 6 * time.Second}
+	for _, url := range clients {
+		resp, err := client.Get(url)
+		if err != nil || resp.StatusCode != 200 {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		ip := strings.TrimSpace(string(body))
+		if ip != "" && net.ParseIP(ip) != nil {
+			jwrite(w, 200, map[string]any{"ok": true, "ip": ip, "source": url})
+			return
+		}
+	}
+	jerr(w, 503, "所有公网 IP 检测服务均不可达（可能服务器无法访问外网），请手动填写 IP")
 }
 
 // ===================== 日志 =====================

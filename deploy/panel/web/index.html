@@ -265,7 +265,8 @@ async function loadNode(){
   const j=await api('api/node');
   if(j.error)return $('#content').innerHTML=j.error;
   const domain=j.domain||'';
-  const serverIp=j.server_ip||'';  // v1.5.18：连接地址优先显示服务器 IP，回退域名
+  const serverIp=j.server_ip||'';       // v1.5.18：连接地址优先显示服务器 IP，回退域名
+  const hint=j.server_ip_hint||'';      // v1.5.18：无法获取公网 IP 时的引导提示
   // 单条信息行（label + 值 + 复制按钮）
   // 注意：n.port 是 number、n.host 可能是 undefined，必须 String() 强转后再 .replace，
   // 否则 (number).replace() 抛 TypeError 让整个 forEach 中断，content 卡在「加载中…」
@@ -299,6 +300,14 @@ async function loadNode(){
   };
   let html='';
   let qrs=[];
+  // v1.5.18：无法自动获取公网 IP 时（VPC/NAT），顶部显示引导提示横幅
+  if(hint){
+    html+=`<div class="card" style="background:var(--warn-bg,rgba(255,193,7,.12));border-left:4px solid var(--warn,#ffc107)">
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="font-size:18px">⚠️</span>
+        <div><strong>连接地址暂无法显示公网 IP</strong><br><span style="font-size:12px;color:var(--mut)">${hint}</span></div>
+      </div></div>`;
+  }
   // 第一组：按 enabled 过滤显示
   [['Shadowsocks','🔐',j.ss],['AnyTLS','🛡️',j.anytls],['SOCKS5','🧦',j.socks],['NaiveProxy','🌀',j.naive]].forEach(([t,i,n])=>{
     if(n&&n.enabled&&n.uri){html+=card(t,i,n);qrs.push([t,n.uri])}
@@ -757,6 +766,9 @@ async function loadSet(){
   const j=await api('api/settings');
   if(j.error)return $('#content').innerHTML=j.error;
   const f=(id,lbl,val,ph='',type='text')=>`<div class="row"><label>${lbl}</label><div class="f"><input id="s_${id}" type="${type}" value="${val??''}" placeholder="${ph}"></div></div>`;
+  // v1.5.18：server_ip 行（带「🔍 自动检测」按钮 + hint 提示）
+  const ipHint=j.server_ip_hint?`<div class="help" style="margin:4px 0 0 0;color:var(--warn,#ffc107)">⚠️ ${j.server_ip_hint}</div>`:'';
+  const ipResolved=j.server_ip_resolved?`<div class="help" style="margin:4px 0 0 0">当前生效连接地址：<code>${j.server_ip_resolved}</code>${j.server_ip?'（手动填写）':'（自动探测）'}</div>`:'';
   $('#content').innerHTML=`<div class="card"><h3>⚙️ 面板设置</h3>
    ${f('panel_title','网页标题',j.panel_title,'ANS-GO 管理面板')}
    ${f('url_path','URL 路径',j.url_path,'/xxxx/')}
@@ -767,6 +779,13 @@ async function loadSet(){
    ${f('login_lock_threshold','锁定阈值(次)',j.login_lock_threshold,'','number')}
    ${f('login_lock_minutes','锁定时长(分钟)',j.login_lock_minutes,'','number')}
    <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
+   <div class="row"><label>服务器公网 IP</label><div class="f field-inline">
+     <input id="s_server_ip" type="text" value="${j.server_ip??''}" placeholder="留空则自动探测（VPC 网络必填）">
+     <button class="mut" type="button" onclick="detectPublicIP(this)">🔍 自动检测</button>
+   </div></div>
+   <div class="help" style="margin:0 0 4px 0">节点信息「连接地址」显示此 IP。VPC/NAT 网络下 UDP 探测只能拿内网，须手动填写或点「自动检测」。留空则显示域名。</div>
+   ${ipHint}${ipResolved}
+   <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
    <div class="help" style="margin:0 0 10px 0">域名伪装站点（格式 <code>proxy:https://站点</code> 反代，或 <code>page</code> 用默认页）。保存后 caddy 自动重载。</div>
    ${f('disguise_panel','直访伪装(:443)',j.disguise_panel,'proxy:https://example.com')}
    ${f('disguise_naive','Naive伪装(代理端口)',j.disguise_naive,'proxy:https://example.com')}
@@ -774,9 +793,25 @@ async function loadSet(){
    <span class="mut" style="font-size:12px;margin-left:8px">改 URL 路径或面板端口会重启面板；改伪装站点会重载 caddy。</span></div>
    <div class="help" style="margin-top:12px">当前协议端口 — SS: ${j.ss_port} / AnyTLS: ${j.anytls_port} / SOCKS5: ${j.socks_port} / Naive: ${j.naive_port}（在"端口管理"修改）</div></div>`;
 }
+// v1.5.18：主动检测公网 IP（用户点击才外发一次第三方 API，结果填入输入框供确认保存，不直接写配置）
+async function detectPublicIP(btn){
+  const old=btn.textContent;
+  btn.textContent='⏳ 检测中…';btn.disabled=true;
+  try{
+    const j=await api('api/detect-public-ip');
+    if(j.ok&&j.ip){
+      const el=$('#s_server_ip');
+      if(el){el.value=j.ip;el.focus()}
+      toast('检测到公网 IP: '+j.ip+'（需点「💾保存设置」生效）');
+    }else{
+      toast(j.error||'检测失败');
+    }
+  }catch(e){toast('检测失败：'+e.message)}
+  btn.textContent=old;btn.disabled=false;
+}
 async function saveSet(){
   const g=id=>$('#s_'+id).value;
-  const body={panel_title:g('panel_title'),url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive')};
+  const body={panel_title:g('panel_title'),url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive'),server_ip:g('server_ip')};
   if(g('admin_pass'))body.admin_pass=g('admin_pass');
   // 只传发生变化的字段由后端处理；这里全传，后端按指针判断（空串/0 会触发改动）
   const j=await api('api/settings',{method:'POST',body:JSON.stringify(body)});
