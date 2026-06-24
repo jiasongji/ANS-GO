@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.24-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.25-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -557,7 +557,13 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ## ✨ 特性
 
-### v1.5.24 修复 NaiveProxy「反代正常但代理不能用」+ 一键修复按钮 ⭐
+### v1.5.25 根治 NaiveProxy「检测正常反代正常但代理不能用」⭐
+
+- **【根治】Caddyfile 指令顺序修复**：这是 NaiveProxy 代理不通的**真正根因**。naive 站点块内 `forward_proxy`（代理）+ `reverse_proxy`（伪装反代）共存时，**caddy 默认指令排序把 `forward_proxy` 放在 `reverse_proxy` 之后** → NaiveProxy 客户端的 CONNECT 代理请求被 `reverse_proxy`（伪装站）拦截，`forward_proxy` 永远拿不到代理流量 → 表现为「检测正常、反代伪装网站能打开、但客户端代理不能用」。全局 `order forward_proxy before reverse_proxy` 指令对此**无效**（caddy 对同站点块内多 handler 的排序坑）。**修复**：用 `route {}` 块包裹 naive 站点指令，强制按书写顺序执行（`forward_proxy` 在前）。已验证 caddy adapted JSON 的 subroute handlers=`[forward_proxy, reverse_proxy]`。官方 naiveproxy 示例用 `file_server` 做伪装不受影响，我们用 `reverse_proxy` 才踩了这个坑
+- **诊断方法**（供复现）：`caddy adapt --config Caddyfile --adapter caddyfile | python3 -m json.tool` 看 naive 站点 route 的 handlers 数组，`forward_proxy` 必须排第一
+- 详见 [v1.5.25 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.25)
+
+### v1.5.24 NaiveProxy 凭证应用改同步验证 + 一键修复按钮 ⭐
 
 - **【修复】NaiveProxy 凭证应用改为同步验证（根治 deactivating + 代理失效）**：旧版 `keyHandler` 改 NaiveProxy 凭证时是 **异步 fire-and-forget**（`go func { genconf; systemctl restart }` 且忽略错误）→ 任一步失败仍返回 `{ok:true}`，导致 **secrets.env 已改但 Caddyfile 没跟上 / caddy 重启失败进入 deactivating**。加上 NaiveProxy 的 `probe_resistance` 认证失败会**静默走伪装**（反代照常打开），用户表现为「反代正常但代理不能用」，极具迷惑性。修复：改为**同步** `genconf → restart → 等待验证 caddy 真的 active`（非 deactivating），失败立即返回错误诊断不再掩盖
 - **【新增】「🔧 修复」按钮**（每张服务卡操作行）：一键从 secrets.env 重新生成配置 + 重启 + 验证 active，强制同步 `secrets.env↔Caddyfile`，专治凭证不同步导致的「代理不能用」

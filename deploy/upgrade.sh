@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.24
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.25
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh | bash
-#   bash upgrade.sh [--docker | --metal] [--ver v1.5.24] [--yes]
+#   bash upgrade.sh [--docker | --metal] [--ver v1.5.25] [--yes]
 #
 # 设计要点（与 install.sh / ansgo-admin 保持一致）：
 #   - VER 与 install.sh 顶部硬编码一致，发新版只需改这一行 + commit
 #   - 复用 install.sh 的 bootstrap（解决 curl|bash 的 SIGPIPE/进程替换卡死）
 #   - panel 二进制无 -version flag（main.go 仅 -setpass），用 md5 对比判断是否真更新，
-#     启动后用 journalctl 日志行 "ansgo-panel v1.5.24 监听..." 验证版本
+#     启动后用 journalctl 日志行 "ansgo-panel v1.5.25 监听..." 验证版本
 #   - 裸金属 panel 替换走 .new→md5→.bak→mv→restart 安全流程（AGENTS.md §9 铁律）
 #   - 备份目录命名 /etc/ansgo-backup-upgrade-{TS}，遵循 ansgo-admin 约定
 # =============================================================================
@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.24"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.25"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -116,19 +116,17 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
-  - 【本版重点】修复 NaiveProxy「反代正常但代理不能用」+「改密码后 caddy deactivating」：
-    根因是旧版 keyHandler 改凭证时异步 fire-and-forget（写 secrets.env → genconf →
-    restart 全在 go func 里且忽略错误），任一步失败都返回 {ok:true}，导致
-    secrets.env 与 Caddyfile 不同步；加上 NaiveProxy probe_resistance 认证失败会
-    静默走伪装（反代照常打开），极具迷惑性。v1.5.24 修复：
-    ① keyHandler 改为同步：genconf → restart → 等待验证 caddy 真的 active（非
-       deactivating），失败立即返回错误诊断，不再掩盖
-    ② svcInstallHandler 安装后同样验证 active，失败报错（旧版无脑返回 ok）
-    ③ 新增「🔧 修复」按钮（每张服务卡）：一键 genconf + restart + 验证，
-       强制同步 secrets.env↔Caddyfile，专治「代理不能用」的凭证不一致
-  - v1.5.23 修复（NaiveProxy 凭证含空格/{} 破坏 Caddyfile 语法）三层防御保留：
-    前端拦截 + 后端校验 + genconf validate 回滚
-  - 修复「面板设置保存无反应」+ 侧栏版本号（v1.5.22）+ saveSet 健壮化
+  - 【本版重点·根治 NaiveProxy 代理不通】Caddyfile 指令顺序修复：
+    根因是 naive 站点块内 forward_proxy + reverse_proxy（伪装）共存时，caddy 默认
+    指令排序把 forward_proxy 放在 reverse_proxy【之后】→ NaiveProxy 客户端的 CONNECT
+    请求被 reverse_proxy（伪装站）拦截，forward_proxy 永远拿不到代理流量 →
+    「检测正常、反代正常打开、但客户端代理不能用」。全局 order 指令对此无效（caddy 坑）。
+    修复：用 route {} 块包裹 naive 站点指令，强制按书写顺序执行（forward_proxy 在前）。
+    已验证 adapted JSON 的 subroute handlers=[forward_proxy, reverse_proxy]。
+    （官方 naiveproxy 示例用 file_server 不受影响，我们用 reverse_proxy 做伪装才踩坑）
+  - v1.5.24：keyHandler 改同步验证 active + svcInstall 验证 + 🔧 修复按钮
+  - v1.5.23：NaiveProxy 凭证含空格/{} 破坏 Caddyfile 三层防御
+  - v1.5.22：面板设置保存无反应 + 侧栏版本号
 
 注意:
   - SOCKS5 升级后默认不启用（svc_socks_enabled=false），需登录面板「服务管理」页

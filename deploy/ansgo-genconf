@@ -279,18 +279,44 @@ def gen_caddy():
     # global block：caddy_enable=false 时加 auto_https off
     #   （v1.5.10 修复：caddy 默认 auto_https on 会隐式监听 :80 做 ACME 挑战，
     #    --no-caddy 模式下 nginx 占着 80 → bind 失败；关掉 auto_https 避免冲突）
+    # v1.5.25：移除 order forward_proxy before ... 指令——它们对同站点块内
+    #   forward_proxy + reverse_proxy 共存时无效（caddy 默认排序仍把 forward_proxy
+    #   放最后），改用 route {} 块强制显式顺序（见下方 naive 站点）。
     if CADDY_ENABLE:
-        blocks.append("{\n  order forward_proxy before reverse_proxy\n  order forward_proxy before file_server\n  admin off\n  log {\n    level error\n  }\n}\n")
+        blocks.append("{\n  admin off\n  log {\n    level error\n  }\n}\n")
     else:
-        blocks.append("{\n  order forward_proxy before reverse_proxy\n  order forward_proxy before file_server\n  admin off\n  auto_https off\n  log {\n    level error\n  }\n}\n")
+        blocks.append("{\n  admin off\n  auto_https off\n  log {\n    level error\n  }\n}\n")
 
     # :443 纯反代伪装站（caddy_enable=true 时生成；--no-caddy 模式跳过让 nginx 接管）
     if CADDY_ENABLE:
         blocks.append(f"# :443 纯反代伪装站（浏览器直访命中，不提供代理）\n:443 {{\n  tls {FULLCHAIN} {PRIVKEY}\n  encode zstd gzip\n{disguise_block(DISGUISE_PANEL)}}}\n")
 
     # :naive_port NaiveProxy + 伪装（按开关；caddy_enable 无关——naive 站点独立于 80/443）
+    # v1.5.25 关键修复：用 route {} 块包裹，强制 forward_proxy 在 reverse_proxy/file_server
+    #   之前执行。旧版用全局 order 指令，但 caddy 对同站点块内 forward_proxy+reverse_proxy
+    #   共存时的排序有坑——默认把 forward_proxy 放最后 → CONNECT 请求被 reverse_proxy
+    #   （伪装）拦截，forward_proxy 永远拿不到代理流量 → NaiveProxy 客户端「检测正常、
+    #   反代正常、但代理不能用」。route {} 块按书写顺序执行，forward_proxy 写在最前即生效。
+    #   官方 naiveproxy 示例用 file_server 不受此影响（file_server 排序天然在 forward_proxy 后），
+    #   我们用 reverse_proxy 做伪装才踩了这个坑。
     if SVC_NAIVE:
-        blocks.append(f"# :{NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）\n:{NAIVE_PORT} {{\n  tls {FULLCHAIN} {PRIVKEY}\n  encode zstd gzip\n  forward_proxy {{\n    basic_auth {NAIVE_USER} {NAIVE_PASS}\n    hide_ip\n    hide_via\n    probe_resistance\n  }}\n{disguise_block(DISGUISE_NAIVE)}}}\n")
+        # disguise 内容缩进适配 route 块（多缩进 2 空格）
+        naive_disguise = disguise_block(DISGUISE_NAIVE).replace("\n", "\n    ").rstrip()
+        blocks.append(
+            f"# :{NAIVE_PORT} NaiveProxy（forward_proxy 认证走代理，未认证走伪装）\n"
+            f":{NAIVE_PORT} {{\n"
+            f"  tls {FULLCHAIN} {PRIVKEY}\n"
+            f"  route {{\n"
+            f"    forward_proxy {{\n"
+            f"      basic_auth {NAIVE_USER} {NAIVE_PASS}\n"
+            f"      hide_ip\n"
+            f"      hide_via\n"
+            f"      probe_resistance\n"
+            f"    }}\n"
+            f"    {naive_disguise}\n"
+            f"  }}\n"
+            f"}}\n"
+        )
 
 
     # :80 重定向（caddy_enable=true 时生成；--no-caddy 模式跳过）
