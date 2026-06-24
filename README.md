@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.18-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.19-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -498,9 +498,9 @@ cat /etc/ansgo/panel.json | python3 -c 'import json,sys;d=json.load(sys.stdin);p
 
 每张服务卡支持：① 安装/卸载 ② 改端口 ③ 改密钥（手动输入或每个输入框右侧 🎲 单字段随机，**v1.5.18**）④ 启停 ⑤ **🔍 检测**（v1.5.12：systemd 状态 + 端口监听 + TCP 握手三合一诊断）。**v1.5.18 起操作按钮集中一行自适应**：未安装 `[📥安装]`；已安装 `[💾应用][▶️启动/⏹停止][🔄重启][📤卸载][🔍检测]`（「💾应用」一次保存端口+密钥）。
 
-### 节点信息（v1.5.12 重构，v1.5.18 连接地址改 IP）
+### 节点信息（v1.5.12 重构，v1.5.18 连接地址改 IP，v1.5.19 二维码浮动 + 字段补全）
 
-「节点信息」页**只显示已启用的服务**（未启用不显示，避免空 URI 误导）。每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示，每行独立「📋 复制」按钮 + URI + 客户端二维码。**v1.5.18 起「连接地址」显示服务器公网 IP**（自动探测，探测失败回退域名）；URI 仍是域名（TLS 协议 SNI 需要）。
+「节点信息」页**只显示已启用的服务**（未启用不显示，避免空 URI 误导）。每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示（**v1.5.19 起 NaiveProxy 补全 SNI + 密码**），每行独立「📋 复制」按钮 + URI。**v1.5.18 起「连接地址」显示服务器公网 IP**（自动探测，探测失败回退域名）；URI 仍是域名（TLS 协议 SNI 需要）。**v1.5.19 起二维码默认隐藏**，服务名旁加「📱 二维码」按钮，点击浮动展示（点空白关闭）。**v1.5.19 服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5**。
 
 ### 启用落地服务（中转→落地架构）
 
@@ -556,6 +556,14 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ---
 
 ## ✨ 特性
+
+### v1.5.19 面板 UI 细节优化 ⭐
+
+- **【修复】NaiveProxy 节点信息补全 SNI + 密码**：后端 nodeHandler 给 naive 补 `sni`（域名）和 `password` 字段（与前端 `row('密码/密钥',n.password)` 变量名对齐）；SOCKS5 同步补 `password`
+- **【优化】二维码改为点击浮动展示**：节点页每张服务卡标题旁加「📱 二维码」按钮，点击弹出 overlay 浮动展示 200×200 二维码 + URI + 复制按钮，点空白处自动关闭；默认不再常驻占版面
+- **【优化】全局服务顺序统一**：节点页 / 服务管理 / 仪表盘三处均调整为 **AnyTLS → NaiveProxy → Shadowsocks → SOCKS5**（原顺序 SS/AnyTLS/SOCKS/Naive）
+- **【优化】`--no-caddy` 模式隐藏「直访伪装(:443)」**：面板设置页在该模式下显示「已禁用（:443 由现有 web 服务器接管）」，避免用户误改不生效的字段；Naive 伪装始终显示
+- 详见 [v1.5.19 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.19)
 
 ### v1.5.18 面板 UI 优化 ⭐
 

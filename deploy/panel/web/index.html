@@ -240,9 +240,12 @@ async function loadDash(){
      <div id="health-${portTarget}"></div></div>`;
   $('#content').innerHTML=`
    <div class="grid g4">
-     ${svcCard('NaiveProxy','naive','naive')}
      ${svcCard('AnyTLS','anytls','anytls')}
+     ${svcCard('NaiveProxy','naive','naive')}
      ${svcCard('Shadowsocks','ss','ss')}
+     ${svcCard('SOCKS5','socks','socks')}
+   </div>
+   <div class="grid g4" style="margin-top:12px">
      ${svcCard('管理面板','panel','panel')}
    </div>
    <div class="grid g4">
@@ -281,9 +284,13 @@ async function loadNode(){
     </div>`;
   };
   // 一张服务卡（含 URI + QR + 各字段行）
+  // v1.5.19：二维码默认隐藏，标题旁加「📱 二维码」按钮，点击弹出浮动展示，点空白关闭
   const card=(title,icon,n,extra='')=>{
     if(!n||!n.uri)return '';  // 未启用/无 URI 不渲染
-    return `<div class="card"><h3>${icon} ${title} ${extra}</h3>
+    const uriCp=n.uri.replace(/`/g,'\\`');
+    return `<div class="card"><h3>${icon} ${title}
+        <button class="mut" style="margin-left:auto;font-size:12px;padding:4px 10px" onclick="showQR('${title}',\`${uriCp}\`)">📱 二维码</button>
+        ${extra}</h3>
       ${row('连接地址',serverIp||n.host||domain)}
       ${row('端口',n.port)}
       ${row('加密方式',n.method)}
@@ -293,13 +300,10 @@ async function loadNode(){
       <div style="border-top:1px solid var(--bd);margin:10px 0"></div>
       <div class="row" style="margin-bottom:6px"><label style="width:110px">完整 URI</label>
         <div class="f"><div class="uri-box">${n.uri}</div></div>
-        <button class="mut" style="flex-shrink:0;margin:0" onclick="copy(\`${n.uri.replace(/`/g,'\\`')}\`)">📋</button></div>
-      <div class="node-card" style="margin-top:8px">
-        <div class="qr"><div id="qr-${title}"></div><div class="help">扫码导入</div></div>
-      </div></div>`;
+        <button class="mut" style="flex-shrink:0;margin:0" onclick="copy(\`${uriCp}\`)">📋</button></div>
+      </div>`;
   };
   let html='';
-  let qrs=[];
   // v1.5.18：无法自动获取公网 IP 时（VPC/NAT），顶部显示引导提示横幅
   if(hint){
     html+=`<div class="card" style="background:var(--warn-bg,rgba(255,193,7,.12));border-left:4px solid var(--warn,#ffc107)">
@@ -308,24 +312,40 @@ async function loadNode(){
         <div><strong>连接地址暂无法显示公网 IP</strong><br><span style="font-size:12px;color:var(--mut)">${hint}</span></div>
       </div></div>`;
   }
-  // 第一组：按 enabled 过滤显示
-  [['Shadowsocks','🔐',j.ss],['AnyTLS','🛡️',j.anytls],['SOCKS5','🧦',j.socks],['NaiveProxy','🌀',j.naive]].forEach(([t,i,n])=>{
-    if(n&&n.enabled&&n.uri){html+=card(t,i,n);qrs.push([t,n.uri])}
+  // 第一组：按 enabled 过滤显示（v1.5.19 顺序：AnyTLS → NaiveProxy → Shadowsocks → SOCKS5）
+  [['AnyTLS','🛡️',j.anytls],['NaiveProxy','🌀',j.naive],['Shadowsocks','🔐',j.ss],['SOCKS5','🧦',j.socks]].forEach(([t,i,n])=>{
+    if(n&&n.enabled&&n.uri){html+=card(t,i,n)}
   });
   // 落地服务（启用时显示，标注出口方式）
   if(j.group2_enabled){
     html+='<div class="card"><h3>🛬 落地服务 <span class="tag" style="background:var(--ok);color:#fff">已启用</span></h3>'
       +'<div class="help">落地服务仅 AnyTLS-2 经远端 SS 出口；NaiveProxy 不参与任何落地。</div></div>';
     [['AnyTLS-2','🔀',j.anytls2,'<span class="tag" style="background:var(--ok);color:#fff">出口经 SS 落地</span>']].forEach(([t,i,n,e])=>{
-      if(n&&n.uri){html+=card(t,i,n,e);qrs.push([t,n.uri])}
+      if(n&&n.uri){html+=card(t,i,n,e)}
     });
   }
   if(!html)html='<div class="card"><div class="mut">当前未启用任何代理服务。请到「服务管理」页安装。</div></div>';
   $('#content').innerHTML=html;
-  qrs.forEach(([k,u])=>{
-    const el=document.getElementById('qr-'+k);if(el){el.innerHTML='';try{new QRCode(el,{text:u,width:140,height:140})}catch(e){}}
-  });
 }
+
+// v1.5.19：二维码浮动展示（点击服务名旁「📱 二维码」按钮触发，点空白关闭）
+function showQR(title,uri){
+  const ov=$('#overlay');
+  $('#obox').innerHTML=`<h3>${title} 客户端二维码</h3>
+    <div id="qr-float" style="display:flex;justify-content:center;margin:14px 0"></div>
+    <div class="uri-box" style="max-width:340px;margin:0 auto;text-align:center">${uri}</div>
+    <div style="margin-top:14px"><button class="primary" onclick="copy(\`${uri.replace(/`/g,'\\`')}\`)">📋 复制 URI</button>
+    <button class="mut" style="margin-left:8px" onclick="closeOverlay()">关闭</button></div>`;
+  ov.style.display='flex';
+  // 渲染二维码（延迟到 DOM 插入后）
+  setTimeout(()=>{
+    const el=document.getElementById('qr-float');
+    if(el){el.innerHTML='';try{new QRCode(el,{text:uri,width:200,height:200})}catch(e){}}
+  },0);
+}
+// 覆盖层关闭（点空白 / 点关闭按钮）
+function closeOverlay(){$('#overlay').style.display='none'}
+$('#overlay').addEventListener('click',e=>{if(e.target===$('#overlay'))closeOverlay()});
 
 // 服务管理（v1.5.18 重构：单菜单合并「服务控制」；每个输入框右侧带 🎲；
 //   操作行一行自适应：[应用][启停][重启][装卸][检测]）
@@ -381,26 +401,10 @@ async function loadMgmt(){
      <div class="help">一站式管理各代理服务：安装/卸载、端口、密钥、启停。修改端口或密钥后点「应用」保存（对应服务自动重启）。🎲 仅生成不保存。落地服务（AnyTLS-2）在「落地服务」页启用后下方显示。</div></div>
 
    <div class="card">
-     <h3>🔐 Shadowsocks ${statusTag(en.ss,st.ss)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_ss" type="number" value="${ports.ss||''}" placeholder="10000-65535"></div></div>
-     <div class="row"><label>加密方式</label><div class="f"><input id="k_ss_method" value="${ss.method||'2022-blake3-aes-128-gcm'}" placeholder="2022-blake3-aes-128-gcm"></div></div>
-     ${frow('SS 密钥','k_ss_key',ss.password,'base64(16字节)密钥')}
-     ${opsRow('ss',en.ss,st.ss)}
-   </div>
-
-   <div class="card">
      <h3>🛡️ AnyTLS ${statusTag(en.anytls,st.anytls)}</h3>
      <div class="row"><label>端口</label><div class="f"><input id="p_anytls" type="number" value="${ports.anytls||''}" placeholder="10000-65535"></div></div>
      ${frow('AnyTLS 密码','k_at_pass',at.password,'任意字符串')}
      ${opsRow('anytls',en.anytls,st.anytls)}
-   </div>
-
-   <div class="card">
-     <h3>🧦 SOCKS5 ${statusTag(en.socks,st.socks)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_socks" type="number" value="${ports.socks||''}" placeholder="10000-65535"></div></div>
-     ${frow('SOCKS 用户名','k_sk_user',sk.user,'用户名')}
-     ${frow('SOCKS 密码','k_sk_pass',sk.pass,'密码')}
-     ${opsRow('socks',en.socks,st.socks)}
    </div>
 
    <div class="card">
@@ -409,6 +413,22 @@ async function loadMgmt(){
      ${frow('Naive 用户名','k_nv_user',nv.user,'用户名')}
      ${frow('Naive 密码','k_nv_pass',nv.pass,'密码')}
      ${opsRow('naive',en.naive,st.naive)}
+   </div>
+
+   <div class="card">
+     <h3>🔐 Shadowsocks ${statusTag(en.ss,st.ss)}</h3>
+     <div class="row"><label>端口</label><div class="f"><input id="p_ss" type="number" value="${ports.ss||''}" placeholder="10000-65535"></div></div>
+     <div class="row"><label>加密方式</label><div class="f"><input id="k_ss_method" value="${ss.method||'2022-blake3-aes-128-gcm'}" placeholder="2022-blake3-aes-128-gcm"></div></div>
+     ${frow('SS 密钥','k_ss_key',ss.password,'base64(16字节)密钥')}
+     ${opsRow('ss',en.ss,st.ss)}
+   </div>
+
+   <div class="card">
+     <h3>🧦 SOCKS5 ${statusTag(en.socks,st.socks)}</h3>
+     <div class="row"><label>端口</label><div class="f"><input id="p_socks" type="number" value="${ports.socks||''}" placeholder="10000-65535"></div></div>
+     ${frow('SOCKS 用户名','k_sk_user',sk.user,'用户名')}
+     ${frow('SOCKS 密码','k_sk_pass',sk.pass,'密码')}
+     ${opsRow('socks',en.socks,st.socks)}
    </div>
 
    ${g2?`
@@ -787,11 +807,11 @@ async function loadSet(){
    ${ipHint}${ipResolved}
    <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
    <div class="help" style="margin:0 0 10px 0">域名伪装站点（格式 <code>proxy:https://站点</code> 反代，或 <code>page</code> 用默认页）。保存后 caddy 自动重载。</div>
-   ${f('disguise_panel','直访伪装(:443)',j.disguise_panel,'proxy:https://example.com')}
+   ${(j.caddy_enable==='true')?f('disguise_panel','直访伪装(:443)',j.disguise_panel,'proxy:https://example.com'):'<div class="row"><label>直访伪装(:443)</label><div class="f"><span class="mut" style="font-size:12px">已禁用（--no-caddy 模式，:443 由现有 web 服务器接管）</span></div></div>'}
    ${f('disguise_naive','Naive伪装(代理端口)',j.disguise_naive,'proxy:https://example.com')}
    <div style="margin-top:6px"><button class="primary" onclick="saveSet()">💾 保存设置</button>
    <span class="mut" style="font-size:12px;margin-left:8px">改 URL 路径或面板端口会重启面板；改伪装站点会重载 caddy。</span></div>
-   <div class="help" style="margin-top:12px">当前协议端口 — SS: ${j.ss_port} / AnyTLS: ${j.anytls_port} / SOCKS5: ${j.socks_port} / Naive: ${j.naive_port}（在"端口管理"修改）</div></div>`;
+   <div class="help" style="margin-top:12px">当前协议端口 — AnyTLS: ${j.anytls_port} / Naive: ${j.naive_port} / SS: ${j.ss_port} / SOCKS5: ${j.socks_port}（在"端口管理"修改）</div></div>`;
 }
 // v1.5.18：主动检测公网 IP（用户点击才外发一次第三方 API，结果填入输入框供确认保存，不直接写配置）
 async function detectPublicIP(btn){

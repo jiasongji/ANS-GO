@@ -301,8 +301,8 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 		"server_ip_hint": hint,
 		"ss":             map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": sec.SSKey, "enabled": c.SvcSSEnabled == "true", "host": c.Domain},
 		"anytls":         map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": sec.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": c.Domain},
-		"socks":          map[string]any{"uri": uris["socks"], "port": c.SocksPort, "user": sec.SocksUser, "pass": sec.SocksPass, "enabled": c.SvcSocksEnabled == "true", "host": c.Domain},
-		"naive":          map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": sec.NaiveUser, "pass": sec.NaivePass, "enabled": c.SvcNaiveEnabled == "true", "host": c.Domain},
+		"socks":          map[string]any{"uri": uris["socks"], "port": c.SocksPort, "user": sec.SocksUser, "pass": sec.SocksPass, "password": sec.SocksPass, "enabled": c.SvcSocksEnabled == "true", "host": c.Domain},
+		"naive":          map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": sec.NaiveUser, "pass": sec.NaivePass, "password": sec.NaivePass, "sni": c.Domain, "enabled": c.SvcNaiveEnabled == "true", "host": c.Domain},
 		"group2_enabled": c.Group2Enabled == "true",
 	}
 	if c.Group2Enabled == "true" {
@@ -798,6 +798,8 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 			"ss_port":              c.SSPort, "anytls_port": c.AnyTLSPort, "socks_port": c.SocksPort, "naive_port": c.NaivePort,
 			"disguise_panel": c.DisguisePanel,
 			"disguise_naive": c.DisguiseNaive,
+			"caddy_enable":  c.CaddyEnable,
+			"cert_mode":     c.CertMode,
 			"cert_days_left": certInfoFull(c)["days_left"],
 		})
 		return

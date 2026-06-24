@@ -27,7 +27,7 @@ WORKDIR /src
 COPY deploy/panel/go.mod deploy/panel/go.sum ./
 RUN go mod download
 COPY deploy/panel/ .
-ARG PANEL_VERSION=1.5.18
+ARG PANEL_VERSION=1.5.19
 RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags "-s -w -X main.version=${PANEL_VERSION}" -o /out/ansgo-panel .
 
