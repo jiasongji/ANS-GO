@@ -99,6 +99,14 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		requireAuth(landingHandler)(w, r)
 	case rel == "api/group2":
 		requireAuth(group2Handler)(w, r)
+	case rel == "api/landings":
+		requireAuth(landingsHandler)(w, r)
+	case rel == "api/landings/update":
+		requireAuth(landingUpdateHandler)(w, r)
+	case rel == "api/landings/delete":
+		requireAuth(landingDeleteHandler)(w, r)
+	case rel == "api/landings/regen":
+		requireAuth(landingRegenHandler)(w, r)
 	case rel == "api/svc-install":
 		requireAuth(svcInstallHandler)(w, r)
 	case rel == "api/health":
@@ -206,13 +214,14 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 			"socks":    svcStatus(socksEnabled, sbActive),
 			"panel":    map[bool]string{true: "active", false: "inactive"}[panelActive],
 			"caddy":    svcStatus(caddyNeeded, caddyActive),
-			"sing-box": svcStatus(ssEnabled || anytlsEnabled || socksEnabled || c.Group2Enabled == "true", sbActive),
+			"sing-box": svcStatus(ssEnabled || anytlsEnabled || socksEnabled || len(enabledLandings(c)) > 0, sbActive),
 		},
 		"svc_enabled": map[string]bool{"ss": ssEnabled, "anytls": anytlsEnabled, "socks": socksEnabled, "naive": naiveEnabled},
 		"ports":       map[string]int{"naive": c.NaivePort, "anytls": c.AnyTLSPort, "socks": c.SocksPort, "ss": c.SSPort, "panel": c.PanelPort},
 		"domain":      c.Domain,
 		"url":         fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath),
 		"mem":         memInfo(), "load": loadAvg(), "uptime": uptimeHours(), "tcp": tcpEstabCount(), "cert": certInfoFull(c),
+		"landings_enabled": len(enabledLandings(c)),
 	}
 	jwrite(w, 200, resp)
 }
@@ -299,6 +308,31 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 	sec := readSecrets()
 	uris := buildURIs(c, sec)
 	ip, hint := resolveServerIP(c)
+	// v1.5.26: 落地服务列表（替代旧 anytls2 单条）
+	landings := []map[string]any{}
+	for _, L := range c.Landings {
+		pass, _, _ := readLandingSecrets(L.ID)
+		via := "direct"
+		if L.RemoteEnabled && L.RemoteHost != "" && L.RemotePort != 0 {
+			if L.RemoteType == "socks" {
+				via = "socks5-landing"
+			} else {
+				via = "ss-landing"
+			}
+		}
+		landings = append(landings, map[string]any{
+			"id":       L.ID,
+			"name":     L.Name,
+			"uri":      uris["landing-"+L.ID],
+			"port":     L.Port,
+			"password": pass,
+			"sni":      c.Domain,
+			"enabled":  L.Enabled,
+			"host":     c.Domain,
+			"via":      via,
+			"remote_type": L.RemoteType,
+		})
+	}
 	resp := map[string]any{
 		"domain":         c.Domain,
 		"server_ip":      ip,
@@ -307,10 +341,7 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 		"anytls":         map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": sec.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": c.Domain},
 		"socks":          map[string]any{"uri": uris["socks"], "port": c.SocksPort, "user": sec.SocksUser, "pass": sec.SocksPass, "password": sec.SocksPass, "enabled": c.SvcSocksEnabled == "true", "host": c.Domain},
 		"naive":          map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": sec.NaiveUser, "pass": sec.NaivePass, "password": sec.NaivePass, "sni": c.Domain, "enabled": c.SvcNaiveEnabled == "true", "host": c.Domain},
-		"group2_enabled": c.Group2Enabled == "true",
-	}
-	if c.Group2Enabled == "true" {
-		resp["anytls2"] = map[string]any{"uri": uris["anytls2"], "port": c.AnyTLS2Port, "password": sec.AnyTLS2Pass, "sni": c.Domain, "enabled": true, "host": c.Domain, "via": "ss-landing"}
+		"landings":       landings,
 	}
 	jwrite(w, 200, resp)
 }
@@ -345,7 +376,7 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			exec.Command(binGenConf, "sing-box").Run()
-			needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || c.Group2Enabled == "true"
+			needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || len(enabledLandings(c)) > 0
 			if needSB {
 				_ = exec.Command("systemctl", "enable", "sing-box").Run()
 				_ = exec.Command("systemctl", "restart", "sing-box").Run()
@@ -576,8 +607,8 @@ func setSecret(key, value string) error {
 //   - ss      : 写 SS_METHOD + SS_KEY（校验 SS2022 密钥长度）
 //   - anytls  : 写 ANYTLS_PASS
 //   - naive   : 写 NAIVE_USER + NAIVE_PASS
-//   - anytls2 : 写 ANYTLS2_PASS
 //   - socks   : 写 SOCKS_USER + SOCKS_PASS
+// 落地服务密钥（原 anytls2）已移到 api/landings/regen（v1.5.26）。
 func keyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
@@ -671,18 +702,8 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		confTarget = "caddy"
-	case "anytls2":
-		if strings.TrimSpace(b.Pass) == "" {
-			jerr(w, 400, "AnyTLS-2 密码不能为空")
-			return
-		}
-		if err := setSecret("ANYTLS2_PASS", strings.TrimSpace(b.Pass)); err != nil {
-			jerr(w, 500, "写入 ANYTLS2_PASS 失败: "+err.Error())
-			return
-		}
-		confTarget = "sing-box"
 	default:
-		jerr(w, 400, "target 必须为 ss/anytls/socks/naive/anytls2")
+		jerr(w, 400, "target 必须为 ss/anytls/socks/naive（落地服务密钥请用 api/landings/regen）")
 		return
 	}
 	// v1.5.24：改为同步 genconf + restart + 验证 active（替代旧的 fire-and-forget）。
@@ -1072,10 +1093,32 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	case "caddy":
 		info = svcInfo{"caddy", "443", caddyActive}
 	case "anytls2":
-		info = svcInfo{"sing-box", strconv.Itoa(c.AnyTLS2Port), c.Group2Enabled == "true"}
+		// v1.5.26 兼容：旧前端书签可能仍用 anytls2，映射到 landings[0]
+		if len(c.Landings) > 0 {
+			info = svcInfo{"sing-box", strconv.Itoa(c.Landings[0].Port), c.Landings[0].Enabled}
+		} else {
+			info = svcInfo{"sing-box", "0", false}
+		}
 	default:
-		jerr(w, 400, "target 必须为 ss/anytls/socks/naive/panel/caddy/anytls2")
-		return
+		// v1.5.26: target=landing-<id> 形式
+		if strings.HasPrefix(b.Target, "landing-") {
+			lid := strings.TrimPrefix(b.Target, "landing-")
+			var L *LandingService
+			for i := range c.Landings {
+				if c.Landings[i].ID == lid {
+					L = &c.Landings[i]
+					break
+				}
+			}
+			if L == nil {
+				jerr(w, 400, "未找到落地服务: "+lid)
+				return
+			}
+			info = svcInfo{"sing-box", strconv.Itoa(L.Port), L.Enabled}
+		} else {
+			jerr(w, 400, "target 必须为 ss/anytls/socks/naive/panel/caddy/landing-<id>")
+			return
+		}
 	}
 	active := svcActive(info.unit)
 	portListening := "no"
@@ -1220,8 +1263,11 @@ func portConflicts(c Config) string {
 	if c.SvcSocksEnabled == "true" {
 		addSB(c.SocksPort, "socks")
 	}
-	if c.Group2Enabled == "true" {
-		addSB(c.AnyTLS2Port, "anytls2")
+	// v1.5.26: 多落地服务端口（每个启用落地的 anytls 端口）
+	for _, L := range c.Landings {
+		if L.Enabled && L.Port != 0 {
+			addSB(L.Port, "landing-"+L.ID+"("+L.Name+")")
+		}
 	}
 	var errs []string
 	for port, names := range caddyPorts {
@@ -1257,7 +1303,6 @@ func bcryptOK(hash, plain string) bool {
 // ---- 密钥读取 ----
 type secretData struct {
 	SSMethod, SSKey, AnyTLSPass, AnyTLSUUID, SocksUser, SocksPass, NaiveUser, NaivePass string
-	AnyTLS2Pass, AnyTLS2UUID                                                            string
 }
 
 func readSecrets() secretData {
@@ -1294,16 +1339,55 @@ func readSecrets() secretData {
 			s.NaiveUser = v
 		case "NAIVE_PASS":
 			s.NaivePass = v
-		case "ANYTLS2_PASS":
-			s.AnyTLS2Pass = v
-		case "ANYTLS2_UUID":
-			s.AnyTLS2UUID = v
 		}
 	}
 	if s.SSMethod == "" {
 		s.SSMethod = "2022-blake3-aes-128-gcm"
 	}
 	return s
+}
+
+// readLandingSecrets 读取单个落地服务的 anytls 凭证（v1.5.26）。
+// secrets.env 里存为 LANDING_<id>_PASS / LANDING_<id>_UUID。
+// 返回 (pass, uuid, found)；found=false 表示凭证尚未生成。
+func readLandingSecrets(id string) (pass, uuid string, found bool) {
+	data, err := os.ReadFile(secretsPath)
+	if err != nil {
+		return "", "", false
+	}
+	wantPass := "LANDING_" + id + "_PASS"
+	wantUUID := "LANDING_" + id + "_UUID"
+	gotPass, gotUUID := false, false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		kv := strings.SplitN(line, "=", 2)
+		k := strings.TrimSpace(kv[0])
+		v := strings.Trim(strings.TrimSpace(kv[1]), `"`)
+		switch k {
+		case wantPass:
+			pass = v
+			gotPass = v != ""
+		case wantUUID:
+			uuid = v
+			gotUUID = v != ""
+		}
+	}
+	found = gotPass && gotUUID
+	return
+}
+
+// enabledLandings 返回启用的落地服务列表（v1.5.26）。
+func enabledLandings(c Config) []LandingService {
+	var out []LandingService
+	for _, L := range c.Landings {
+		if L.Enabled {
+			out = append(out, L)
+		}
+	}
+	return out
 }
 
 func buildURIs(c Config, s secretData) map[string]string {
@@ -1321,10 +1405,37 @@ func buildURIs(c Config, s secretData) map[string]string {
 	if s.NaiveUser != "" {
 		u["naive"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#ANS-GO-Naive", url.QueryEscape(s.NaiveUser), url.QueryEscape(s.NaivePass), c.Domain, c.NaivePort)
 	}
-	if c.Group2Enabled == "true" && s.AnyTLS2Pass != "" && c.AnyTLS2Port != 0 {
-		u["anytls2"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#ANS-GO-AnyTLS2", s.AnyTLS2Pass, c.Domain, c.AnyTLS2Port, c.Domain)
+	// v1.5.26: 多落地服务 URI（key=landing-<id>）
+	for _, L := range c.Landings {
+		if !L.Enabled || L.Port == 0 {
+			continue
+		}
+		pass, _, ok := readLandingSecrets(L.ID)
+		if !ok {
+			continue
+		}
+		// 名称做 URL fragment 安全处理（# 后的字符），去掉空白
+		frag := "ANS-GO-Landing-" + sanitizeLandingName(L.Name)
+		u["landing-"+L.ID] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", pass, c.Domain, L.Port, c.Domain, frag)
 	}
 	return u
+}
+
+// sanitizeLandingName 把落地服务名称里的空白/特殊字符替换，用于 URL fragment 安全。
+func sanitizeLandingName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "unnamed"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '#' || r == '?' || r == '/' {
+			b.WriteRune('_')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // ---- 系统指标 ----
@@ -1448,150 +1559,464 @@ func certInfoFull(c Config) map[string]any {
 	return certInfo(fullchain)
 }
 
-// ===================== 落地 SS 出口设置 =====================
+// ===================== 多落地服务 CRUD（v1.5.26）=====================
+// 替代旧的单个硬编码 AnyTLS-2（landingHandler 远端 SS + group2Handler 启用）。
+// 现在每个落地服务 = 一个 anytls 入站 + 可选一个远端出站（SS/SOCKS5）。
+// 所有写操作走同步事务（v1.5.24 教训）：genconf → restart → verify active，
+// 任一步失败立即报错，绝不 fire-and-forget。
 
-func landingHandler(w http.ResponseWriter, r *http.Request) {
-	c := configGet()
+// landingToMap 把一个 LandingService 转成 API 响应用的 map（含从 secrets 读出的 password/uuid）。
+func landingToMap(L LandingService) map[string]any {
+	pass, uuid, found := readLandingSecrets(L.ID)
+	return map[string]any{
+		"id":             L.ID,
+		"name":           L.Name,
+		"enabled":        L.Enabled,
+		"port":           L.Port,
+		"has_keys":       found,
+		"password":       pass,
+		"uuid":           uuid,
+		"remote_enabled": L.RemoteEnabled,
+		"remote_type":    L.RemoteType,
+		"remote_host":    L.RemoteHost,
+		"remote_port":    L.RemotePort,
+		"remote_method":  L.RemoteMethod,
+		"remote_password": L.RemotePassword,
+		"remote_user":    L.RemoteUser,
+	}
+}
+
+// validateLandingRemote 校验落地服务的远端出口配置（启用时）。
+// 返回错误描述，空串表示通过。
+func validateLandingRemote(L *LandingService) string {
+	if !L.RemoteEnabled {
+		return ""
+	}
+	if L.RemoteHost == "" || L.RemotePort == 0 {
+		return "启用远端落地需填写 host/port"
+	}
+	if L.RemoteType == "socks" {
+		if L.RemoteUser == "" || L.RemotePassword == "" {
+			return "SOCKS5 远端需填写用户名和密码"
+		}
+	} else { // ss（默认）
+		if L.RemoteType == "" {
+			L.RemoteType = "ss"
+		}
+		if L.RemotePassword == "" {
+			return "Shadowsocks 远端需填写密钥"
+		}
+		// SS2022 密钥长度校验（复用 validSS2022Key）
+		if strings.HasPrefix(L.RemoteMethod, "2022-blake3-aes-128") {
+			if !validSS2022Key(L.RemotePassword, 16) {
+				return "密钥长度错误：2022-blake3-aes-128-gcm 需 base64(16字节)=24字符的密钥"
+			}
+		} else if strings.HasPrefix(L.RemoteMethod, "2022-blake3-aes-256") {
+			if !validSS2022Key(L.RemotePassword, 32) {
+				return "密钥长度错误：2022-blake3-aes-256-gcm 需 base64(32字节)=44字符的密钥"
+			}
+		}
+	}
+	return ""
+}
+
+// landingsHandler GET 返回列表；POST 新建落地服务。
+//   GET  -> {landings: [...]}
+//   POST -> {name, port, enabled, remote_*} 创建（分配新 id + 生成凭证）
+func landingsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
-		jwrite(w, 200, map[string]any{
-			"enabled":  c.SSLandingEnabled == "true",
-			"host":     c.SSLandingHost,
-			"port":     c.SSLandingPort,
-			"method":   c.SSLandingMethod,
-			"password": c.SSLandingPassword,
+		c := configGet()
+		out := []map[string]any{}
+		for _, L := range c.Landings {
+			out = append(out, landingToMap(L))
+		}
+		jwrite(w, 200, map[string]any{"landings": out})
+		return
+	}
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	// POST: 新建
+	var b struct {
+		Name     string `json:"name"`
+		Port     int    `json:"port"`
+		Enabled  *bool  `json:"enabled"`
+		RemoteEnabled  *bool  `json:"remote_enabled"`
+		RemoteType     string `json:"remote_type"`
+		RemoteHost     string `json:"remote_host"`
+		RemotePort     int    `json:"remote_port"`
+		RemoteMethod   string `json:"remote_method"`
+		RemotePassword string `json:"remote_password"`
+		RemoteUser     string `json:"remote_user"`
+	}
+	json.NewDecoder(r.Body).Decode(&b)
+	name := strings.TrimSpace(b.Name)
+	if name == "" {
+		jerr(w, 400, "名称不能为空")
+		return
+	}
+	if b.Port < 1 || b.Port > 65535 {
+		jerr(w, 400, "端口必须在 1-65535 范围")
+		return
+	}
+	// 分配新 id（现有最大 id + 1）
+	c := configGet()
+	maxID := 0
+	for _, L := range c.Landings {
+		if n, err := strconv.Atoi(L.ID); err == nil && n > maxID {
+			maxID = n
+		}
+	}
+	newID := strconv.Itoa(maxID + 1)
+	L := LandingService{
+		ID:           newID,
+		Name:         name,
+		Enabled:      true, // 新建默认启用
+		Port:         b.Port,
+		RemoteType:   b.RemoteType,
+		RemoteHost:   strings.TrimSpace(b.RemoteHost),
+		RemotePort:   b.RemotePort,
+		RemoteMethod: b.RemoteMethod,
+		RemotePassword: b.RemotePassword,
+		RemoteUser:   strings.TrimSpace(b.RemoteUser),
+	}
+	if b.Enabled != nil {
+		L.Enabled = *b.Enabled
+	}
+	if b.RemoteEnabled != nil {
+		L.RemoteEnabled = *b.RemoteEnabled
+	}
+	if L.RemoteMethod == "" {
+		L.RemoteMethod = "2022-blake3-aes-128-gcm"
+	}
+	if L.RemoteType == "" {
+		L.RemoteType = "ss"
+	}
+	// 端口冲突预检（用新配置副本）
+	trial := c
+	trial.Landings = append(append([]LandingService{}, c.Landings...), L)
+	if msg := portConflicts(trial); msg != "" {
+		jerr(w, 400, "端口冲突: "+msg)
+		return
+	}
+	// 远端校验
+	if msg := validateLandingRemote(&L); msg != "" {
+		jerr(w, 400, msg)
+		return
+	}
+	// 生成凭证（调 ansgo-admin regen-landing <id>）
+	out, err := exec.Command(binAdmin, "regen-landing", newID).CombinedOutput()
+	if err != nil {
+		jerr(w, 500, "生成落地凭证失败: "+string(out))
+		return
+	}
+	c.Landings = append(c.Landings, L)
+	if err := configSet(c); err != nil {
+		jerr(w, 500, "保存失败: "+err.Error())
+		return
+	}
+	// 同步 genconf + restart + verify（v1.5.24 模式）
+	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
+		jwrite(w, 500, map[string]any{
+			"ok":    false,
+			"error": gerr.Error(),
+			"hint":  "落地服务已创建但 sing-box 未能正常重启，查看 journalctl -u sing-box",
+			"active": active,
+			"landing": landingToMap(L),
 		})
 		return
 	}
-	// POST
-	var b struct {
-		Enabled  *bool   `json:"enabled"`
-		Host     *string `json:"host"`
-		Port     *int    `json:"port"`
-		Method   *string `json:"method"`
-		Password *string `json:"password"`
-	}
-	json.NewDecoder(r.Body).Decode(&b)
-	if b.Enabled != nil {
-		if *b.Enabled {
-			c.SSLandingEnabled = "true"
-		} else {
-			c.SSLandingEnabled = "false"
-		}
-	}
-	if b.Host != nil {
-		c.SSLandingHost = strings.TrimSpace(*b.Host)
-	}
-	if b.Port != nil {
-		c.SSLandingPort = clamp(*b.Port, 1, 65535)
-	}
-	if b.Method != nil && *b.Method != "" {
-		c.SSLandingMethod = *b.Method
-	}
-	if b.Password != nil {
-		c.SSLandingPassword = *b.Password
-	}
-	// 启用时校验完整性 + 密钥长度（2022-blake3-aes-128-gcm 需 16 字节密钥）
-	if c.SSLandingEnabled == "true" {
-		if c.SSLandingHost == "" || c.SSLandingPort == 0 || c.SSLandingPassword == "" {
-			jerr(w, 400, "启用落地需填写 host/port/password")
-			return
-		}
-		// 校验密钥：2022-blake3 方法要求原始字节长度 = 算法要求的字节数
-		if strings.HasPrefix(c.SSLandingMethod, "2022-blake3-aes-128") {
-			if !validSS2022Key(c.SSLandingPassword, 16) {
-				jerr(w, 400, "密钥长度错误：2022-blake3-aes-128-gcm 需 base64(16字节)=24字符的密钥")
-				return
-			}
-		} else if strings.HasPrefix(c.SSLandingMethod, "2022-blake3-aes-256") {
-			if !validSS2022Key(c.SSLandingPassword, 32) {
-				jerr(w, 400, "密钥长度错误：2022-blake3-aes-256-gcm 需 base64(32字节)=44字符的密钥")
-				return
-			}
-		}
-	}
-	if err := configSet(c); err != nil {
-		jerr(w, 500, "保存失败: "+err.Error())
-		return
-	}
-	// 重新生成 sing-box（ss outbound 变更）并重启
-	// v1.5.12：确保 sing-box 已 enable（之前可能被 disable 了）
-	go func() {
-		_ = exec.Command(binGenConf, "sing-box").Run()
-		// 若 sing-box 有任何启用的服务（ss/anytls/group2），确保它运行
-		needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || c.Group2Enabled == "true"
-		if needSB {
-			_ = exec.Command("systemctl", "enable", "sing-box").Run()
-			_ = exec.Command("systemctl", "restart", "sing-box").Run()
-		}
-	}()
-	// 友好提示：落地出口只对 AnyTLS-2 生效，Naive 不参与落地
-	note := ""
-	if c.SSLandingEnabled == "true" && c.Group2Enabled != "true" {
-		note = "落地 SS 已保存，但当前未启用落地服务，ss-out 不会生效"
-	}
-	jwrite(w, 200, map[string]any{"ok": true, "note": note})
+	jwrite(w, 200, map[string]any{"ok": true, "landing": landingToMap(L)})
 }
 
-// ===================== 第2组服务设置 =====================
-
-func group2Handler(w http.ResponseWriter, r *http.Request) {
-	c := configGet()
-	if r.Method == "GET" {
-		sec := readSecrets()
-		jwrite(w, 200, map[string]any{"enabled": c.Group2Enabled == "true", "anytls2_port": c.AnyTLS2Port, "has_keys": sec.AnyTLS2Pass != "", "landing_on": c.SSLandingEnabled == "true"})
+// landingUpdateHandler 修改某个落地服务（全字段）。
+// POST {id, name?, port?, enabled?, remote_*?}
+func landingUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
 		return
 	}
 	var b struct {
-		Enabled     *bool `json:"enabled"`
-		AnyTLS2Port *int  `json:"anytls2_port"`
+		ID             string `json:"id"`
+		Name           *string `json:"name"`
+		Port           *int    `json:"port"`
+		Enabled        *bool   `json:"enabled"`
+		RemoteEnabled  *bool   `json:"remote_enabled"`
+		RemoteType     *string `json:"remote_type"`
+		RemoteHost     *string `json:"remote_host"`
+		RemotePort     *int    `json:"remote_port"`
+		RemoteMethod   *string `json:"remote_method"`
+		RemotePassword *string `json:"remote_password"`
+		RemoteUser     *string `json:"remote_user"`
 	}
 	json.NewDecoder(r.Body).Decode(&b)
-	previouslyEnabled := c.Group2Enabled == "true"
-	prevAnyTLS2Port := c.AnyTLS2Port
-	if b.Enabled != nil {
-		c.Group2Enabled = boolStr(*b.Enabled)
+	c := configGet()
+	idx := -1
+	for i := range c.Landings {
+		if c.Landings[i].ID == b.ID {
+			idx = i
+			break
+		}
 	}
-	if b.AnyTLS2Port != nil {
-		c.AnyTLS2Port = clamp(*b.AnyTLS2Port, 1, 65535)
+	if idx < 0 {
+		jerr(w, 404, "未找到落地服务: "+b.ID)
+		return
 	}
-	if c.Group2Enabled == "true" {
-		if c.AnyTLS2Port == 0 {
-			jerr(w, 400, "启用落地服务需填写 anytls-2 端口")
+	prev := c.Landings[idx] // 备份用于冲突回滚
+	// 应用可选字段
+	if b.Name != nil {
+		if name := strings.TrimSpace(*b.Name); name != "" {
+			c.Landings[idx].Name = name
+		}
+	}
+	if b.Port != nil {
+		if *b.Port < 1 || *b.Port > 65535 {
+			jerr(w, 400, "端口必须在 1-65535 范围")
 			return
 		}
-		sec := readSecrets()
-		if sec.AnyTLS2Pass == "" {
-			out, err := exec.Command(binAdmin, "regen2").CombinedOutput()
-			if err != nil {
-				jerr(w, 500, "自动生成 AnyTLS-2 密钥失败: "+string(out))
-				return
-			}
-		}
+		c.Landings[idx].Port = *b.Port
+	}
+	if b.Enabled != nil {
+		c.Landings[idx].Enabled = *b.Enabled
+	}
+	if b.RemoteEnabled != nil {
+		c.Landings[idx].RemoteEnabled = *b.RemoteEnabled
+	}
+	if b.RemoteType != nil {
+		c.Landings[idx].RemoteType = *b.RemoteType
+	}
+	if c.Landings[idx].RemoteType == "" {
+		c.Landings[idx].RemoteType = "ss"
+	}
+	if b.RemoteHost != nil {
+		c.Landings[idx].RemoteHost = strings.TrimSpace(*b.RemoteHost)
+	}
+	if b.RemotePort != nil {
+		c.Landings[idx].RemotePort = *b.RemotePort
+	}
+	if b.RemoteMethod != nil {
+		c.Landings[idx].RemoteMethod = *b.RemoteMethod
+	}
+	if c.Landings[idx].RemoteMethod == "" {
+		c.Landings[idx].RemoteMethod = "2022-blake3-aes-128-gcm"
+	}
+	if b.RemotePassword != nil {
+		c.Landings[idx].RemotePassword = *b.RemotePassword
+	}
+	if b.RemoteUser != nil {
+		c.Landings[idx].RemoteUser = strings.TrimSpace(*b.RemoteUser)
+	}
+	// 远端校验
+	if msg := validateLandingRemote(&c.Landings[idx]); msg != "" {
+		jerr(w, 400, msg)
+		return
+	}
+	// 端口冲突预检
+	if msg := portConflicts(c); msg != "" {
+		c.Landings[idx] = prev
+		_ = configSet(c)
+		jerr(w, 400, "端口冲突: "+msg+"。已撤销本次端口改动。")
+		return
 	}
 	if err := configSet(c); err != nil {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
 	}
-	if c.Group2Enabled == "true" {
-		if msg := portConflicts(c); msg != "" {
-			c.AnyTLS2Port = prevAnyTLS2Port
-			_ = configSet(c)
-			jerr(w, 400, "端口冲突: "+msg+"。已撤销本次端口改动，请先在面板修改冲突端口。")
-			return
+	// 同步 genconf + restart + verify
+	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
+		jwrite(w, 500, map[string]any{
+			"ok":    false,
+			"error": gerr.Error(),
+			"hint":  "落地服务配置已保存但 sing-box 未能正常重启，查看 journalctl -u sing-box",
+			"active": active,
+		})
+		return
+	}
+	jwrite(w, 200, map[string]any{"ok": true, "landing": landingToMap(c.Landings[idx])})
+}
+
+// landingDeleteHandler 删除某个落地服务（含清理 secrets 凭证）。
+// POST {id}
+func landingDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	var b struct{ ID string `json:"id"` }
+	json.NewDecoder(r.Body).Decode(&b)
+	c := configGet()
+	idx := -1
+	for i := range c.Landings {
+		if c.Landings[i].ID == b.ID {
+			idx = i
+			break
 		}
 	}
-	if previouslyEnabled != (c.Group2Enabled == "true") || c.Group2Enabled == "true" {
-		go func() {
-			_ = exec.Command(binGenConf, "sing-box").Run()
-			_ = exec.Command("systemctl", "enable", "sing-box").Run()
-			_ = exec.Command("systemctl", "restart", "sing-box").Run()
-		}()
+	if idx < 0 {
+		jerr(w, 404, "未找到落地服务: "+b.ID)
+		return
+	}
+	// 清理 secrets 凭证（删 LANDING_<id>_PASS/UUID 行）
+	if err := removeSecretsByPrefix("LANDING_" + b.ID + "_"); err != nil {
+		jerr(w, 500, "清理凭证失败: "+err.Error())
+		return
+	}
+	c.Landings = append(c.Landings[:idx], c.Landings[idx+1:]...)
+	if err := configSet(c); err != nil {
+		jerr(w, 500, "保存失败: "+err.Error())
+		return
+	}
+	// 同步 genconf + restart + verify
+	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
+		jwrite(w, 500, map[string]any{
+			"ok":    false,
+			"error": gerr.Error(),
+			"hint":  "落地服务已删除但 sing-box 未能正常重启，查看 journalctl -u sing-box",
+			"active": active,
+		})
+		return
 	}
 	jwrite(w, 200, map[string]bool{"ok": true})
 }
 
-// v1.5.12: 落地服务密钥自动生成已内联到 group2Handler 启用分支（缺失时直接调
-// ansgo-admin regen2）。原先的 generateGroup2Keys 死代码已删除（从未被调用）。
+// landingRegenHandler 重置某个落地服务的 anytls 凭证（生成新 pass+uuid）。
+// POST {id}
+func landingRegenHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	var b struct{ ID string `json:"id"` }
+	json.NewDecoder(r.Body).Decode(&b)
+	c := configGet()
+	found := false
+	for _, L := range c.Landings {
+		if L.ID == b.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		jerr(w, 404, "未找到落地服务: "+b.ID)
+		return
+	}
+	out, err := exec.Command(binAdmin, "regen-landing", b.ID).CombinedOutput()
+	if err != nil {
+		jerr(w, 500, "重置凭证失败: "+string(out))
+		return
+	}
+	// 同步 genconf + restart + verify（凭证变了，sing-box 要重新读 secrets）
+	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
+		jwrite(w, 500, map[string]any{
+			"ok":    false,
+			"error": gerr.Error(),
+			"hint":  "凭证已重置但 sing-box 未能正常重启，查看 journalctl -u sing-box",
+			"active": active,
+		})
+		return
+	}
+	// 返回更新后的落地服务（含新 password）
+	var updated map[string]any
+	cc := configGet()
+	for _, L := range cc.Landings {
+		if L.ID == b.ID {
+			updated = landingToMap(L)
+			break
+		}
+	}
+	jwrite(w, 200, map[string]any{"ok": true, "landing": updated})
+}
+
+// removeSecretsByPrefix 删除 secrets.env 里所有以指定前缀开头的 key 行（如 LANDING_1_）。
+// 用于删除落地服务时清理孤儿凭证。
+func removeSecretsByPrefix(prefix string) error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	data, err := os.ReadFile(secretsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			lines = append(lines, line)
+			continue
+		}
+		kv := strings.SplitN(trimmed, "=", 2)
+		if len(kv) == 2 && strings.HasPrefix(strings.TrimSpace(kv[0]), prefix) {
+			continue // 跳过该行（删除）
+		}
+		lines = append(lines, line)
+	}
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	tmp := secretsPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(out), 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, secretsPath)
+}
+
+// ===================== 旧落地 API 兼容（v1.5.26 deprecated）=====================
+// 旧 api/landing（远端 SS）和 api/group2（启用）路由保留注册：
+//   - GET  返回迁移提示 + 当前 landings[0] 状态（不报错，避免旧书签 404）
+//   - POST 返回 410 Gone，引导用新 api/landings*
+// 新前端不调旧路由，仅为兼容老浏览器缓存/书签。
+
+func landingHandler(w http.ResponseWriter, r *http.Request) {
+	c := configGet()
+	if r.Method == "GET" {
+		L0 := map[string]any{"enabled": false, "host": "", "port": 0, "method": "2022-blake3-aes-128-gcm", "password": ""}
+		if len(c.Landings) > 0 {
+			L := c.Landings[0]
+			L0 = map[string]any{
+				"enabled":  L.RemoteEnabled && L.RemoteType == "ss",
+				"host":     L.RemoteHost,
+				"port":     L.RemotePort,
+				"method":   L.RemoteMethod,
+				"password": L.RemotePassword,
+			}
+		}
+		jwrite(w, 200, L0)
+		return
+	}
+	jwrite(w, 410, map[string]any{
+		"ok":        false,
+		"error":     "此接口已弃用（v1.5.26），请刷新页面使用新的「落地服务」页管理",
+		"deprecated": true,
+	})
+}
+
+func group2Handler(w http.ResponseWriter, r *http.Request) {
+	c := configGet()
+	if r.Method == "GET" {
+		enabled := false
+		port := 0
+		hasKeys := false
+		landingOn := false
+		if len(c.Landings) > 0 {
+			L := c.Landings[0]
+			enabled = L.Enabled
+			port = L.Port
+			_, _, hasKeys = readLandingSecrets(L.ID)
+			landingOn = L.RemoteEnabled
+		}
+		jwrite(w, 200, map[string]any{"enabled": enabled, "anytls2_port": port, "has_keys": hasKeys, "landing_on": landingOn})
+		return
+	}
+	jwrite(w, 410, map[string]any{
+		"ok":         false,
+		"error":      "此接口已弃用（v1.5.26），请刷新页面使用新的「落地服务」页管理",
+		"deprecated": true,
+	})
+}
 
 // ===================== 服务安装/卸载（面板内按需）=====================
 
@@ -1639,7 +2064,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	needProc := false
 	if procName == "sing-box" {
-		needProc = c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || c.Group2Enabled == "true"
+		needProc = c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || len(enabledLandings(c)) > 0
 	} else if procName == "caddy" {
 		needProc = c.CaddyEnable == "true" || c.SvcNaiveEnabled == "true"
 	}

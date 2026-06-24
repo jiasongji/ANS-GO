@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.25"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.26"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -253,12 +253,14 @@ upgrade_metal(){
     ok "panel 二进制已替换（新 md5 ${new_panel_md5:0:12}...）"
   fi
 
-  # 补 panel.json 缺失字段（socks_port / svc_socks_enabled / panel_title）
-  hr "4/7 补 panel.json 缺失字段（SOCKS5 + 自定义标题）"
+  # 补 panel.json 缺失字段（socks_port / svc_socks_enabled / panel_title）+ v1.5.26 落地服务迁移
+  hr "4/7 补 panel.json 缺失字段 + 多落地服务迁移（v1.5.26）"
   if [ ! -f "$METAL_CONF" ]; then
     warn "$METAL_CONF 不存在，跳过字段补全（panel 启动后会用默认值创建）"
   else
-    python3 - "$METAL_CONF" <<'PY' || warn "python3 补字段失败（手动检查 panel.json 是否有 socks_port/svc_socks_enabled/panel_title）"
+    # 迁移前备份 panel.json（原子写，失败可回滚）
+    cp -a "$METAL_CONF" "$METAL_CONF.bak-pre-v1.5.26" 2>/dev/null || true
+    python3 - "$METAL_CONF" <<'PY' || warn "python3 迁移失败（检查 panel.json 是否完整，备份在 *.bak-pre-v1.5.26）"
 import json, random, sys
 p = sys.argv[1]
 with open(p) as f:
@@ -267,9 +269,13 @@ changed = []
 
 def rand_port(d):
     used = set()
-    for k in ("ss_port","anytls_port","naive_port","naive2_port","anytls2_port",
-              "panel_port","socks_port"):
+    # v1.5.26: 端口来源包括 landings 数组里的 port（替代旧的 anytls2_port）
+    for k in ("ss_port","anytls_port","naive_port","panel_port","socks_port"):
         v = d.get(k)
+        if isinstance(v, int) and v > 0:
+            used.add(v)
+    for L in d.get("landings", []):
+        v = L.get("port")
         if isinstance(v, int) and v > 0:
             used.add(v)
     used |= {80, 443, 25822}
@@ -289,10 +295,47 @@ if not d.get("panel_title"):
     d["panel_title"] = "ANS-GO 管理面板"
     changed.append("panel_title=ANS-GO 管理面板（可在面板设置页改）")
 
-with open(p, "w") as f:
+# === v1.5.26: 多落地服务迁移（幂等：仅当 landings 不存在时执行）===
+# 旧的 group2_enabled/anytls2_port/naive2_port/ss_landing_* 扁平字段 -> landings[0]
+# 迁移后这些旧字段从 panel.json 移除（Go Config 不再读取它们）。
+if "landings" not in d:
+    old_g2 = str(d.get("group2_enabled", "false")).lower() == "true"
+    old_port = d.get("anytls2_port", 0) or 0
+    try:
+        old_port = int(old_port)
+    except (ValueError, TypeError):
+        old_port = 0
+    old_land_en = str(d.get("ss_landing_enabled", "false")).lower() == "true"
+    L0 = {
+        "id": "1",
+        "name": "默认落地",
+        "enabled": old_g2,
+        "port": old_port,
+        "remote_enabled": old_land_en,
+        "remote_type": "ss",
+        "remote_host": d.get("ss_landing_host", "") or "",
+        "remote_port": (lambda x: int(x) if x else 0)(d.get("ss_landing_port", 0)),
+        "remote_method": d.get("ss_landing_method", "2022-blake3-aes-128-gcm") or "2022-blake3-aes-128-gcm",
+        "remote_password": d.get("ss_landing_password", "") or "",
+        "remote_user": "",
+    }
+    d["landings"] = [L0]
+    changed.append(f"landings=[{{id:1,name:'默认落地',enabled:{old_g2},port:{old_port}}}]（从旧 group2/ss_landing 字段迁移）")
+# 移除旧扁平字段（landings 已存在后这些字段无用，留着会让旧版面板困惑）
+for k in ("group2_enabled","anytls2_port","naive2_port",
+          "ss_landing_enabled","ss_landing_host","ss_landing_port",
+          "ss_landing_method","ss_landing_password"):
+    if k in d:
+        d.pop(k)
+
+# 原子写（tmp + rename）
+import os
+tmp = p + ".tmp"
+with open(tmp, "w") as f:
     json.dump(d, f, ensure_ascii=False, indent=2)
+os.replace(tmp, p)
 if changed:
-    print("  已补字段:")
+    print("  已补/迁移字段:")
     for c in changed:
         print(f"    + {c}")
 else:
@@ -300,8 +343,8 @@ else:
 PY
   fi
 
-  # 补 secrets.env 缺失的 SOCKS5 凭证（幂等：已有则跳过）
-  hr "5/7 补 secrets.env 缺失的 SOCKS5 凭证"
+  # v1.5.26: secrets.env 凭证迁移（ANYTLS2_* -> LANDING_1_*，幂等）
+  hr "5/7 补 secrets.env SOCKS5 凭证 + 落地服务凭证迁移"
   if [ ! -f "$METAL_SECRETS" ]; then
     warn "$METAL_SECRETS 不存在，跳过凭证补全"
   else
@@ -314,8 +357,15 @@ PY
       echo "SOCKS_PASS=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c20)" >> "$METAL_SECRETS"
       log "  + SOCKS_PASS（随机生成）"; added=1
     fi
+    # v1.5.26: ANYTLS2_PASS/UUID -> LANDING_1_PASS/UUID（仅当 LANDING_1_* 不存在时）
+    if ! grep -q '^LANDING_1_PASS=' "$METAL_SECRETS"; then
+      if grep -q '^ANYTLS2_PASS=' "$METAL_SECRETS"; then
+        sed -i 's/^ANYTLS2_PASS=/LANDING_1_PASS=/; s/^ANYTLS2_UUID=/LANDING_1_UUID=/' "$METAL_SECRETS"
+        log "  ~ ANYTLS2_PASS/UUID -> LANDING_1_PASS/UUID（v1.5.26 凭证迁移）"; added=1
+      fi
+    fi
     chmod 600 "$METAL_SECRETS"
-    [ "$added" = 0 ] && ok "secrets.env 凭证已齐全，无需补全" || ok "SOCKS5 凭证已补全"
+    [ "$added" = 0 ] && ok "secrets.env 凭证已齐全，无需补全" || ok "secrets.env 凭证已补全/迁移"
   fi
 
   # 重启面板加载新二进制 + 新字段

@@ -335,12 +335,15 @@ async function loadNode(){
   [['AnyTLS','🛡️',j.anytls],['NaiveProxy','🌀',j.naive],['Shadowsocks','🔐',j.ss],['SOCKS5','🧦',j.socks]].forEach(([t,i,n])=>{
     if(n&&n.enabled&&n.uri){html+=card(t,i,n)}
   });
-  // 落地服务（启用时显示，标注出口方式）
-  if(j.group2_enabled){
-    html+='<div class="card"><h3>🛬 落地服务 <span class="tag" style="background:var(--ok);color:#fff">已启用</span></h3>'
-      +'<div class="help">落地服务仅 AnyTLS-2 经远端 SS 出口；NaiveProxy 不参与任何落地。</div></div>';
-    [['AnyTLS-2','🔀',j.anytls2,'<span class="tag" style="background:var(--ok);color:#fff">出口经 SS 落地</span>']].forEach(([t,i,n,e])=>{
-      if(n&&n.uri){html+=card(t,i,n,e)}
+  // v1.5.26 落地服务列表（替代旧 group2/anytls2 单条）：每个 enabled landing 渲染一张节点卡
+  const lands=(j.landings||[]).filter(x=>x.enabled&&x.uri);
+  if(lands.length){
+    const viaLabel={direct:'<span class="tag" style="background:var(--mut,#888);color:#fff">直连 direct</span>',
+      'ss-landing':'<span class="tag" style="background:var(--ok);color:#fff">出口经 SS 落地</span>',
+      'socks5-landing':'<span class="tag" style="background:var(--ok);color:#fff">出口经 SOCKS5 落地</span>'};
+    lands.forEach(L=>{
+      const extra=viaLabel[L.via]||viaLabel['direct'];
+      html+=card('🛬 落地-'+L.name,'🔀',L,extra);
     });
   }
   if(!html)html='<div class="card"><div class="mut">当前未启用任何代理服务。请到「服务管理」页安装。</div></div>';
@@ -560,11 +563,10 @@ async function setPort(t){
 // 密钥管理（手动设置 + 随机生成二合一）
 async function loadKey(){
   const n=await api('api/node');
-  const g2=n.group2_enabled;
-  const ss=n.ss||{}, at=n.anytls||{}, sk=n.socks||{}, nv=n.naive||{}, at2=n.anytls2||{};
+  const ss=n.ss||{}, at=n.anytls||{}, sk=n.socks||{}, nv=n.naive||{};
   const row=(title,html)=>`<div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"><b>${title}</b></div>${html}`;
   $('#content').innerHTML=`<div class="card"><h3>🔑 密钥管理</h3>
-   <div class="help" style="margin-bottom:12px">支持手动输入自定义密钥，或点 🎲 随机生成。保存后旧密钥立即失效，所有客户端需更新；服务会自动重启（断开现有连接）。</div>
+   <div class="help" style="margin-bottom:12px">支持手动输入自定义密钥，或点 🎲 随机生成。保存后旧密钥立即失效，所有客户端需更新；服务会自动重启（断开现有连接）。<br><span class="mut">落地服务的密钥请在「落地服务」页用「🎲 重置凭证」管理。</span></div>
    ${row('Shadowsocks',
      `<div class="row"><label>加密方式</label><div class="f"><input id="k_ss_method" value="${n.ss?(ss.method||'2022-blake3-aes-128-gcm'):''}" placeholder="2022-blake3-aes-128-gcm"></div></div>
       <div class="row"><label>SS 密钥</label><div class="f"><input id="k_ss_key" value="${ss.password||''}" placeholder="base64(16字节)密钥"></div></div>
@@ -580,14 +582,10 @@ async function loadKey(){
      `<div class="row"><label>Naive 用户名</label><div class="f"><input id="k_nv_user" value="${nv.user||''}" placeholder="用户名"></div></div>
       <div class="row"><label>Naive 密码</label><div class="f"><input id="k_nv_pass" value="${nv.pass||''}" placeholder="密码"></div></div>
       <div style="margin-top:6px"><button class="mut" onclick="regen('naive')">🎲 随机生成</button> <button class="primary" onclick="saveKey('naive')">💾 保存</button></div>`)}
-   ${row('AnyTLS-2（第2组'+(g2?'':'，未启用')+'）',
-     `<div class="row"><label>AnyTLS-2 密码</label><div class="f"><input id="k_at2_pass" value="${at2.password||''}" placeholder="第2组未生成时可手动填"></div></div>
-      <div style="margin-top:6px"><button class="mut" onclick="regen('g2')">🎲 随机生成全部第2组</button> <button class="primary" onclick="saveKey('anytls2')">💾 保存</button></div>`)}
-
    </div>`;
 }
 async function regen(t){
-  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy',g2:'AnyTLS-2'}[t]||t;
+  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy'}[t]||t;
   if(!confirm(`⚠️ 确认随机重新生成 ${lbl} 的密钥？\n\n此操作会：\n• 备份当前配置\n• 生成新密钥\n• 重启该服务（断开现有连接）\n• 旧密钥立即失效`))return;
   toast('正在生成新密钥…');
   const j=await api('api/regen',{method:'POST',body:JSON.stringify({target:t})});
@@ -595,13 +593,12 @@ async function regen(t){
   else toast(j.error||'失败');
 }
 async function saveKey(t){
-  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy',anytls2:'AnyTLS-2'}[t]||t;
+  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy'}[t]||t;
   let body={target:t};
   if(t==='ss'){body.method=$('#k_ss_method').value;body.key=$('#k_ss_key').value}
   else if(t==='anytls'){body.pass=$('#k_at_pass').value}
   else if(t==='socks'){body.user=$('#k_sk_user').value;body.pass=$('#k_sk_pass').value}
   else if(t==='naive'){body.user=$('#k_nv_user').value;body.pass=$('#k_nv_pass').value}
-  else if(t==='anytls2'){body.pass=$('#k_at2_pass').value}
   if(!confirm(`⚠️ 确认手动保存 ${lbl} 的密钥？\n\n保存后旧密钥立即失效，所有客户端需更新；对应服务会自动重启。`))return;
   toast('正在保存…');
   const j=await api('api/key',{method:'POST',body:JSON.stringify(body)});
@@ -628,13 +625,15 @@ function genField(id){
   let v='';
   switch(id){
     case 'k_ss_key':    v=randB64Bytes(16);break;                                  // base64(16) SS2022
-    case 'k_at_pass':                                                    // AnyTLS 密码
-    case 'k_at2_pass':   v=randStr(20);break;                                       // 20 位混合
+    case 'k_at_pass':   v=randStr(20);break;                                       // 20 位混合（AnyTLS 密码）
     case 'k_sk_pass':
     case 'k_nv_pass':    v=randStr(18);break;                                       // 18 位混合
     case 'k_sk_user':
     case 'k_nv_user':    v=randStr(8,'abcdefghijklmnopqrstuvwxyz0123456789');break;  // 8 位小写
-    default: return;  // 加密方式等不随机
+    default:
+      // v1.5.26: 落地服务密码字段 id 形如 ld_<id>_pass（在落地服务页用 🎲 随机生成，不自动保存）
+      if(/^ld_.+_pass$/.test(id)){v=randStr(20);break;}
+      return;  // 加密方式等不随机
   }
   const el=document.getElementById(id);
   if(el){el.value=v;el.focus();toast('已生成，需点「应用」保存')}
@@ -702,77 +701,127 @@ async function repairSvc(target,btn){
   if(btn){btn.textContent=old;btn.disabled=false}
 }
 
-// 落地服务（v1.5.12 合并页：原「第二组服务」+「出口落地」）
-//   上半部分：AnyTLS-2 启用 + 端口（落地代理服务）
-//   下半部分：远端 SS 落地服务器（host/port/method/password）
-// 启用时若密钥未生成，后端会自动调 ansgo-admin regen2 生成（无需用户先点「生成」）
+// 落地服务（v1.5.26 重写：从单 AnyTLS-2 改为可创建多个的动态列表）
+//   每个落地服务 = 一个 anytls 入站 + 可选一个远端出站（SS/SOCKS5），在同一张卡片内配置。
+//   - 「➕ 新增」：弹窗填名称+端口创建（后端分配 id + 生成凭证）
+//   - 每张卡片：名称/端口/远端配置可改 -> 💾保存调 update；🎲重置凭证调 regen；🔍检测；🗑删除
+//   - 远端类型下拉切换 SS/SOCKS5 时动态显隐字段
 async function loadLanding(){
-  // v1.5.20: 三路并行拉取 —— group2（启用/端口/密钥状态）+ landing（远端 SS）+ node（AnyTLS-2 密码）
-  const [g,l,n]=await Promise.all([api('api/group2'),api('api/landing'),api('api/node')]);
-  if(g.error)return $('#content').innerHTML=g.error;
-  if(l.error)return $('#content').innerHTML=l.error;
-  const g2En=g.enabled?'已启用':'未启用';
-  const keyStat=g.has_keys?'<span style="color:var(--ok)">已生成</span>':'<span style="color:var(--err)">未生成（启用保存时自动生成）</span>';
-  const landStat=l.enabled?'<span style="color:var(--ok)">已启用</span>':'<span style="color:var(--warn)">未启用（anytls-2 走 direct）</span>';
-  // v1.5.20: AnyTLS-2 密码从 node 接口取（anytls2.password）
-  const at2Pass=(n&&n.anytls2&&n.anytls2.password)||'';
+  const L=await api('api/landings');
+  if(L.error)return $('#content').innerHTML='<div class="card">'+L.error+'</div>';
+  const landings=L.landings||[];
+  const cards=landings.map(renderLandingCard).join('');
   $('#content').innerHTML=`
-   <div class="card"><h3>🛬 落地服务</h3>
-     <div class="help" style="margin-bottom:12px">在原服务基础上额外部署 AnyTLS-2（独立端口/凭证），由中转→远端落地 SS→目标站点。NaiveProxy 保留为普通服务，但不参与任何落地。<br><b>本页是 AnyTLS-2 的唯一管理入口</b>：启用/端口/密钥/检测/远端 SS 全在此。</div>
-     <table>
-       <tr><th>落地代理服务</th><td>${g2En} <span class="mut">·</span> 密钥 ${keyStat}</td></tr>
-       <tr><th>远端 SS 落地</th><td>${landStat}</td></tr>
-     </table>
+   <div class="card"><h3>🛬 落地服务 <button class="primary" style="margin-left:auto;font-size:13px;padding:5px 12px" onclick="newLanding()">➕ 新增落地服务</button></h3>
+     <div class="help" style="margin-bottom:8px">每个落地服务 = 一个独立的 <b>AnyTLS 入站</b>（独立端口/凭证）+ 可选一个<b>远端落地出口</b>（Shadowsocks 或 SOCKS5）。远端关闭则该落地走 direct。<br>NaiveProxy / SOCKS5（第一组）不参与远端落地（caddy/sing-box 进程隔离约束）。</div>
    </div>
-
-   <div class="card"><h3>🔀 落地代理服务（AnyTLS-2）</h3>
-     <div class="row"><label>启用</label><div class="f"><select id="g2_en"><option value="false" ${!g.enabled?'selected':''}>关闭</option><option value="true" ${g.enabled?'selected':''}>启用</option></select></div></div>
-     <div class="row"><label>AnyTLS-2 端口</label><div class="f"><input id="g2_anytls" type="number" value="${g.anytls2_port||''}" placeholder="10000-65535 随机"></div></div>
-     <div class="row"><label>AnyTLS-2 密码</label><div class="f field-inline"><input id="k_at2_pass" value="${at2Pass}" placeholder="启用时自动生成，或手动填/🎲 随机"><button class="mut dice" title="随机生成（不自动保存）" onclick="genField('k_at2_pass')">🎲</button></div></div>
-     <div class="ops-row">
-       <button class="mut" onclick="genG2Keys()">🎲 重新生成密钥</button>
-       <button class="primary" onclick="saveKey('anytls2')">💾 保存密码</button>
-       <button class="primary" onclick="saveG2()">💾 保存启用/端口</button>
-       <button class="mut" onclick="checkHealth('anytls2',this)">🔍 检测</button>
-     </div>
-     <div id="health-anytls2" style="margin-top:6px"></div>
-     <div class="help" style="margin-top:10px">启用时若密钥未生成会<b>自动生成</b>（无需手动点）。「🎲 重新生成密钥」会备份配置并重启服务；「💾 保存密码」仅改密码不重生成 UUID。AnyTLS-2 端口为空时随机分配。</div>
-   </div>
-
-   <div class="card"><h3>🌐 远端 SS 落地服务器</h3>
-     <div class="help" style="margin-bottom:12px">配置另一台服务器的 Shadowsocks 作为 AnyTLS-2 的出口落地（中转→落地）。落地机需已部署 SS（可用 <code>install.sh --landing</code> 一键部署）。密钥错误会导致 AnyTLS-2 连接失败。</div>
-     <div class="row"><label>启用落地出口</label><div class="f"><select id="ld_en"><option value="false" ${!l.enabled?'selected':''}>关闭（anytls-2 走 direct）</option><option value="true" ${l.enabled?'selected':''}>启用</option></select></div></div>
-     <div class="row"><label>落地服务器地址</label><div class="f"><input id="ld_host" value="${l.host||''}" placeholder="落地机 IP 或域名"></div></div>
-     <div class="row"><label>SS 端口</label><div class="f"><input id="ld_port" type="number" value="${l.port||''}" placeholder="8388"></div></div>
-     <div class="row"><label>加密方式</label><div class="f"><input id="ld_method" value="${l.method||'2022-blake3-aes-128-gcm'}"></div></div>
-     <div class="row"><label>SS 密钥</label><div class="f"><input id="ld_pass" value="${l.password||''}" placeholder="base64 密钥"></div></div>
-     <div style="margin-top:8px"><button class="primary" onclick="saveLanding()">💾 保存并应用</button>
-     <span class="mut" style="font-size:12px;margin-left:8px">保存后 sing-box 自动重启。</span></div>
-   </div>`;
+   ${cards||'<div class="card"><div class="mut">暂无落地服务。点上方「➕ 新增落地服务」创建。</div></div>'}`;
 }
-async function genG2Keys(){
-  if(!confirm('重新生成落地服务密钥？（现有 AnyTLS-2 密钥将失效）'))return;
-  toast('正在生成密钥…');
-  const j=await api('api/regen',{method:'POST',body:JSON.stringify({target:'g2'})});
-  if(j.ok){toast('密钥已生成，可在「服务管理」页查看')}
-  else toast(j.error||'失败，请用 SSH: ansgo-admin regen2');
+// 渲染单张落地服务卡片（id 用作 DOM 前缀，保证多卡字段 ID 不冲突）
+function renderLandingCard(L){
+  const p=L.id;
+  const en=L.enabled;
+  const rtype=L.remote_type||'ss';
+  const ssFields=rtype==='ss';
+  const socksFields=rtype==='socks';
+  const rMethod=L.remote_method||'2022-blake3-aes-128-gcm';
+  return `<div class="card"><h3>📦 ${escapeHtml(L.name||('落地#'+p))} ${en?'<span class="tag" style="background:var(--ok);color:#fff">已启用</span>':'<span class="tag">已关闭</span>'}</h3>
+    <div class="row"><label>名称</label><div class="f"><input id="ld_${p}_name" value="${escapeHtml(L.name||'')}" placeholder="如：香港落地"></div></div>
+    <div class="row"><label>端口</label><div class="f"><input id="ld_${p}_port" type="number" value="${L.port||''}" placeholder="10000-65535"></div></div>
+    <div class="row"><label>启用</label><div class="f"><select id="ld_${p}_en"><option value="false" ${!en?'selected':''}>关闭</option><option value="true" ${en?'selected':''}>启用</option></select></div></div>
+    <div class="row"><label>AnyTLS 密码</label><div class="f field-inline"><input id="ld_${p}_pass" value="${escapeHtml(L.password||'')}" placeholder="🎲 随机生成或手动填" ${L.has_keys?'':'disabled'}><button class="mut dice" title="随机生成（不自动保存）" onclick="genField('ld_${p}_pass')">🎲</button></div></div>
+    <div style="border-top:1px solid var(--bd);margin:12px 0;padding-top:10px"><b>🌐 远端落地出口</b></div>
+    <div class="row"><label>启用远端</label><div class="f"><select id="ld_${p}_ren" onchange="toggleRemoteType('${p}')"><option value="false" ${!L.remote_enabled?'selected':''}>关闭（走 direct）</option><option value="true" ${L.remote_enabled?'selected':''}>启用</option></select></div></div>
+    <div class="row"><label>远端类型</label><div class="f"><select id="ld_${p}_rtype" onchange="toggleRemoteType('${p}')"><option value="ss" ${ssFields?'selected':''}>Shadowsocks</option><option value="socks" ${socksFields?'selected':''}>SOCKS5</option></select></div></div>
+    <div class="row"><label>远端地址</label><div class="f"><input id="ld_${p}_rhost" value="${escapeHtml(L.remote_host||'')}" placeholder="落地机 IP 或域名"></div></div>
+    <div class="row"><label>远端端口</label><div class="f"><input id="ld_${p}_rport" type="number" value="${L.remote_port||''}" placeholder="如 8388 / 1080"></div></div>
+    <div id="ld_${p}_sswrap" style="display:${ssFields?'block':'none'}">
+      <div class="row"><label>加密方式</label><div class="f"><input id="ld_${p}_rmethod" value="${escapeHtml(rMethod)}"></div></div>
+      <div class="row"><label>SS 密钥</label><div class="f"><input id="ld_${p}_rpass" value="${escapeHtml(L.remote_password||'')}" placeholder="base64 密钥（2022-blake3 需 24/44 字符）"></div></div>
+    </div>
+    <div id="ld_${p}_sockswrap" style="display:${socksFields?'block':'none'}">
+      <div class="row"><label>SOCKS5 用户</label><div class="f"><input id="ld_${p}_ruser" value="${escapeHtml(L.remote_user||'')}"></div></div>
+      <div class="row"><label>SOCKS5 密码</label><div class="f"><input id="ld_${p}_rpass2" value="${escapeHtml(L.remote_password||'')}"></div></div>
+    </div>
+    <div class="ops-row">
+      <button class="primary" onclick="saveLanding('${p}')">💾 保存</button>
+      <button class="mut" onclick="regenLanding('${p}',this)">🎲 重置凭证</button>
+      <button class="mut" onclick="checkHealth('landing-${p}',this)">🔍 检测</button>
+      <button class="mut" style="color:var(--err)" onclick="deleteLanding('${p}')">🗑 删除</button>
+    </div>
+    <div id="health-landing-${p}" style="margin-top:6px"></div>
+    <div class="help" style="margin-top:8px">「💾 保存」会校验后同步 genconf + 重启 sing-box（约 3-5 秒）；「🎲 重置凭证」生成新 anytls 密码（旧凭证失效）；远端密钥错误会导致落地连接失败。</div>
+  </div>`;
+}
+// escapeHtml 防止名称/密码里的 < > & " ' 破坏 HTML 属性（v1.5.26 新增，落地名称用户可控）
+function escapeHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+// 远端类型切换：显隐 SS / SOCKS5 字段区
+function toggleRemoteType(p){
+  const rtype=$('#ld_'+p+'_rtype').value;
+  $('#ld_'+p+'_sswrap').style.display=(rtype==='ss')?'block':'none';
+  $('#ld_'+p+'_sockswrap').style.display=(rtype==='socks')?'block':'none';
+}
+// 新增落地服务（弹窗）
+async function newLanding(){
+  const name=prompt('请输入落地服务名称：','落地服务');
+  if(name===null)return;
+  const nameT=name.trim();
+  if(!nameT){toast('名称不能为空');return}
+  const portStr=prompt('请输入 anytls 入站端口（10000-65535，须未占用）：','');
+  if(portStr===null)return;
+  const port=parseInt(portStr)||0;
+  if(port<1||port>65535){toast('端口必须在 1-65535');return}
+  toast('正在创建（生成凭证 + genconf + 重启 sing-box）…');
+  const j=await api('api/landings',{method:'POST',body:JSON.stringify({name:nameT,port})});
+  if(j.ok){toast('已创建落地服务「'+nameT+'」')}
+  else{toast(j.error||'创建失败');return}
   loadLanding();
 }
-async function saveG2(){
-  // 端口留空 -> 后端 / group2 接口接收 NaN 时不应崩溃，这里前端兜底转 0
-  const anytls2Port=parseInt($('#g2_anytls').value)||0;
-  const body={enabled:$('#g2_en').value==='true',anytls2_port:anytls2Port};
-  toast('正在应用…（启用时自动生成密钥；sing-box 将重启，约 3-5 秒）');
-  const j=await api('api/group2',{method:'POST',body:JSON.stringify(body)});
-  if(j.ok){toast('已保存，服务正在后台重启')}
-  else toast(j.error||'失败');
+// 保存单个落地服务（全字段）
+async function saveLanding(p){
+  const rtype=$('#ld_'+p+'_rtype').value;
+  const body={
+    id:p,
+    name:$('#ld_'+p+'_name').value,
+    port:parseInt($('#ld_'+p+'_port').value)||0,
+    enabled:$('#ld_'+p+'_en').value==='true',
+    remote_enabled:$('#ld_'+p+'_ren').value==='true',
+    remote_type:rtype,
+    remote_host:$('#ld_'+p+'_rhost').value,
+    remote_port:parseInt($('#ld_'+p+'_rport').value)||0,
+  };
+  // 按远端类型取对应字段
+  if(rtype==='socks'){
+    body.remote_user=$('#ld_'+p+'_ruser').value;
+    body.remote_password=$('#ld_'+p+'_rpass2').value;
+  }else{
+    body.remote_method=$('#ld_'+p+'_rmethod').value;
+    body.remote_password=$('#ld_'+p+'_rpass').value;
+  }
+  toast('正在应用…（校验 + genconf + 重启 sing-box，约 3-5 秒）');
+  const j=await api('api/landings/update',{method:'POST',body:JSON.stringify(body)});
+  if(j.ok)toast('已保存，sing-box 已重启');
+  else toast(j.error||'保存失败');
 }
-async function saveLanding(){
-  const body={enabled:$('#ld_en').value==='true',host:$('#ld_host').value,port:parseInt($('#ld_port').value),method:$('#ld_method').value,password:$('#ld_pass').value};
-  toast('正在应用…（sing-box 将重启）');
-  const j=await api('api/landing',{method:'POST',body:JSON.stringify(body)});
-  if(j.ok)toast('已保存，sing-box 正在重启');
+// 重置某落地服务的 anytls 凭证
+async function regenLanding(p,btn){
+  if(!confirm('重置落地服务 #'+p+' 的凭证？（现有密码将失效，客户端需更新）'))return;
+  if(btn){const old=btn.textContent;btn.textContent='⏳';btn.disabled=true;
+  toast('正在重置凭证…');
+  const j=await api('api/landings/regen',{method:'POST',body:JSON.stringify({id:p})});
+  if(j.ok)toast('凭证已重置，sing-box 已重启');
   else toast(j.error||'失败');
+  btn.textContent=old;btn.disabled=false;}
+  loadLanding();
+}
+// 删除落地服务
+async function deleteLanding(p){
+  if(!confirm('删除落地服务 #'+p+'？（凭证会一并清理，sing-box 将重启）'))return;
+  toast('正在删除…');
+  const j=await api('api/landings/delete',{method:'POST',body:JSON.stringify({id:p})});
+  if(j.ok)toast('已删除');
+  else{toast(j.error||'删除失败');return}
+  loadLanding();
 }
 
 // 证书（来源切换 + 续期/重新加载）

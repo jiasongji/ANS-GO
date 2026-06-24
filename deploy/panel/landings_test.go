@@ -1,0 +1,309 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// TestLandingsConfig_LoadsArray 验证含 landings 数组的 panel.json 能被正确加载到 Config.Landings。
+// v1.5.26 多落地服务的配置加载回归测试。
+func TestLandingsConfig_LoadsArray(t *testing.T) {
+	tmp := t.TempDir()
+	confPath = filepath.Join(tmp, "panel.json")
+	secretsPath = filepath.Join(tmp, "secrets.env")
+	panelJSON := `{
+  "domain": "your-domain.com",
+  "panel_port": 15608,
+  "url_path": "/admin/",
+  "svc_ss_enabled": "false",
+  "landings": [
+    {"id":"1","name":"香港落地","enabled":true,"port":30001,
+     "remote_enabled":true,"remote_type":"ss","remote_host":"1.2.3.4","remote_port":8388,
+     "remote_method":"2022-blake3-aes-128-gcm","remote_password":"AAAAAAAAAAAAAAAAAAAAAA==","remote_user":""},
+    {"id":"2","name":"日本SOCKS","enabled":true,"port":30002,
+     "remote_enabled":true,"remote_type":"socks","remote_host":"5.6.7.8","remote_port":1080,
+     "remote_method":"","remote_password":"sockspass","remote_user":"socksuser"},
+    {"id":"3","name":"直连落地","enabled":false,"port":30003,
+     "remote_enabled":false,"remote_type":"ss","remote_host":"","remote_port":0,
+     "remote_method":"","remote_password":"","remote_user":""}
+  ]
+}`
+	os.WriteFile(confPath, []byte(panelJSON), 0600)
+	os.WriteFile(secretsPath, []byte("SS_KEY=dGVzdA==\n"), 0600)
+
+	c, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if len(c.Landings) != 3 {
+		t.Fatalf("Landings len = %d, want 3", len(c.Landings))
+	}
+	// 第1个：SS 远端
+	l1 := c.Landings[0]
+	if l1.ID != "1" || l1.Name != "香港落地" || !l1.Enabled || l1.Port != 30001 {
+		t.Errorf("landing[0] = %+v, want id=1 name=香港落地 enabled=true port=30001", l1)
+	}
+	if l1.RemoteType != "ss" || l1.RemoteHost != "1.2.3.4" || l1.RemoteMethod != "2022-blake3-aes-128-gcm" {
+		t.Errorf("landing[0] remote mismatch: %+v", l1)
+	}
+	// 第2个：SOCKS5 远端
+	l2 := c.Landings[1]
+	if l2.RemoteType != "socks" || l2.RemoteUser != "socksuser" || l2.RemotePassword != "sockspass" {
+		t.Errorf("landing[1] socks remote mismatch: %+v", l2)
+	}
+	// 第3个：未启用
+	l3 := c.Landings[2]
+	if l3.Enabled {
+		t.Errorf("landing[2] should be disabled")
+	}
+}
+
+// TestLandingsConfig_EmptyArray 验证无 landings 字段（新部署 install.sh 写 "landings":[]）时
+// Config.Landings 为 nil/空，不 panic。
+func TestLandingsConfig_EmptyArray(t *testing.T) {
+	tmp := t.TempDir()
+	confPath = filepath.Join(tmp, "panel.json")
+	secretsPath = filepath.Join(tmp, "secrets.env")
+	panelJSON := `{
+  "domain": "your-domain.com",
+  "panel_port": 15608,
+  "url_path": "/admin/",
+  "svc_ss_enabled": "false",
+  "landings": []
+}`
+	os.WriteFile(confPath, []byte(panelJSON), 0600)
+	os.WriteFile(secretsPath, []byte("SS_KEY=dGVzdA==\n"), 0600)
+
+	c, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if len(c.Landings) != 0 {
+		t.Errorf("Landings len = %d, want 0", len(c.Landings))
+	}
+	// enabledLandings 不应 panic
+	if e := enabledLandings(c); len(e) != 0 {
+		t.Errorf("enabledLandings len = %d, want 0", len(e))
+	}
+}
+
+// TestLandingsPortConflict_Detected 验证两个启用的落地服务用相同端口时，portConflicts 报告冲突。
+// v1.5.26 端口冲突检测（sing-box 同进程无法 bind 相同端口）。
+func TestLandingsPortConflict_Detected(t *testing.T) {
+	c := Config{
+		Domain: "your-domain.com",
+		Landings: []LandingService{
+			{ID: "1", Name: "落地A", Enabled: true, Port: 30001},
+			{ID: "2", Name: "落地B", Enabled: true, Port: 30001}, // 与 A 同端口
+		},
+	}
+	msg := portConflicts(c)
+	if msg == "" {
+		t.Fatalf("portConflicts 应报告端口冲突（两个启用落地用 30001），但返回空串")
+	}
+	t.Logf("检测到端口冲突（符合预期）: %s", msg)
+}
+
+// TestLandingsPortConflict_NoConflict 验证不同端口 + 未启用落地的端口不参与检测。
+func TestLandingsPortConflict_NoConflict(t *testing.T) {
+	c := Config{
+		Domain:         "your-domain.com",
+		SvcSSEnabled:   "true",
+		SSPort:         33899,
+		SvcAnyTLSEnabled: "true",
+		AnyTLSPort:     21111,
+		Landings: []LandingService{
+			{ID: "1", Name: "落地A", Enabled: true, Port: 30001},
+			{ID: "2", Name: "落地B", Enabled: false, Port: 30001}, // 未启用，不冲突
+			{ID: "3", Name: "落地C", Enabled: true, Port: 30002},
+		},
+	}
+	msg := portConflicts(c)
+	if msg != "" {
+		t.Errorf("portConflicts 不应报告冲突，但返回: %s", msg)
+	}
+}
+
+// TestLandingsSSKeyValidation 验证 SS2022 密钥长度校验：短密钥应被拒绝。
+// 2022-blake3-aes-128-gcm 需 base64(16字节)=24字符密钥。
+func TestLandingsSSKeyValidation(t *testing.T) {
+	// 正确长度（base64(16) = 24 字符）
+	good := &LandingService{
+		RemoteEnabled: true, RemoteType: "ss",
+		RemoteHost: "1.2.3.4", RemotePort: 8388,
+		RemoteMethod: "2022-blake3-aes-128-gcm",
+		RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA==", // 24 字符
+	}
+	if msg := validateLandingRemote(good); msg != "" {
+		t.Errorf("正确长度 SS2022 密钥被误拒: %s", msg)
+	}
+
+	// 错误长度（太短）
+	bad := &LandingService{
+		RemoteEnabled: true, RemoteType: "ss",
+		RemoteHost: "1.2.3.4", RemotePort: 8388,
+		RemoteMethod: "2022-blake3-aes-128-gcm",
+		RemotePassword: "short", // 错误长度
+	}
+	msg := validateLandingRemote(bad)
+	if msg == "" {
+		t.Errorf("错误长度 SS2022 密钥应被拒绝，但通过了校验")
+	}
+	t.Logf("短密钥被拒（符合预期）: %s", msg)
+}
+
+// TestLandingsSocksValidation 验证 SOCKS5 远端必须有 user+password。
+func TestLandingsSocksValidation(t *testing.T) {
+	// 缺用户名
+	missingUser := &LandingService{
+		RemoteEnabled: true, RemoteType: "socks",
+		RemoteHost: "5.6.7.8", RemotePort: 1080,
+		RemoteUser: "", RemotePassword: "pass",
+	}
+	if msg := validateLandingRemote(missingUser); msg == "" {
+		t.Errorf("SOCKS5 缺用户名应被拒绝")
+	}
+	// 完整
+	good := &LandingService{
+		RemoteEnabled: true, RemoteType: "socks",
+		RemoteHost: "5.6.7.8", RemotePort: 1080,
+		RemoteUser: "user", RemotePassword: "pass",
+	}
+	if msg := validateLandingRemote(good); msg != "" {
+		t.Errorf("完整 SOCKS5 配置被误拒: %s", msg)
+	}
+}
+
+// TestLandingsRemoteDisabled_NoValidation 验证 remote_enabled=false 时不校验远端（走 direct）。
+func TestLandingsRemoteDisabled_NoValidation(t *testing.T) {
+	l := &LandingService{
+		RemoteEnabled: false, RemoteType: "ss",
+		RemoteHost: "", RemotePort: 0, // 全空，但 remote 关闭
+	}
+	if msg := validateLandingRemote(l); msg != "" {
+		t.Errorf("remote_enabled=false 时不应校验远端，但返回: %s", msg)
+	}
+}
+
+// TestRemoveSecretsByPrefix 验证删除落地服务时清理孤儿凭证。
+// secrets.env 里的 LANDING_<id>_PASS/UUID 行应被删除，其他行保留。
+func TestRemoveSecretsByPrefix(t *testing.T) {
+	tmp := t.TempDir()
+	secretsPath = filepath.Join(tmp, "secrets.env")
+	content := `SS_KEY=dGVzdA==
+ANYTLS_PASS=atpass
+LANDING_1_PASS=l1pass
+LANDING_1_UUID=uuid1
+LANDING_2_PASS=l2pass
+LANDING_2_UUID=uuid2
+`
+	os.WriteFile(secretsPath, []byte(content), 0600)
+
+	// 删除落地服务 #2 的凭证
+	if err := removeSecretsByPrefix("LANDING_2_"); err != nil {
+		t.Fatalf("removeSecretsByPrefix: %v", err)
+	}
+
+	data, _ := os.ReadFile(secretsPath)
+	got := string(data)
+	// LANDING_2_* 应被删除
+	if contains(got, "LANDING_2_PASS") || contains(got, "LANDING_2_UUID") {
+		t.Errorf("LANDING_2_* 未被清理，仍存在: %s", got)
+	}
+	// 其他凭证应保留
+	for _, want := range []string{"SS_KEY=", "ANYTLS_PASS=", "LANDING_1_PASS=", "LANDING_1_UUID="} {
+		if !contains(got, want) {
+			t.Errorf("清理后应保留 %s，但缺失。内容: %s", want, got)
+		}
+	}
+}
+
+// TestReadLandingSecrets 验证读取单个落地服务的凭证。
+func TestReadLandingSecrets(t *testing.T) {
+	tmp := t.TempDir()
+	secretsPath = filepath.Join(tmp, "secrets.env")
+	content := `SS_KEY=dGVzdA==
+LANDING_1_PASS=mypass
+LANDING_1_UUID=11111111-1111-1111-1111-111111111111
+`
+	os.WriteFile(secretsPath, []byte(content), 0600)
+
+	pass, uuid, found := readLandingSecrets("1")
+	if !found {
+		t.Fatalf("readLandingSecrets(1) found=false, want true")
+	}
+	if pass != "mypass" {
+		t.Errorf("pass = %q, want mypass", pass)
+	}
+	if uuid != "11111111-1111-1111-1111-111111111111" {
+		t.Errorf("uuid = %q", uuid)
+	}
+
+	// 不存在的落地 id
+	_, _, found2 := readLandingSecrets("99")
+	if found2 {
+		t.Errorf("readLandingSecrets(99) should be not found")
+	}
+}
+
+// TestBuildURIs_Landings 验证 buildURIs 为每个启用且有凭证的落地生成 URI（key=landing-<id>）。
+func TestBuildURIs_Landings(t *testing.T) {
+	tmp := t.TempDir()
+	confPath = filepath.Join(tmp, "panel.json")
+	secretsPath = filepath.Join(tmp, "secrets.env")
+	// 两个落地：#1 有凭证（生成 URI），#2 无凭证（不生成），#3 未启用（不生成）
+	os.WriteFile(confPath, []byte(`{"domain":"your-domain.com","landings":[
+		{"id":"1","name":"A","enabled":true,"port":30001},
+		{"id":"2","name":"B","enabled":true,"port":30002},
+		{"id":"3","name":"C","enabled":false,"port":30003}
+	]}`), 0600)
+	os.WriteFile(secretsPath, []byte("LANDING_1_PASS=p1\nLANDING_1_UUID=u1\n"), 0600)
+
+	c, _ := loadConfig()
+	uris := buildURIs(c, secretData{})
+	// landing-1 应有 URI
+	if u, ok := uris["landing-1"]; !ok || u == "" {
+		t.Errorf("landing-1 应生成 URI，got: %q (ok=%v)", u, ok)
+	} else {
+		t.Logf("landing-1 URI: %s", u)
+	}
+	// landing-2 无凭证，不应有 URI
+	if u, ok := uris["landing-2"]; ok {
+		t.Errorf("landing-2 无凭证不应生成 URI，got: %q", u)
+	}
+	// landing-3 未启用
+	if u, ok := uris["landing-3"]; ok {
+		t.Errorf("landing-3 未启用不应生成 URI，got: %q", u)
+	}
+}
+
+// TestSanitizeLandingName 验证落地名称做 URL fragment 安全处理。
+func TestSanitizeLandingName(t *testing.T) {
+	cases := map[string]string{
+		"香港落地":       "香港落地", // 中文保留
+		"HK Landing": "HK_Landing", // 空格 -> _
+		"":           "unnamed",    // 空 -> unnamed
+		"a#b?c/d":    "a_b_c_d",    // 特殊字符 -> _
+		"  trim  ":   "trim",       // trim 后
+	}
+	for in, want := range cases {
+		got := sanitizeLandingName(in)
+		if got != want {
+			t.Errorf("sanitizeLandingName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// contains 简单字符串包含（避免 import strings 的测试辅助）。
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (indexOf(s, sub) >= 0)
+}
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}

@@ -55,16 +55,10 @@ SOCKS_PORT = int(g("socks_port", 10808))
 NAIVE_PORT = int(g("naive_port", 44333))
 SS_METHOD = os.environ.get("SS_METHOD", "2022-blake3-aes-128-gcm")
 
-# 落地服务（额外 anytls-2，可选走 ss 落地；Naive 不参与落地）
-GROUP2_ENABLED = str(g("group2_enabled", "false")).lower() == "true"
-ANYTLS2_PORT = int(g("anytls2_port", 0)) if g("anytls2_port") else 0
-
-# 落地 SS 出口配置（第2组流量走这里）
-LANDING_ENABLED = str(g("ss_landing_enabled", "false")).lower() == "true"
-LANDING_HOST = g("ss_landing_host", "")
-LANDING_PORT = int(g("ss_landing_port", 0)) if g("ss_landing_port") else 0
-LANDING_METHOD = g("ss_landing_method", "2022-blake3-aes-128-gcm")
-LANDING_PASS = g("ss_landing_password", "")
+# v1.5.26: 多落地服务（替代旧的 group2_enabled/anytls2_port/ss_landing_* 扁平字段）。
+#   panel.json 的 landings 数组，每项 = 一个 anytls 入站 + 可选一个远端出站（SS/SOCKS5）。
+#   旧的 group2 单落地服务由 upgrade.sh 迁移为 landings[0]。
+LANDINGS = g("landings", []) or []
 
 # 伪装站点
 DISGUISE_PANEL = g("disguise_panel", "proxy:https://example.com")
@@ -121,17 +115,14 @@ if SVC_SOCKS and (not SOCKS_USER or not SOCKS_PASS):
 NAIVE_USER = sec("NAIVE_USER")
 NAIVE_PASS = sec("NAIVE_PASS")
 
-# 落地服务 AnyTLS-2 密钥（启用时必需）
-ANYTLS2_PASS = secrets.get("ANYTLS2_PASS", "")
-ANYTLS2_UUID = secrets.get("ANYTLS2_UUID", "")
-if GROUP2_ENABLED:
-    for k in ("ANYTLS2_PASS", "ANYTLS2_UUID"):
-        if not secrets.get(k):
-            print(f"ansgo-genconf: AnyTLS-2 启用但缺少 {k}（执行 ansgo-admin regen2 生成）", file=sys.stderr)
-            sys.exit(2)
+# v1.5.26: 多落地服务 anytls 凭证（启用时必需）。
+#   凭证存为 LANDING_<id>_PASS / LANDING_<id>_UUID（由 ansgo-admin regen-landing <id> 生成）。
+#   缺凭证则在下方生成 inbound 时报错退出（同旧 anytls2 逻辑）。
+def landing_secret(id, key_suffix):
+    return secrets.get(f"LANDING_{id}_{key_suffix}", "")
 
 # ===================== 生成 sing-box config =====================
-# v1.5.14: 端口冲突预检测——naive 走 caddy，ss/anytls/socks/anytls2 同走 sing-box，
+# v1.5.14: 端口冲突预检测——naive 走 caddy，ss/anytls/socks/落地服务 同走 sing-box，
 #   两服务端口撞了会导致生成的配置语法/语义错误（caddy "ambiguous site definition" 或
 #   sing-box 同进程 bind 同端口失败），服务进入重启循环。genconf 在生成前必须显式拒绝。
 def check_port_conflicts():
@@ -154,8 +145,15 @@ def check_port_conflicts():
         add_sb(ANYTLS_PORT, "anytls")
     if SVC_SOCKS:
         add_sb(SOCKS_PORT, "socks")
-    if GROUP2_ENABLED and ANYTLS2_PORT:
-        add_sb(ANYTLS2_PORT, "anytls2")
+    # v1.5.26: 多落地服务端口（每个启用落地的 anytls 端口）
+    for L in LANDINGS:
+        if str(L.get("enabled", "false")).lower() in ("true", "1") and L.get("port"):
+            try:
+                lport = int(L["port"])
+            except (ValueError, TypeError):
+                continue
+            lname = L.get("name", L.get("id", "?"))
+            add_sb(lport, f"landing-{L.get('id','?')}({lname})")
 
     errors = []
     for port, names in caddy_ports.items():
@@ -201,37 +199,71 @@ def gen_singbox():
             "users": [{"username": SOCKS_USER, "password": SOCKS_PASS}],
         })
 
-    # 第2组 anytls-2 inbound（需第2组启用）
-    if GROUP2_ENABLED and ANYTLS2_PORT:
+    # v1.5.26: 多落地服务 inbound + outbound + route 规则。
+    #   遍历 landings 数组，每个启用的落地服务：
+    #     - 1 个 anytls inbound:  tag = "landing-in-<id>"
+    #     - 若 remote_enabled: 1 个 outbound: tag = "landing-out-<id>"（shadowsocks 或 socks）
+    #     - 1 条 route 规则:     inbound=[landing-in-<id>] -> outbound=landing-out-<id>
+    #       （remote_enabled=false 时不加 outbound/rule，该落地走 sing-box 默认 direct）
+    outbounds = [{"type": "direct", "tag": "direct"}]
+    rules = []
+    for L in LANDINGS:
+        if str(L.get("enabled", "false")).lower() not in ("true", "1"):
+            continue
+        try:
+            lport = int(L.get("port", 0))
+        except (ValueError, TypeError):
+            lport = 0
+        if not lport:
+            continue
+        lid = str(L.get("id", ""))
+        if not lid:
+            print("ansgo-genconf: 落地服务缺少 id 字段，跳过", file=sys.stderr)
+            continue
+        lp = landing_secret(lid, "PASS")
+        lu = landing_secret(lid, "UUID")
+        if not lp or not lu:
+            print(f"ansgo-genconf: 落地服务 #{lid} 启用但缺少 LANDING_{lid}_PASS/UUID"
+                  f"（执行 ansgo-admin regen-landing {lid} 生成）", file=sys.stderr)
+            sys.exit(2)
+        in_tag = f"landing-in-{lid}"
+        out_tag = f"landing-out-{lid}"
         inbounds.append({
-            "type": "anytls", "tag": "anytls-in2",
-            "listen": "::", "listen_port": ANYTLS2_PORT,
-            "users": [{"name": ANYTLS2_UUID, "password": ANYTLS2_PASS}],
+            "type": "anytls", "tag": in_tag,
+            "listen": "::", "listen_port": lport,
+            "users": [{"name": lu, "password": lp}],
             "tls": {
                 "enabled": True, "server_name": DOMAIN,
                 "certificate_path": FULLCHAIN,
                 "key_path": PRIVKEY,
             },
         })
-
-    outbounds = [{"type": "direct", "tag": "direct"}]
-
-    # 落地 SS outbound（仅 AnyTLS-2 走它；Naive 不参与任何落地）
-    rules = []
-    if LANDING_ENABLED and LANDING_HOST and LANDING_PORT and LANDING_PASS:
-        outbounds.append({
-            "type": "shadowsocks", "tag": "ss-out",
-            "server": LANDING_HOST, "server_port": LANDING_PORT,
-            "method": LANDING_METHOD, "password": LANDING_PASS,
-        })
-        # 仅 anytls-2 inbound 路由到 ss-out（v1.5.12 修复：原代码错误地引用了
-        # naive-in2，但 NaiveProxy 由 caddy 承载，sing-box 里没有该 inbound tag，
-        # 导致 sing-box 校验失败/规则被丢弃，第二组流量全部走 direct）
-        if GROUP2_ENABLED and ANYTLS2_PORT:
-            rules.append({
-                "inbound": ["anytls-in2"],
-                "outbound": "ss-out",
-            })
+        # 远端出口（仅 remote_enabled 且配置完整时生成）
+        r_en = str(L.get("remote_enabled", "false")).lower() in ("true", "1")
+        rtype = L.get("remote_type", "ss") or "ss"
+        rhost = L.get("remote_host", "")
+        try:
+            rport = int(L.get("remote_port", 0) or 0)
+        except (ValueError, TypeError):
+            rport = 0
+        if r_en and rhost and rport:
+            rmethod = L.get("remote_method", "2022-blake3-aes-128-gcm") or "2022-blake3-aes-128-gcm"
+            rpass = L.get("remote_password", "")
+            if rtype == "socks":
+                outbounds.append({
+                    "type": "socks", "tag": out_tag,
+                    "server": rhost, "server_port": rport,
+                    "username": L.get("remote_user", ""),
+                    "password": rpass,
+                })
+            else:  # ss（默认）
+                outbounds.append({
+                    "type": "shadowsocks", "tag": out_tag,
+                    "server": rhost, "server_port": rport,
+                    "method": rmethod, "password": rpass,
+                })
+            rules.append({"inbound": [in_tag], "outbound": out_tag})
+        # remote_enabled=false -> 该落地走 direct（不加 outbound/rule，sing-box 默认 direct）
 
     config = {
         "log": {"level": "warn", "timestamp": True},
@@ -255,10 +287,21 @@ def gen_singbox():
     note = f"ss={SS_PORT}, anytls={ANYTLS_PORT}"
     if SVC_SOCKS:
         note += f", socks={SOCKS_PORT}"
-    if GROUP2_ENABLED:
-        note += f", anytls2={ANYTLS2_PORT}"
-        if LANDING_ENABLED and ANYTLS2_PORT:
-            note += f"->ss-landing({LANDING_HOST}:{LANDING_PORT})"
+    # v1.5.26: 列出每个落地服务的端口 + 出口方式
+    for L in LANDINGS:
+        if str(L.get("enabled", "false")).lower() not in ("true", "1"):
+            continue
+        lname = L.get("name", L.get("id", "?"))
+        try:
+            lport = int(L.get("port", 0))
+        except (ValueError, TypeError):
+            continue
+        via = "direct"
+        if str(L.get("remote_enabled", "false")).lower() in ("true", "1"):
+            rtype = L.get("remote_type", "ss")
+            rhost = L.get("remote_host", "")
+            via = f"->{rtype}-landing({rhost})"
+        note += f", landing[{lname}]={lport}{via}"
 
     print(f"已生成 /etc/sing-box/config.json ({note}, sni={DOMAIN})")
 

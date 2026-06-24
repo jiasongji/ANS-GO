@@ -5,12 +5,13 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前版本：v1.5.25**（install.sh 脚本版本 v1.5.25；**面板 Go 二进制 v1.5.25 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
+> **当前版本：v1.5.26**（install.sh 脚本版本 v1.5.26；**面板 Go 二进制 v1.5.26 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
 >
 > ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
+> | **v1.5.26** | **多落地服务（multi-landing）**：落地服务从硬编码单个 AnyTLS-2 改为**可创建多个的数组**。`panel.json` 新增 `landings: []`（每项 = 一个 anytls 入站 + 可选一个远端出站），移除旧的 `group2_enabled`/`anytls2_port`/`ss_landing_*` 扁平字段。远端出口**每落地独立开关**，支持 **SS + SOCKS5** 两种远端协议（原仅 SS）。`upgrade.sh` 把旧单落地自动迁移为 `landings[0]`（幂等 + 备份），secrets 里 `ANYTLS2_*` rename 为 `LANDING_1_*`。新增 RESTful `api/landings` CRUD（GET/POST/update/delete/regen）+ `ansgo-admin regen-landing <id>`；`regen2`/`group2` 保留兼容别名。前端落地服务页改动态列表 + 新增按钮；节点信息页遍历 landings 渲染 | **「扁平字段 → 数组」迁移必须幂等 + 自动**：升级脚本用「字段不存在才迁移」守卫 + 迁移后删旧字段，避免重复执行破坏数据；secrets key rename 用 grep 守卫（`LANDING_1_PASS` 已存在则跳过 sed）。**用户可控字符串插进 URL fragment 必须转义**：落地名称进 `anytls://...#ANS-GO-Landing-<name>`，`< > & " '` + 空格/`#?/` 会破坏 URI，前端 `escapeHtml` + Go `sanitizeLandingName` 双层处理。**CRUD 配置变更走同步事务**（复用 v1.5.24 的 `genconfRestartVerify`：genconf→restart→verify active），新增落地/改远端/删除/重置凭证全部同步，绝不 fire-and-forget。**sing-box tag 全局唯一**靠 id 后缀（`landing-in-<id>`/`landing-out-<id>`），id 取 max+1 删除不回收避免残留引用。genconf 遍历数组生成多 inbound+outbound+route，`remote_enabled=false` 时不加 outbound/rule（走 direct）。**新部署 panel.json 必须含 `"landings":[]`**（install.sh 已加），否则旧 Config 反序列化虽 nil-safe 但节点页/落地页空列表引导更友好 |
 > | **v1.5.25** | **根治 NaiveProxy「检测正常反代正常但代理不能用」**：Caddyfile 同站点块内 `forward_proxy`+`reverse_proxy`（伪装）共存时，caddy 默认指令排序把 `forward_proxy` 放在 `reverse_proxy`【之后】→ NaiveProxy 客户端 CONNECT 请求被 reverse_proxy（伪装）拦截，forward_proxy 永远拿不到代理流量。全局 `order forward_proxy before reverse_proxy` 对此**无效**（caddy 坑）。修复：用 `route {}` 块包裹 naive 站点指令，强制按书写顺序执行（forward_proxy 在前），adapted JSON subroute handlers=`[forward_proxy, reverse_proxy]` | **caddy 同站点块内多 handler 的指令排序是个大坑**：全局 `order` 指令对同站点块内的 handler 共存（如 forward_proxy+reverse_proxy）不生效，caddy 仍按内置默认顺序排（forward_proxy 天然靠后）。**必须用 `route {}` 块显式包裹**才能按书写顺序执行。官方 naiveproxy 示例用 `file_server`（天然排在 forward_proxy 后）规避了此问题；用 `reverse_proxy` 做伪装才会踩坑。**诊断方法**：`caddy adapt --config Caddyfile --adapter caddyfile` 看 JSON 里 naive 站点 route 的 `handle` 数组，forward_proxy 必须排第一。naive padding 协议本身没问题（用真实 naive 客户端 v149 验证 forward_proxy 能正常代理），问题纯在 caddy 配置生成层 |
 > | **v1.5.24** | NaiveProxy「反代正常但代理不能用」根治：旧版 keyHandler 改凭证是异步 fire-and-forget（go func genconf+restart 忽略错误）→ secrets.env 已改但 Caddyfile 没跟上 / caddy 重启 deactivating → probe_resistance 认证失败静默走伪装（反代照常打开，极具迷惑性）。修复：①keyHandler 改同步 genconf→restart→验证 active（失败报错不再掩盖）②svcInstall 安装后验证 active ③新增「🔧 修复」按钮（每张服务卡）一键 genconf+restart+验证，强制同步 secrets↔配置 | **「异步 + 忽略错误」是配置一致性的天敌**：写 secrets.env → genconf → systemctl restart 三步必须**同步顺序执行 + 检查每步退出码 + 验证最终服务 active**，任何一步 fire-and-forget 都会留下不一致。**probe_resistance 的副作用**：认证失败静默走伪装（而非 407）是 NaiveProxy 的反探测设计，但它让「凭证不匹配」表现为「反代正常」极具迷惑性——健康检测（端口 LISTEN + TCP 握手）无法发现这种逻辑层故障，必须额外验证「实际代理认证可用」或提供一键修复入口。**systemctl restart 后必须验证 is-active=active**：restart 命令成功不代表服务起来了（caddy 配置错误会进入 deactivating/failed），要轮询等待确认 |
 > | **v1.5.23** | NaiveProxy 改密码/重装后无法运行根治（三层防御）：NaiveProxy 凭证写入 Caddyfile `basic_auth`，含空格/`{}` 的密码破坏语法 → caddy 重启失败 → Naive 挂（AnyTLS/SS 走 sing-box 不受影响）。①前端 `svcSave` 拦非法字符 ②`keyHandler` 后端校验拒绝 ③**`genconf` 生成后 `caddy validate` 预检，失败回滚旧配置不重启**（终极兜底）。另：`keyHandler` genconf 失败时不重启服务；`genconf source secrets.env` 加 `\|\|true` 容错 | **配置文件语法注入是代理服务的经典坑**：用户可控的凭证（用户名/密码）被直接插进 Caddyfile/Nginx conf 等结构化配置文件时，必须校验不含该语法的元字符（空格/`{}`/`#` 注释符等），否则一个带空格的密码就让整个服务起不来。**校验要分层**：前端拦截（即时反馈）+ 后端 handler 拒绝（防绕过）+ 生成器 validate-and-rollback（终极兜底，即使前两层都漏了也不会把坏配置喂给进程）。**sing-box(caddy) 进程级隔离**让 AnyTLS/SS 不受 caddy 配置错误影响——这也是「改 Naive 密码挂的是 Naive 不是 AnyTLS」的原因。排查「服务无法运行」先看 `journalctl -u <svc>` 的配置解析错误行 |
@@ -215,19 +216,24 @@ manual 模式: cert_fullchain + cert_privkey 字段指定的绝对路径（用�
 - 默认端口随机生成（v1.5.12 起部署随机），可用 `--socks-port` / `--socks-user` / `--socks-password` 指定
 - ⚠️ SOCKS5 走 sing-box direct 出口，**不参与远端落地**（与 SS/AnyTLS 第一组一致）
 
-### 5.5 落地服务（可选；原"第二组服务"，v1.5.12 起与"出口落地"合并）
-- **默认关闭**，面板「落地服务」页勾选启用才部署。启用后额外起：
-  - `anytls-in2`（sing-box，独立端口，**默认随机**，v1.5.12 前为 21112）
-- **链式出站（仅 AnyTLS-2）**：AnyTLS-2 的出口流量经 `ss-out`（sing-box shadowsocks outbound）转发到另一台落地服务器的 ss-server（中转→落地架构）。第一组 SS/AnyTLS/SOCKS5/Naive 均走 direct。
-- ⚠️ **NaiveProxy / SOCKS5 不参与远端落地**（架构约束）：naive 在 caddy 进程、socks 与 ss-out 同在 sing-box 但当前仅 anytls-2 路由到 ss-out。若需隐藏中转 IP，使用 AnyTLS-2。
-- 生成路由规则：`{ inbound: ["anytls-in2"], outbound: "ss-out" }`
-- 密钥：`ansgo-admin regen2` 生成（ANYTLS2_*，存 secrets.env）；面板「落地服务」页启用时若密钥未生成会**自动调 regen2**，生成后可在「服务管理」页底部查看/修改
+### 5.5 落地服务（可选；v1.5.26 起支持多落地服务）
+- **默认空列表**（`panel.json` 的 `landings: []`），面板「落地服务」页点「➕ 新增」创建。每个落地服务独立配置：
+  - 一个 **anytls 入站**（独立端口/凭证），tag = `landing-in-<id>`
+  - 可选一个 **远端落地出口**（独立开关）：关闭则该落地走 sing-box direct；启用则经远端服务器落地
+- **远端协议（v1.5.26 新增 SOCKS5）**：每个落地的远端出口支持二选一：
+  - **Shadowsocks**（`remote_type:"ss"`）：`remote_host`/`remote_port`/`remote_method`/`remote_password`（SS2022 校验密钥长度）
+  - **SOCKS5**（`remote_type:"socks"`）：`remote_host`/`remote_port`/`remote_user`/`remote_password`（强制鉴权）
+- **生成路由规则**（genconf 遍历 `landings` 数组）：每个启用且 remote_enabled 的落地生成 `{ inbound: ["landing-in-<id>"], outbound: "landing-out-<id>" }`
+- **凭证**：`ansgo-admin regen-landing <id>` 生成（`LANDING_<id>_PASS`/`LANDING_<id>_UUID`，存 secrets.env）；面板「落地服务」页「🎲 重置凭证」调用它
+- ⚠️ **NaiveProxy / 第一组 SOCKS5 不参与远端落地**（架构约束）：naive 在 caddy 进程、第一组 socks 走 direct。只有落地服务（landings 数组里的）才路由到远端出口。若需隐藏中转 IP，创建落地服务并启用远端。
+- **数量不限**：每个落地 = sing-box 一个 inbound+outbound，用户自负端口占用（genconf 端口冲突检测拦截同进程撞端口）
+- **向后兼容（v1.5.26）**：旧的硬编码单 AnyTLS-2（`group2_enabled`/`anytls2_port`/`ss_landing_*`）由 `upgrade.sh` 自动迁移为 `landings[0]`，secrets 里 `ANYTLS2_*` rename 为 `LANDING_1_*`，老用户升级无感
 
-### 5.6 落地服务器 Shadowsocks
-- 独立部署在中转机之外的另一台服务器，仅跑一个 ss-server（direct 出口）
-- 一键部署：`bash install.sh --landing [--port 8388]`
-- 配置信息（host/port/method/password）在中转机面板「落地服务」页填写，保存后中转 sing-box 自动重载
-- 密钥校验：面板会对 `2022-blake3-aes-128-gcm` 校验密钥长度（base64(16字节)），错误密钥会被拒
+### 5.6 落地服务器 Shadowsocks / SOCKS5
+- 独立部署在中转机之外的另一台服务器，跑一个 ss-server 或 socks5 服务（direct 出口）
+- SS 一键部署：`bash install.sh --landing [--port 8388]`；SOCKS5 用任意 socks5 服务端（如 sing-box socks inbound + users）
+- 配置信息（host/port/method/password 或 host/port/user/password）在中转机面板「落地服务」页对应落地卡片填写，保存后中转 sing-box 自动重载
+- 密钥校验：面板对 `2022-blake3-aes-128-gcm` 校验密钥长度（base64(16字节)），对 SOCKS5 校验用户名+密码非空
 
 ### 5.7 客户端连接参数（部署完成后填充）
 > 占位，部署脚本会自动生成并写入 §10 和 `/etc/ansgo/secrets.env`
@@ -264,10 +270,13 @@ https://your-domain.com:15608/<随机URL路径>/
 2. **仪表盘**：各代理服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时 + **每服务「🔍 检测」按钮**（v1.5.12，调 `api/health` 三合一诊断：systemd active + 端口 LISTEN + TCP 握手）。**v1.5.20 起仅显示 4 个主要代理服务**（AnyTLS / NaiveProxy / Shadowsocks / SOCKS5），管理面板状态移至顶栏圆点（见 #9）
 3. **节点信息**（v1.5.12 重构，v1.5.18 连接地址改 IP，v1.5.19 二维码改浮动）：**只显示已启用的服务**（未启用不渲染卡片，避免空 URI 误导）；每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示（**v1.5.19 起 NaiveProxy 补全 SNI + 密码**），**每行独立「📋 复制」按钮**；**v1.5.18 起「连接地址」优先显示服务器公网出口 IP（Go 端 UDP 探测，进程级缓存，探测失败回退域名），URI 仍是域名**（TLS 协议 SNI 需域名）；URI 单独成行带复制；**v1.5.19 起二维码默认隐藏**，服务名旁加「📱 二维码」按钮，点击浮动展示（点空白关闭），不再常驻占版面。落地服务启用时仅显示 anytls-2（标注出口经 SS 落地）。**v1.5.19 服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5**
 4. **服务管理** ⭐（v1.5.18 起「服务控制」菜单已删，服务管理成为唯一总操作页；v1.5.11 起由「服务安装」+「端口管理」+「密钥管理」三页合并；v1.5.12 加检测）：每服务一张卡片，一站式完成：① 状态标签（未安装/已安装·运行中/已安装·未运行）② Shadowsocks/AnyTLS/SOCKS5/NaiveProxy 独立安装/卸载 ③ 各服务端口 + 面板端口均可改（v1.5.12 起部署默认随机）④ 手动输入自定义密钥（SS/AnyTLS/SOCKS5/Naive，SS2022 自动校验 base64(16字节) 长度），**v1.5.18 起每个密钥/凭证输入框右侧带独立 🎲 按钮（纯前端 crypto.getRandomValues 生成，不自动保存）** ⑤ **v1.5.18 起操作按钮集中一行自适应**（按可用性）：未安装 `[📥安装]`；已安装 `[💾应用][▶️启动/⏹停止][🔄重启][📤卸载][🔍检测][🔧修复]`，「💾应用」串行调 portHandler+keyHandler 一次保存端口+密钥（零新增端点）⑥ **「🔍 检测」按钮**（v1.5.12，v1.5.18 起并入操作行末位）。**v1.5.20 起移除底部 AnyTLS-2 卡片**（AnyTLS-2 管理统一移至「落地服务」页）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；整服务随机重置走 ansgo-admin regen/regen2（单字段随机已改前端 genField 不调后端）
-5. **落地服务** ⭐（v1.5.12 起由「第二组服务」+「出口落地」合并为单页；**v1.5.20 起 AnyTLS-2 全部管理集中到此页**）：
-   - **上半部分**：AnyTLS-2 启用开关 / 端口 / **密码（v1.5.20 新增，带 🎲 随机 + 💾 保存调 `saveKey('anytls2')`）/ 🎲 重新生成密钥（调 regen2）/ 🔍 检测（调 `checkHealth('anytls2')`）**。启用时若密钥未生成**自动调 `ansgo-admin regen2`**（v1.5.12 改进，原要求用户先手动点「生成密钥」）
-   - **下半部分**：远端 SS 落地服务器配置（host/port/method/password + 开关），含 2022-blake3 密钥长度校验
-   - ⚠️ **架构约束告知**：只有 AnyTLS-2 经 SS 落地（隐藏中转 IP）；NaiveProxy / SOCKS5 不参与远端落地
+5. **落地服务** ⭐（**v1.5.26 重写为多落地服务动态列表**，替代旧的单 AnyTLS-2 两张固定卡片）：
+   - **动态列表 + 新增按钮**：页面顶部「➕ 新增落地服务」按钮，弹窗填名称+端口创建（后端分配 id + 生成 anytls 凭证 + genconf+restart+verify）
+   - **每张落地卡片**（同一区配置入站 + 远端）：名称 / 端口 / 启用开关 / AnyTLS 密码（🎲随机）+ **远端落地出口区**（启用远端开关 / 类型下拉 Shadowsocks▼/SOCKS5▼ / 远端地址 / 端口 / 按类型显隐字段：SS=加密方式+密钥，SOCKS5=用户+密码）+ 操作行 `[💾保存][🎲重置凭证][🔍检测][🗑删除]`
+   - **远端类型切换**动态显隐字段（SS/SOCKS5），`toggleRemoteType()` JS 切换 sswrap/sockswrap 显隐
+   - **同步事务**：所有写操作（新增/保存/删除/重置凭证）走 v1.5.24 的 `genconfRestartVerify`（genconf→restart→verify active），非 fire-and-forget
+   - **校验**：端口冲突（sing-box 同进程）+ SS2022 密钥长度 + SOCKS5 凭证非空，失败即时反馈
+   - ⚠️ **架构约束告知**：只有落地服务（landings）才路由到远端出口；NaiveProxy / 第一组 SOCKS5 不参与远端落地
 6. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
 7. **面板设置**：网页标题 / URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 服务器公网 IP（v1.5.18，VPC 必填 + 🔍 自动检测按钮）/ 伪装站点。**v1.5.19 起 `--no-caddy` 模式（caddy_enable=false）时隐藏「直访伪装(:443)」**（该站点由 nginx 等接管，caddy 不再生成，改了也不会生效）；Naive 伪装始终显示。**v1.5.22 起保存逻辑修复**：仅 url_path/panel_port 真正变化才重启（旧版每次保存都重启）；`saveSet()` 防御 disguise_panel 输入缺失（`--no-caddy` 场景）
 8. **日志查看**：tail 最近 N 行
@@ -297,8 +306,9 @@ ansgo-admin restart [ss|anytls|socks|naive|panel|all]
 ansgo-admin stop [服务]
 ansgo-admin logs [服务]          # tail journalctl
 ansgo-admin regen [ss|anytls|socks|naive]   # 重置密钥（提示确认）
-ansgo-admin regen2              # 生成落地服务密钥（ANYTLS2_*）
-ansgo-admin group2 [enable|disable|status] [anytls2_port]
+ansgo-admin regen-landing <id>  # 生成/重置单个落地服务凭证（LANDING_<id>_*，v1.5.26）
+ansgo-admin regen2              # [已弃用] 转发到 regen-landing 1
+ansgo-admin group2 [status]     # [已弃用] 落地服务请在面板「落地服务」页管理
 ansgo-admin cert status         # 证书到期
 ansgo-admin cert renew          # 手动续期
 ansgo-admin panel-pass          # 重置面板密码（打印新密码）

@@ -60,16 +60,11 @@ type Config struct {
 	// v1.5.10: caddy_enable=false 表示 --no-caddy 模式（caddy 不跑 80/443 伪装站）
 	//   空字符串视为 true（兼容旧部署）
 	CaddyEnable string `json:"caddy_enable"`
-	// 第2组额外服务（用字符串 "true"/"false" 以兼容 genconf 的宽松判断）
-	Group2Enabled string `json:"group2_enabled"`
-	AnyTLS2Port   int    `json:"anytls2_port"`
-	Naive2Port    int    `json:"naive2_port"` // legacy: no longer used for landing
-	// 落地 SS 出口（第2组流量走这里）
-	SSLandingEnabled  string `json:"ss_landing_enabled"`
-	SSLandingHost     string `json:"ss_landing_host"`
-	SSLandingPort     int    `json:"ss_landing_port"`
-	SSLandingMethod   string `json:"ss_landing_method"`
-	SSLandingPassword string `json:"ss_landing_password"`
+	// v1.5.26: 多落地服务（替代旧的 group2_*/ss_landing_* 扁平字段）。
+	//   每个落地服务 = 一个 anytls 入站 + 可选一个远端出站（SS/SOCKS5）。
+	//   旧的 group2_enabled/anytls2_port/naive2_port/ss_landing_* 由 upgrade.sh
+	//   迁移为 landings[0]，迁移后这些旧字段从 panel.json 移除。
+	Landings []LandingService `json:"landings"`
 	// 证书来源：cert_mode="acme"(默认) 走 cert_dir/fullchain.pem+privkey.pem；
 	// "manual" 用 cert_fullchain/cert_privkey 两个绝对路径（与 acme 二选一）
 	CertMode      string `json:"cert_mode"`
@@ -79,11 +74,36 @@ type Config struct {
 	DBPath        string `json:"db_path"`
 }
 
+// LandingService 一个落地服务 = 一个 anytls 入站 + 可选一个远端出站（v1.5.26）。
+// 替代旧的单个硬编码 AnyTLS-2：现在可创建多个，每个有独立端口/凭证/远端配置。
+//
+//   - ID      : 内部标识（如 "1","2"），用作 sing-box tag 后缀（landing-in-<id>）
+//               + secrets.env key 前缀（LANDING_<id>_PASS/UUID）。新建时取 max+1，删除不回收。
+//   - Enabled : 是否启用该 anytls 入站（false 则 genconf 不生成对应 inbound）。
+//   - Remote* : 远端落地出口（独立开关）。RemoteEnabled=false 时该落地走 sing-box direct。
+//               RemoteType="ss"（shadowsocks）或 "socks"（socks5），字段按类型复用：
+//               SS 用 RemoteMethod + RemotePassword；SOCKS5 用 RemoteUser + RemotePassword。
+//               远端凭证明文存 panel.json（与旧 SSLandingPassword 一致，文件已 0600 root-only）。
+type LandingService struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	Port    int    `json:"port"`
+
+	RemoteEnabled  bool   `json:"remote_enabled"`
+	RemoteType     string `json:"remote_type"`
+	RemoteHost     string `json:"remote_host"`
+	RemotePort     int    `json:"remote_port"`
+	RemoteMethod   string `json:"remote_method"`
+	RemotePassword string `json:"remote_password"`
+	RemoteUser     string `json:"remote_user"`
+}
+
 var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.25"
+	version = "1.5.26"
 )
 
 func loadConfig() (Config, error) {

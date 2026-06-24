@@ -80,21 +80,46 @@ print_uris(){
   local domain; domain="$(DOMAIN)"
   local ss_port anytls_port socks_port naive_port
   ss_port="$(_conf ss_port)"; anytls_port="$(_conf anytls_port)"; socks_port="$(_conf socks_port)"; naive_port="$(_conf naive_port)"
+  # v1.5.26: 落地服务凭证（LANDING_<id>_PASS），由 python 段读取 secrets.env 全量后匹配
   python3 - "$domain" "${ss_port:-23456}" "${anytls_port:-8443}" "${socks_port:-10808}" "${naive_port:-44333}" \
-          "${SS_METHOD:-2022-blake3-aes-128-gcm}" "${SS_KEY:-}" "${ANYTLS_PASS:-}" "${SOCKS_USER:-}" "${SOCKS_PASS:-}" "${NAIVE_USER:-}" "${NAIVE_PASS:-}" <<'PY'
-import sys,base64,urllib.parse
-domain,ssp,atp,sop,nvp,method,ssk,atp_pass,su,sp,nu,np=sys.argv[1:13]
+          "${SS_METHOD:-2022-blake3-aes-128-gcm}" "${SS_KEY:-}" "${ANYTLS_PASS:-}" "${SOCKS_USER:-}" "${SOCKS_PASS:-}" "${NAIVE_USER:-}" "${NAIVE_PASS:-}" \
+          "$CONF" "$SECRETS" <<'PY'
+import sys,base64,urllib.parse,json
+domain,ssp,atp,sop,nvp,method,ssk,atp_pass,su,sp,nu,np,CONF,SECRETS=sys.argv[1:15]
 def b64u(s): return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
 print("=== 客户端连接 URI ===")
+idx=1
 if ssk:
     ui=b64u(f"{method}:{ssk}")
-    print(f"[1] Shadowsocks : ss://{ui}@{domain}:{ssp}#ANS-GO-SS")
+    print(f"[{idx}] Shadowsocks : ss://{ui}@{domain}:{ssp}#ANS-GO-SS"); idx+=1
 if atp_pass:
-    print(f"[2] AnyTLS      : anytls://{urllib.parse.quote(atp_pass,safe='')}@{domain}:{atp}/?sni={domain}#ANS-GO-AnyTLS")
+    print(f"[{idx}] AnyTLS      : anytls://{urllib.parse.quote(atp_pass,safe='')}@{domain}:{atp}/?sni={domain}#ANS-GO-AnyTLS"); idx+=1
 if su and sp:
-    print(f"[3] SOCKS5      : socks5://{urllib.parse.quote(su,safe='')}:{urllib.parse.quote(sp,safe='')}@{domain}:{sop}#ANS-GO-SOCKS5")
+    print(f"[{idx}] SOCKS5      : socks5://{urllib.parse.quote(su,safe='')}:{urllib.parse.quote(sp,safe='')}@{domain}:{sop}#ANS-GO-SOCKS5"); idx+=1
 if nu and np:
-    print(f"[4] NaiveProxy  : naive+https://{urllib.parse.quote(nu,safe='')}:{urllib.parse.quote(np,safe='')}@{domain}:{nvp}#ANS-GO-Naive")
+    print(f"[{idx}] NaiveProxy  : naive+https://{urllib.parse.quote(nu,safe='')}:{urllib.parse.quote(np,safe='')}@{domain}:{nvp}#ANS-GO-Naive"); idx+=1
+# v1.5.26: 落地服务列表（从 panel.json landings + secrets.env LANDING_<id>_PASS 读出）
+try:
+    cfg=json.load(open(CONF))
+    secs={}
+    for line in open(SECRETS):
+        line=line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k,_,v=line.partition("="); secs[k.strip()]=v.strip().strip('"')
+    for L in cfg.get("landings",[]):
+        if str(L.get("enabled","false")).lower() not in ("true","1"): continue
+        lid=str(L.get("id",""))
+        lp=secs.get(f"LANDING_{lid}_PASS","")
+        if not lp: continue
+        port=L.get("port",0)
+        name=L.get("name",lid)
+        via="direct"
+        if str(L.get("remote_enabled","false")).lower() in ("true","1"):
+            rtype=L.get("remote_type","ss")
+            via=f"{rtype}-landing"
+        print(f"[{idx}] 落地-{name:<8} : anytls://{urllib.parse.quote(lp,safe='')}@{domain}:{port}/?sni={domain}#ANS-GO-Landing-{name}  ({via})"); idx+=1
+except Exception as e:
+    print(f"  (落地服务读取失败: {e})", file=sys.stderr)
 PY
 }
 # ---------- 命令实现 ----------
@@ -155,42 +180,38 @@ cmd_regen(){
 }
 
 cmd_regen2(){
-  # 生成 AnyTLS-2 落地服务密钥（Naive 不参与落地）
+  # v1.5.26: 兼容别名 -> 调 regen-landing 1（旧 ANYTLS2_* 已迁移为 LANDING_1_*）
+  warn "regen2 已弃用（v1.5.26），自动转发到 regen-landing 1"
+  cmd_regen_landing 1
+}
+
+# cmd_regen_landing <id>：生成/重置单个落地服务的 anytls 凭证（v1.5.26）。
+#   写 LANDING_<id>_PASS + LANDING_<id>_UUID 到 secrets.env（不重启服务，由调用方决定）。
+#   Go 端 api/landings/regen 调用本命令后自行 genconf+restart+verify。
+cmd_regen_landing(){
+  local id="${1:-}"
+  [ -n "$id" ] || { err "用法: ansgo-admin regen-landing <id>"; return 1; }
   do_backup >/dev/null
-  local u1 p1
-  p1="$(gen_anytls_pass)"; u1="$(cat /proc/sys/kernel/random/uuid)"
-  _setsecret ANYTLS2_PASS "$p1"; _setsecret ANYTLS2_UUID "$u1"
-  ok "已生成 AnyTLS-2 密钥（ANYTLS2_*）"
-  echo "  ANYTLS2: user=$u1 pass=$p1"
-  warn "如需启用：ansgo-admin group2 enable [anytls2_port]（或面板「落地服务」页开启）"
+  local p u
+  p="$(gen_anytls_pass)"; u="$(cat /proc/sys/kernel/random/uuid)"
+  _setsecret "LANDING_${id}_PASS" "$p"; _setsecret "LANDING_${id}_UUID" "$u"
+  ok "已生成落地服务 #${id} 凭证（LANDING_${id}_*）"
+  echo "  LANDING_${id}: user=$u pass=$p"
 }
 
 cmd_group2(){
-  # ansgo-admin group2 [enable|disable] [anytls2_port]
+  # v1.5.26: 旧命令保留兼容（标记 deprecated），转发为对 landings[0] 的操作。
+  #   新代码请用面板「落地服务」页或直接编辑 panel.json 的 landings 数组。
+  warn "group2 命令已弃用（v1.5.26），请用面板「落地服务」页管理落地服务"
   local act="${1:-status}"
-  _loadsecrets
   if [ "$act" = "status" ]; then
-    echo "group2_enabled=$(_conf group2_enabled)"
-    echo "anytls2_port=$(_conf anytls2_port)"
-    echo "ANYTLS2_PASS=${ANYTLS2_PASS:-未生成}"
+    _loadsecrets
+    echo "landings 配置见 $CONF 的 landings 数组"
+    echo "LANDING_1_PASS=${LANDING_1_PASS:-未生成}"
     return
   fi
-  do_backup >/dev/null
-  local a2="${2:-}"
-  case "$act" in
-    enable)
-      [ -n "${ANYTLS2_PASS:-}" ] || { err "AnyTLS-2 密钥未生成，先执行 ansgo-admin regen2"; return 1; }
-      [ -n "$a2" ] || a2=21112
-      _setconf group2_enabled true
-      _setconf anytls2_port "$a2"
-      ansgo-genconf sing-box && restart_svc sing-box
-      ok "AnyTLS-2 落地服务已启用 (anytls2=$a2)";;
-    disable)
-      _setconf group2_enabled false
-      ansgo-genconf sing-box && restart_svc sing-box
-      ok "AnyTLS-2 落地服务已关闭";;
-    *) err "用法: ansgo-admin group2 [enable|disable|status] [anytls2_port]";;
-  esac
+  err "group2 enable/disable 已弃用，请用面板「落地服务」页（支持多落地服务）"
+  return 1
 }
 cmd_cert_status(){
   local cf="${CERTDIR}/fullchain.pem"
@@ -285,6 +306,9 @@ ansgo-admin —— ANS-GO 离线管理
   stop    [ss|anytls|socks|naive|panel]
   logs    [ss|anytls|socks|naive|panel|all]
   regen   [ss|anytls|socks|naive]   重置密钥（自动备份+重启+打印新URI）
+  regen-landing <id>                 生成/重置单个落地服务凭证（v1.5.26）
+  regen2                             [已弃用] 转发到 regen-landing 1
+  group2 [status]                    [已弃用] 落地服务请在面板「落地服务」页管理
   cert status | renew         证书到期 / 手动续期
   panel-pass                  重置面板密码（打印新密码）
   panel-path                  重置面板 URL 路径（兜底）
@@ -307,6 +331,7 @@ case "$cmd" in
   logs) cmd_logs "${1:-all}";;
   regen) cmd_regen "${1:-}";;
   regen2) cmd_regen2;;
+  regen-landing) cmd_regen_landing "${1:-}";;
   group2) cmd_group2 "${1:-}";;
   cert) case "${1:-status}" in status) cmd_cert_status;; renew) cmd_cert_renew;; *) err "用法: ansgo-admin cert [status|renew]";; esac;;
   panel-pass) cmd_panel_pass;;

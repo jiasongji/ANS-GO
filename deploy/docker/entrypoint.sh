@@ -206,13 +206,23 @@ fi
 #   容器重建（docker compose up -d）后 systemd 是全新状态，sing-box.service 默认 disabled，
 #   即使 panel.json 里 svc_*_enabled=true 也不会被拉起 → 用户拉新镜像后代理全断。
 #   genconf 已据 svc 开关生成对应 inbound，此处按"是否有启用的 sing-box 服务"决定启停。
-#   判断条件与 Go 端 landingHandler/group2Handler 的 needSB 一致：
-#     ss/anytls/socks 任一启用 或 group2(anytls-2) 启用 → 需要 sing-box
+#   v1.5.26: 判断条件与 Go 端 needSB 一致：
+#     ss/anytls/socks 任一启用 或 landings 数组里有任一 enabled 项 → 需要 sing-box
 SB_NEED=0
-for K in svc_ss_enabled svc_anytls_enabled svc_socks_enabled group2_enabled; do
+for K in svc_ss_enabled svc_anytls_enabled svc_socks_enabled; do
   V=$(grep -o "\"$K\": *\"[^\"]*\"" "$CONF" 2>/dev/null | grep -o '"[^"]*"$' | tr -d '"')
   [ "$V" = "true" ] && SB_NEED=1
 done
+# v1.5.26: landings 数组里是否有 enabled=true（用 python 精确解析，避免粗 grep 误判）
+LAND_EN=$(python3 -c "
+import json
+try:
+    d=json.load(open('$CONF'))
+    print('1' if any(str(L.get('enabled','false')).lower() in ('true','1') for L in d.get('landings',[])) else '0')
+except Exception:
+    print('0')
+" 2>/dev/null || echo 0)
+[ "$LAND_EN" = "1" ] && SB_NEED=1
 if [ "$SB_NEED" = 1 ]; then
   log "检测到启用的 sing-box 服务：enable + restart sing-box"
   systemctl enable sing-box.service 2>/dev/null || true
