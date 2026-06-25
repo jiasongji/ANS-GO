@@ -27,11 +27,39 @@ func cmpBcrypt(hash, plain string) bool {
 // decodeSS2022Key 尝试用标准/urlsafe、有 padding/无 padding 四种形式解析 SS-2022 密钥。
 func decodeSS2022Key(b64 string) ([]byte, bool) {
 	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-		if raw, err := enc.DecodeString(b64); err == nil {
+		if raw, err := enc.DecodeString(strings.TrimSpace(b64)); err == nil {
 			return raw, true
 		}
 	}
 	return nil, false
+}
+
+func ss2022WantBytes(method string) int {
+	switch {
+	case method == "" || strings.HasPrefix(method, "2022-blake3-aes-128"):
+		return 16
+	case strings.HasPrefix(method, "2022-blake3-aes-256"):
+		return 32
+	default:
+		return 0
+	}
+}
+
+// normalizeSS2022Key 把 Go 可解码的 raw/url-safe base64 规范化为 sing-box 接受的
+// 标准 base64（带 padding）。sing-box 的 Shadowsocks 2022 password 字段不接受 RawStd/RawURL。
+func normalizeSS2022Key(method, key string) (string, string) {
+	wantBytes := ss2022WantBytes(method)
+	if wantBytes == 0 {
+		return strings.TrimSpace(key), ""
+	}
+	raw, ok := decodeSS2022Key(key)
+	if !ok {
+		return "", "密钥格式错误：当前密钥不是合法 base64；" + method + " 需填写标准 base64(" + itoa(wantBytes) + "字节) 密钥；可点击 🎲 随机生成后保存"
+	}
+	if len(raw) != wantBytes {
+		return "", "密钥长度错误：" + method + " 需 base64(" + itoa(wantBytes) + "字节) 的密钥；当前解码后为 " + itoa(len(raw)) + " 字节"
+	}
+	return base64.StdEncoding.EncodeToString(raw), ""
 }
 
 // validSS2022Key 校验 SS-2022 密钥：base64 解码后字节数是否等于要求
@@ -42,23 +70,8 @@ func validSS2022Key(b64 string, wantBytes int) bool {
 }
 
 func ss2022KeyError(method, key string) string {
-	wantBytes := 0
-	switch {
-	case method == "" || strings.HasPrefix(method, "2022-blake3-aes-128"):
-		wantBytes = 16
-	case strings.HasPrefix(method, "2022-blake3-aes-256"):
-		wantBytes = 32
-	default:
-		return ""
-	}
-	raw, ok := decodeSS2022Key(key)
-	if !ok {
-		return "密钥格式错误：当前密钥不是合法 base64；" + method + " 需填写 base64(" + itoa(wantBytes) + "字节) 密钥；可点击 🎲 随机生成后保存"
-	}
-	if len(raw) != wantBytes {
-		return "密钥长度错误：" + method + " 需 base64(" + itoa(wantBytes) + "字节) 的密钥；当前解码后为 " + itoa(len(raw)) + " 字节"
-	}
-	return ""
+	_, msg := normalizeSS2022Key(method, key)
+	return msg
 }
 
 func itoa(n int) string {

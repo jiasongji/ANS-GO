@@ -5,12 +5,13 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前版本：v1.5.30**（install.sh 脚本版本 v1.5.30；**面板 Go 二进制 v1.5.30 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
+> **当前版本：v1.5.31**（install.sh 脚本版本 v1.5.31；**面板 Go 二进制 v1.5.31 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
 >
 > ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
+> | **v1.5.31** | **修复 SS2022 密钥“Go 可解码但 sing-box 不接受”的格式差异**：v1.5.30 只区分非法 base64/长度错误，但仍接受 Raw base64（无 `=` padding）和 URL-safe base64（`-_` 字符集）；这些格式 Go 的 `base64.RawStdEncoding/RawURLEncoding` 能解码成 16/32 字节，面板校验会放行，但 sing-box 的 Shadowsocks 2022 `password` 字段只接受**标准 base64 且带 padding**，于是仍在 `sing-box check` 阶段报 `decode psk: illegal base64 data at input byte 20`。修复：Go `normalizeSS2022Key`、`ansgo-genconf normalize_ss2022_key`、裸金属 `upgrade.sh`、Docker `entrypoint.sh` 全部把 raw/url-safe 可解码密钥规范化为 sing-box 接受的标准 base64（带 padding）后再保存/生成；不可规范化才重置新密钥 | **“能 base64 解码”不等于“目标程序接受”**：校验必须模拟最终消费者（sing-box）的真实格式要求。宽松接受 raw/url-safe 会制造“面板通过、运行失败”的二次坑。数据修复器不只要修非法值，也要修**语义可解码但目标不接受的非规范值** |
 > | **v1.5.30** | **修复旧部署非法 SS_KEY 被 sing-box check 阻断所有保存/修复操作**：旧部署可能遗留非合法 base64 的 Shadowsocks 2022 密钥（`SS_KEY`），过去未做整配置预检时问题隐藏；v1.5.28+ `ansgo-genconf` 写完 sing-box config 后执行 `sing-box check`，一旦 SS 已启用且 `SS_KEY` 非法，任何服务参数保存/修复都会被整份配置校验阻断，报 `initialize inbound[0]: decode psk: illegal base64 data`。修复：Go 端 `ss2022KeyError` 区分「不是合法 base64」与「base64 解码后字节数不对」，面板保存 SS 密钥给出明确提示；`ansgo-genconf` 在生成前主动校验 SS2022 密钥并输出中文可操作错误；`upgrade.sh`（裸金属）与 Docker `entrypoint.sh` 在升级/容器重建时检测已启用 SS 的非法 `SS_KEY` 并自动重置为合法 base64(16/32 bytes)，让旧部署一键升级后恢复可保存/修复状态 | **严格预检会暴露历史脏数据，升级脚本必须带数据修复器**：新增 validate-and-rollback 不能只挡坏配置，还要考虑旧版本已经持久化的坏数据，否则用户一升级就被历史问题卡死。**错误信息要指向字段和动作**：`decode psk` 对用户不可操作，应翻译成「SS_KEY 非法，点 🎲 或执行 ansgo-admin regen ss」 |
 > | **v1.5.29** | **修复 Naive 与落地 AnyTLS 跨进程端口冲突 + 落地远端诊断补齐**：线上复现为 `naive_port` 与 `landings[0].port` 同为一个端口，sing-box 已监听落地 AnyTLS，caddy 再监听 Naive 同端口时报 `bind: address already in use`，systemd 状态卡 `activating`，面板「修复」也无法成功。根因是 v1.5.26/v1.5.28 的端口冲突检测只检查 caddy 内部、sing-box 内部，错误认为「跨进程端口重复允许」；但裸金属和 Docker host 网络下 caddy/sing-box/面板处于同一网络命名空间，任何监听端口都不能重复。修复：Go `portConflicts` 与 `ansgo-genconf check_port_conflicts` 改为全局端口集合（panel/80/443/naive/ss/anytls/socks/所有 landing）统一检测，保存/安装/修复前拒绝跨进程撞端口。另：落地服务健康检测新增远端出口 TCP 探测，`remote_enabled=true` 时除本机入站外还检测 `remote_host:remote_port`，远端不可达时摘要明确显示「本机落地入站正常，但远端落地出口不可达」 | **端口是主机网络命名空间级资源，不是进程级资源**：caddy 和 sing-box 进程隔离不代表端口可重复；Docker host 网络更是与宿主共享监听空间。端口冲突检测必须全局化，不能只按配置文件归属拆分。**健康检测不能只测入口**：落地服务 = 本机 AnyTLS 入站 + 可选远端出站，入口端口 LISTEN/TCP 握手正常只能说明客户端能连到中转，不能证明能代理出站；启用远端时必须同时探测远端出口可达性，否则会给出「检测正常但不能代理」的假阳性 |
 > | **v1.5.28** | **修复多落地服务 AnyTLS 密码保存遗漏 + sing-box 配置预检回滚**：落地服务卡片一直显示「AnyTLS 密码」输入框，但旧版 `saveLanding()` 只提交名称/端口/远端出口字段，后端 `landingUpdateHandler` 也未处理 `password` → 用户在面板改落地 AnyTLS 密码后，`secrets.env` 的 `LANDING_<id>_PASS` 未更新，节点页/客户端拿到的密码与实际 sing-box 配置不一致，表现为「未落地 AnyTLS 正常，新增/修改后的落地 AnyTLS 不可用」。修复：前端保存时提交 `password`，后端校验非空并原子写入 `LANDING_<id>_PASS`，保存成功后刷新落地列表。另给 `ansgo-genconf` 的 sing-box 生成路径补齐与 Caddyfile 同级的 validate-and-rollback：写新 `/etc/sing-box/config.json` 后执行 `sing-box check -c`，失败立即回滚旧配置并拒绝重启，避免错误配置进入 systemd 后 `sing-box` 卡在 `activating`/restart loop | **UI 展示的可编辑字段必须有完整提交链路**：前端输入框存在不等于功能存在，必须逐项核对「DOM 字段 → API payload → 后端结构体 → 持久化位置 → genconf 使用」链路，尤其是多实体动态表单。**所有结构化运行配置都要预检回滚**：v1.5.23 已给 Caddyfile 加 `caddy validate`，sing-box JSON 同样必须 `sing-box check` 后才允许重启；否则一次坏远端密钥/协议字段就会把旧可用服务替换成坏配置并进入 `activating`。**失败应停在旧可用配置**，而不是让用户在 systemd restart loop 里排障 |
@@ -594,7 +595,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrad
 
 1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 多协议连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
 2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.30
+3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.31
 4. **客户端实测（可选）**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
 
 ---

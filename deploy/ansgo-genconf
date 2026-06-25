@@ -108,16 +108,16 @@ def sec(k):
 SS_METHOD = secrets.get("SS_METHOD") or g("ss_method", "") or os.environ.get("SS_METHOD", "") or "2022-blake3-aes-128-gcm"
 SS_KEY = sec("SS_KEY")
 
-def validate_ss2022_key(method, key):
+def normalize_ss2022_key(method, key):
     want = 0
     if method.startswith("2022-blake3-aes-128"):
         want = 16
     elif method.startswith("2022-blake3-aes-256"):
         want = 32
     if want <= 0:
-        return ""
+        return key, ""
     raw = None
-    for alt in (key, key + "=", key + "==", key + "==="):
+    for alt in (key.strip(), key.strip() + "=", key.strip() + "==", key.strip() + "==="):
         for candidate in (alt, alt.replace("-", "+").replace("_", "/")):
             try:
                 raw = base64.b64decode(candidate.encode(), validate=True)
@@ -127,13 +127,13 @@ def validate_ss2022_key(method, key):
         if raw is not None:
             break
     if raw is None:
-        return f"SS_KEY 不是合法 base64；{method} 需 base64({want}字节) 密钥。请在面板点 SS 的 🎲 生成后保存，或执行 ansgo-admin regen ss"
+        return "", f"SS_KEY 不是合法 base64；{method} 需标准 base64({want}字节，带 padding) 密钥。请在面板点 SS 的 🎲 生成后保存，或执行 ansgo-admin regen ss"
     if len(raw) != want:
-        return f"SS_KEY 长度错误；{method} 需 base64({want}字节) 密钥，当前解码后 {len(raw)} 字节。请重新生成 SS 密钥"
-    return ""
+        return "", f"SS_KEY 长度错误；{method} 需 base64({want}字节) 密钥，当前解码后 {len(raw)} 字节。请重新生成 SS 密钥"
+    return base64.b64encode(raw).decode(), ""
 
 if SVC_SS:
-    msg = validate_ss2022_key(SS_METHOD, SS_KEY)
+    SS_KEY, msg = normalize_ss2022_key(SS_METHOD, SS_KEY)
     if msg:
         print("ansgo-genconf: " + msg, file=sys.stderr)
         sys.exit(2)

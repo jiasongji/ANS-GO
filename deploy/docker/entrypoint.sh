@@ -189,18 +189,23 @@ if str(cfg.get('svc_ss_enabled','true')).lower() in ('true','1') and os.path.exi
         pairs.append(line.rstrip('\n'))
     method=data.get('SS_METHOD') or cfg.get('ss_method') or '2022-blake3-aes-128-gcm'
     want=16 if method.startswith('2022-blake3-aes-128') else (32 if method.startswith('2022-blake3-aes-256') else 0)
-    def valid(k):
-        if want <= 0: return True
-        for alt in (k, k+'=', k+'==', k+'==='):
+    def normalize(k):
+        if want <= 0: return k, False
+        for alt in (k.strip(), k.strip()+'=', k.strip()+'==', k.strip()+'==='):
             for cand in (alt, alt.replace('-','+').replace('_','/')):
                 try:
                     raw=base64.b64decode(cand.encode(), validate=True)
-                    return len(raw)==want
+                    if len(raw)==want:
+                        return base64.b64encode(raw).decode(), True
+                    return '', False
                 except Exception:
                     pass
-        return False
-    if want and not valid(data.get('SS_KEY','')):
-        new=base64.b64encode(os.urandom(want)).decode()
+        return '', False
+    new, ok = normalize(data.get('SS_KEY',''))
+    changed_msg = '规范化'
+    if want and not ok:
+        new=base64.b64encode(os.urandom(want)).decode(); changed_msg='非法，已自动重置'
+    if want and (not ok or new != data.get('SS_KEY','')):
         seen=False; out=[]
         for line in pairs:
             if line.startswith('SS_KEY='):
@@ -210,7 +215,7 @@ if str(cfg.get('svc_ss_enabled','true')).lower() in ('true','1') and os.path.exi
         if not seen: out.append('SS_KEY='+new)
         open(SECRETS,'w').write('\n'.join(out).rstrip('\n')+'\n')
         os.chmod(SECRETS,0o600)
-        print('[entrypoint] 已修复非法 SS_KEY（SS 客户端需重新复制节点信息）')
+        print('[entrypoint] 已将 SS_KEY '+changed_msg+'为 sing-box 接受的标准 base64（SS 客户端需重新复制节点信息）')
 PY
 
 # 生成 sing-box / caddy 配置（幂等；失败时写兜底 Caddyfile，避免 caddy 起不来）

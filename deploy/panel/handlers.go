@@ -686,7 +686,8 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 		if method == "" {
 			method = "2022-blake3-aes-128-gcm"
 		}
-		if msg := ss2022KeyError(method, b.Key); msg != "" {
+		normKey, msg := normalizeSS2022Key(method, b.Key)
+		if msg != "" {
 			jerr(w, 400, msg)
 			return
 		}
@@ -694,7 +695,7 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 500, "写入 SS_METHOD 失败: "+err.Error())
 			return
 		}
-		if err := setSecret("SS_KEY", b.Key); err != nil {
+		if err := setSecret("SS_KEY", normKey); err != nil {
 			jerr(w, 500, "写入 SS_KEY 失败: "+err.Error())
 			return
 		}

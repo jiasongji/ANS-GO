@@ -206,6 +206,26 @@ func TestSS2022KeyError(t *testing.T) {
 	}
 }
 
+func TestSS2022NormalizeKeyToSingBoxAcceptedStdBase64(t *testing.T) {
+	// sing-box 的 password 字段不接受 RawStdEncoding（无 padding），即使 Go 能解码为 16 字节。
+	// v1.5.31 回归：旧版 validSS2022Key 接受该格式，随后 sing-box check 失败于 input byte 20。
+	norm, errMsg := normalizeSS2022Key("2022-blake3-aes-128-gcm", "AAAAAAAAAAAAAAAAAAAAAA")
+	if errMsg != "" {
+		t.Fatalf("可规范化的 raw base64 不应报错: %s", errMsg)
+	}
+	if norm != "AAAAAAAAAAAAAAAAAAAAAA==" {
+		t.Fatalf("raw base64 应规范化为 sing-box 接受的带 padding 标准 base64，got %q", norm)
+	}
+
+	urlNorm, errMsg := normalizeSS2022Key("2022-blake3-aes-128-gcm", "________________AAAAAA")
+	if errMsg != "" {
+		t.Fatalf("可规范化的 urlsafe base64 不应报错: %s", errMsg)
+	}
+	if contains(urlNorm, "_") || len(urlNorm) != 24 {
+		t.Fatalf("urlsafe base64 应规范化为标准 base64 且长度 24，got %q", urlNorm)
+	}
+}
+
 // TestLandingsSSKeyValidation 验证 SS2022 密钥长度校验：短密钥应被拒绝。
 // 2022-blake3-aes-128-gcm 需 base64(16字节)=24字符密钥。
 func TestLandingsSSKeyValidation(t *testing.T) {
