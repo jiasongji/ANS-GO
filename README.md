@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.26-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.32-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -556,6 +556,12 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ---
 
 ## ✨ 特性
+
+### v1.5.32 节点命名整改 + Docker 手动证书同步 ⭐
+
+- **【节点命名】** 面板设置「网页标题」改名「节点信息」。浏览器标题自动追加 `_ANS`：用户填 `NodeName` → `NodeName_ANS`；留空或旧默认 `ANS-GO 管理面板` → `Manage_ANS`。节点 URI `#fragment` 从固定 `ANS-GO-*` 改为 `<节点信息>-<简称>`：AnyTLS=AT / NaiveProxy=NV / Shadowsocks=SS / SOCKS5=SK / 落地=LD-名称或ID
+- **【Docker 手动证书】** 改为面向宿主真实路径 + 固定同步目录 `/etc/ansgo-docker/manual-certs`（compose 只读挂载到 `/host/manual-certs`）。新增容器脚本 `ansgo-sync-manual-cert`（openssl 校验 + 证书/私钥 fail-closed 匹配 + 变化比对 + 原子成对替换，无变化不 reload）。面板生成**默认折叠**的两套可复制脚本：「系统自动任务一键安装」与「宝塔计划任务脚本」。服务始终用容器内 `/etc/ssl/ansgo/` 副本。不挂 Docker socket、不动态改 compose
+- 详见 [v1.5.32 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.32)
 
 ### v1.5.25 根治 NaiveProxy「检测正常反代正常但代理不能用」⭐
 
