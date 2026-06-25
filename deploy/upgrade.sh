@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.31
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.32
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
@@ -13,7 +13,7 @@
 #   - VER 与 install.sh 顶部硬编码一致，发新版只需改这一行 + commit
 #   - 复用 install.sh 的 bootstrap（解决 curl|bash 的 SIGPIPE/进程替换卡死）
 #   - panel 二进制无 -version flag（main.go 仅 -setpass），用 md5 对比判断是否真更新，
-#     启动后用 journalctl 日志行 "ansgo-panel v1.5.31 监听..." 验证版本
+#     启动后用 journalctl 日志行 "ansgo-panel v1.5.32 监听..." 验证版本
 #   - 裸金属 panel 替换走 .new→md5→.bak→mv→restart 安全流程（AGENTS.md §9 铁律）
 #   - 备份目录命名 /etc/ansgo-backup-upgrade-{TS}，遵循 ansgo-admin 约定
 # =============================================================================
@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.31"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.32"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -116,10 +116,13 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
-  - 【本版重点·SS_KEY 规范化为 sing-box 接受的标准 base64】v1.5.30 仍可能把 Raw base64
-    （无 = padding）或 URL-safe base64 视为合法，但 sing-box 的 SS2022 password 字段只接受
-    标准 base64（带 padding），导致保存/安装时仍报 decode psk。本版会把可解码的 raw/url-safe
-    密钥规范化为标准 base64；不可规范化才自动重置新密钥。
+  - 【本版重点·节点命名 + Docker 手动证书同步】① 面板设置「网页标题」改名「节点信息」，
+    浏览器标题自动追加 _ANS（例 NodeName -> NodeName_ANS，留空/旧默认 -> Manage_ANS）。
+    ② 节点 URI #fragment 从固定 ANS-GO-* 改为 <节点信息>-<服务简称>（AT/NV/SS/SK）。
+    ③ Docker 手动证书改为填写宿主机真实路径 + 固定同步目录 /etc/ansgo-docker/manual-certs，
+    面板生成折叠可复制的「系统自动任务一键安装」与「宝塔计划任务脚本」，证书经
+    /host/manual-certs -> /etc/ssl/ansgo 校验后导入，服务始终用容器内副本。
+  - v1.5.31：规范化 SS_KEY 为 sing-box 接受的标准 base64
   - v1.5.30：修复旧部署非法 SS_KEY 阻断保存/修复
   - v1.5.29：全局端口冲突检测 + 落地远端出口诊断
   - v1.5.28：落地 AnyTLS 密码保存 + sing-box config 预检回滚
@@ -339,6 +342,13 @@ for k in ("dynu_api_key","dynu_client_id","dynu_secret","acme_email"):
         d[k] = ""
         changed.append(f"{k}=''（v1.5.27 新增证书凭证字段，可在面板证书页填写）")
 
+# === v1.5.32: Docker 手动证书宿主源路径字段（幂等：字段不存在才补空串）===
+# 裸金属部署这两字段保持空（运行路径 = cert_fullchain/cert_privkey 本身）。
+# Docker 部署由 entrypoint 从 env 迁移，或由面板证书页填写后生成同步脚本。
+for k in ("cert_host_fullchain","cert_host_privkey"):
+    if k not in d:
+        d[k] = ""
+
 # 原子写（tmp + rename）
 import os
 tmp = p + ".tmp"
@@ -509,6 +519,22 @@ upgrade_docker(){
   else
     warn "配置卷备份跳过（卷名可能不是 ansgo_etc；volume 数据不会因重建容器丢失，可放心继续）"
     rm -f "$backup_file"
+  fi
+
+  # v1.5.32: 确保 Docker 手动证书「固定同步目录」与 compose 挂载存在（幂等）。
+  #   旧部署的 docker-compose.yml 没有该挂载，需要补上才能让 /host/manual-certs 生效。
+  mkdir -p "${DOCKER_DIR}/manual-certs"
+  chmod 700 "${DOCKER_DIR}/manual-certs"
+  local MOUNT_LINE="      - /etc/ansgo-docker/manual-certs:/host/manual-certs:ro"
+  if ! grep -q "manual-certs:/host/manual-certs" "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
+    # 在 ansgo_acme 那一行后面插入挂载（保持与仓库模板一致）
+    if grep -q "ansgo_acme:/root/.acme.sh" "$DOCKER_COMPOSE_FILE"; then
+      awk -v line="$MOUNT_LINE" '/- ansgo_acme:\/root\/\.acme\.sh/{print; print line; next} {print}' \
+        "$DOCKER_COMPOSE_FILE" > "$DOCKER_COMPOSE_FILE.tmp" && mv "$DOCKER_COMPOSE_FILE.tmp" "$DOCKER_COMPOSE_FILE"
+      ok "已为 docker-compose.yml 补充 manual-certs 固定挂载（v1.5.32）"
+    else
+      warn "docker-compose.yml 结构异常，未自动补充 manual-certs 挂载（如用 manual 模式，请手动加入：${MOUNT_LINE})"
+    fi
   fi
 
   # 拉取新镜像

@@ -828,11 +828,74 @@ async function deleteLanding(p){
 }
 
 // 证书（来源切换 + 续期/重新加载）
+// v1.5.32：Docker 手动模式 —— 用户填写宿主机真实路径，面板据此生成可复制的同步脚本。
+// 容器不直接读取宿主任意路径，证书经固定同步目录 /etc/ansgo-docker/manual-certs 导入 /etc/ssl/ansgo。
+function shq(s){return "'"+String(s==null?'':s).replace(/'/g,"'\\''")+"'"}
+function dockerManualSyncScript(full,key){
+  return '# ANS-GO Docker 手动证书同步（宝塔计划任务 / 系统定时任务均可）\n'+
+    '# 周期建议：每 15 分钟或每小时一次。证书未变化时容器内脚本不会重启服务。\n'+
+    'set -uo pipefail\n'+
+    'SRC_FULL='+shq(full)+'\n'+
+    'SRC_KEY='+shq(key)+'\n'+
+    'DST_DIR=/etc/ansgo-docker/manual-certs\n'+
+    'mkdir -p "$DST_DIR"\n'+
+    '[ -s "$SRC_FULL" ] || { echo "[ansgo] 证书不存在或为空: $SRC_FULL"; exit 1; }\n'+
+    '[ -s "$SRC_KEY" ]  || { echo "[ansgo] 私钥不存在或为空: $SRC_KEY"; exit 1; }\n'+
+    'install -m 0644 "$SRC_FULL" "$DST_DIR/fullchain.pem.tmp"\n'+
+    'install -m 0600 "$SRC_KEY"  "$DST_DIR/privkey.pem.tmp"\n'+
+    'mv -f "$DST_DIR/fullchain.pem.tmp" "$DST_DIR/fullchain.pem"\n'+
+    'mv -f "$DST_DIR/privkey.pem.tmp"  "$DST_DIR/privkey.pem"\n'+
+    '# ansgo-sync-manual-cert 退出码：0=未变化；10=已更新（需 reload）；非 0=失败\n'+
+    'docker exec ansgo /usr/local/bin/ansgo-sync-manual-cert\n'+
+    'rc=$?\n'+
+    '[ "$rc" = 0 ] && { echo "[ansgo] 证书未变化，跳过 reload"; exit 0; }\n'+
+    '[ "$rc" = 10 ] || { echo "[ansgo] 同步失败（退出码 $rc），保留旧证书不 reload"; exit "$rc"; }\n'+
+    'docker exec ansgo /usr/local/bin/ansgo-cert-reload\n'+
+    'echo "[ansgo] 证书已更新并 reload 三服务"\n';
+}
+function dockerManualCronInstallScript(full,key){
+  const sync=dockerManualSyncScript(full,key);
+  return '# 一键安装：写入同步脚本 + 系统定时任务（每 15 分钟），并立即执行一次\n'+
+    '# 在 Docker 宿主机以 root 执行一次即可\n'+
+    'set -euo pipefail\n'+
+    'cat > /usr/local/bin/ansgo-docker-sync-manual-cert <<\'ANSGO_EOF\'\n'+
+    sync+
+    'ANSGO_EOF\n'+
+    'chmod +x /usr/local/bin/ansgo-docker-sync-manual-cert\n'+
+    'cat > /etc/cron.d/ansgo-docker-manual-cert-sync <<\'CRON_EOF\'\n'+
+    '*/15 * * * * root /usr/local/bin/ansgo-docker-sync-manual-cert >/var/log/ansgo-docker-sync-manual-cert.log 2>&1\n'+
+    'CRON_EOF\n'+
+    'echo "[ansgo] 已安装系统定时任务 /etc/cron.d/ansgo-docker-manual-cert-sync"\n'+
+    '/usr/local/bin/ansgo-docker-sync-manual-cert\n';
+}
+function dockerManualTaskBlock(kind,title,script,btnHint){
+  const id='docker_sync_'+kind;
+  return `<div class="card" style="padding:12px;margin:8px 0;background:var(--card2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer" onclick="dockerSyncToggle('${id}')">
+      <span><b>${title}</b> <span class="mut" style="font-size:12px;margin-left:4px">点击展开</span></span>
+      <span id="${id}_ico" style="color:var(--mut)">▶</span>
+    </div>
+    <div id="${id}_body" style="display:none;margin-top:10px">
+      <div class="help" style="margin:0 0 6px 0">${btnHint}</div>
+      <div class="uri-box" id="${id}_code">${(script||'').replace(/</g,'&lt;')}</div>
+      <button class="mut" type="button" onclick="copy(($('#${id}_code').textContent))">📋 复制脚本</button>
+    </div>
+  </div>`;
+}
+function dockerSyncToggle(id){
+  const body=$('#'+id+'_body');const ico=$('#'+id+'_ico');
+  const open=body.style.display==='block';
+  body.style.display=open?'none':'block';
+  ico.textContent=open?'▶':'▼';
+}
 async function loadCert(){
   const [c,cfg]=await Promise.all([api('api/cert'),api('api/cert/config')]);
   const mode=cfg.mode||'acme';
   const certRows=c.error?'':Object.entries(c).filter(([k])=>k!=='error').map(([k,v])=>`<tr><th>${{subject:'域名',issuer:'签发者',issuer_org:'签发机构',not_before:'生效',not_after:'到期',days_left:'剩余天数'}[k]||k}</th><td>${k==='days_left'?`<b style="color:${v<14?'var(--err)':'var(--ok)'}">${v} 天</b>`:v}</td></tr>`).join('');
   const isAcme=mode==='acme';
+  const dockerManual=cfg.docker_mode&&!isAcme;
+  const hostFull=cfg.host_fullchain||'';
+  const hostKey=cfg.host_privkey||'';
   // v1.5.27：Dynu 凭证存在状态（GET 绝不回传明文，只回 boolean）
   const dynu=cfg.dynu||{has_api_key:false,has_oauth:false};
   const dynuState = cfg.dynu_configured
@@ -840,6 +903,14 @@ async function loadCert(){
     : '<span style="color:var(--err)">✗ 未配置（manual 部署首次切 acme 需填写）</span>';
   const akPh = dynu.has_api_key ? '（已配置，留空保留不变）' : 'Dynu 控制台 → API Keys';
   const cidPh = dynu.has_oauth ? '（已配置，留空保留不变）' : 'Dynu 控制台 → OAuth2';
+  // Docker 手动模式：同步脚本区（折叠）。依赖用户填写的宿主源路径，缺则给出占位示例。
+  const syncFull=hostFull||'/www/server/panel/vhost/cert/your-domain.com/fullchain.pem';
+  const syncKey=hostKey||'/www/server/panel/vhost/cert/your-domain.com/privkey.pem';
+  const dockerSyncBlocks=dockerManual?`<div id="docker_sync_wrap" style="margin-top:10px;border-top:1px dashed var(--bd);padding-top:10px">
+      <div class="help" style="margin:0 0 8px 0">填写宿主机真实证书/私钥路径并保存后，复制下方脚本到宿主机执行，让证书自动同步到容器（例如宝塔/Nginx 已在续期的证书路径）。</div>
+      ${dockerManualTaskBlock('system','方案一：系统自动任务一键安装',dockerManualCronInstallScript(syncFull,syncKey),'SSH 在宿主机以 root 执行一次，会写入同步脚本与系统 cron（每 15 分钟），并立即同步一次。')}
+      ${dockerManualTaskBlock('bt','方案二：宝塔计划任务脚本',dockerManualSyncScript(syncFull,syncKey),'复制到宝塔面板「计划任务 → Shell 脚本」，周期建议每 15 分钟或每小时。证书未变化时容器内脚本不会重启服务。')}
+    </div>`:'';
   $('#content').innerHTML=`<div class="card"><h3>📜 证书管理</h3>
    <table>${certRows||'<tr><td colspan="2" style="color:var(--err)">'+(c.error||'无证书信息')+'</td></tr>'}</table>
    <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
@@ -848,9 +919,13 @@ async function loadCert(){
      <option value="manual" ${!isAcme?'selected':''}>手动指定已有证书（自定义路径）</option>
    </select></div></div>
    <div id="manual_wrap" style="display:${isAcme?'none':'block'}">
-     <div class="help" style="margin:6px 0">手动模式下填写服务器上证书与私钥的<b>完整绝对路径</b>（如 <code>/etc/letsencrypt/live/example.com/fullchain.pem</code>）。面板、caddy、sing-box 都将改用这两个路径。</div>
-     <div class="row"><label>证书文件路径</label><div class="f"><input id="cert_fullchain" value="${cfg.fullchain||''}" placeholder="/绝对路径/fullchain.pem"></div></div>
-     <div class="row"><label>私钥文件路径</label><div class="f"><input id="cert_privkey" value="${cfg.privkey||''}" placeholder="/绝对路径/privkey.pem"></div></div>
+     ${dockerManual
+       ? '<div class="help" style="margin:6px 0">Docker 部署请填写<b>宿主机</b>上的证书/私钥真实路径（例如宝塔/Nginx 正在续期的路径）。ANS-GO 不会动态挂载任意宿主目录，而是通过固定同步目录 <code>/etc/ansgo-docker/manual-certs/</code> 导入证书，服务实际使用容器内 <code>'+(cfg.runtime_fullchain||'/etc/ssl/ansgo/fullchain.pem')+'</code> 与 <code>'+(cfg.runtime_privkey||'/etc/ssl/ansgo/privkey.pem')+'</code> 副本。</div>'
+         +'<div class="row"><label>宿主证书路径</label><div class="f"><input id="cert_host_fullchain" value="'+(hostFull)+'" placeholder="/www/server/panel/vhost/cert/your-domain.com/fullchain.pem"></div></div>'
+         +'<div class="row"><label>宿主私钥路径</label><div class="f"><input id="cert_host_privkey" value="'+(hostKey)+'" placeholder="/www/server/panel/vhost/cert/your-domain.com/privkey.pem"></div></div>'
+       : '<div class="help" style="margin:6px 0">手动模式下填写服务器上证书与私钥的<b>完整绝对路径</b>（如 <code>/etc/letsencrypt/live/example.com/fullchain.pem</code>）。面板、caddy、sing-box 都将改用这两个路径。</div>'
+         +'<div class="row"><label>证书文件路径</label><div class="f"><input id="cert_fullchain" value="'+(cfg.fullchain||'')+'" placeholder="/绝对路径/fullchain.pem"></div></div>'
+         +'<div class="row"><label>私钥文件路径</label><div class="f"><input id="cert_privkey" value="'+(cfg.privkey||'')+'" placeholder="/绝对路径/privkey.pem"></div></div>'}
    </div>
    <div id="acme_wrap" style="display:${isAcme?'block':'none'};border-top:1px dashed var(--bd);margin-top:14px;padding-top:10px">
      <div class="row" style="align-items:flex-start"><label>Dynu 凭证</label><div class="f">
@@ -862,11 +937,14 @@ async function loadCert(){
        <div class="row"><label style="min-width:90px">注册邮箱</label><div class="f"><input id="acme_email" value="${cfg.acme_email||''}" placeholder="留空用 admin@域名"></div></div>
      </div></div>
    </div>
+   ${dockerSyncBlocks}
    <div style="margin-top:10px">
      <button class="primary" onclick="saveCertConfig()">💾 保存来源设置</button>
      ${isAcme
        ?'<button class="mut" style="margin-left:8px" onclick="certIssue()">🚀 立即签发证书</button><button class="mut" style="margin-left:8px" onclick="certRenew()">🔄 手动续期</button><span class="mut" style="margin-left:8px;font-size:12px">「立即签发」用于切换来源/补凭证后首次签发；「手动续期」更新即将到期证书。</span>'
-       :'<button class="mut" style="margin-left:8px" onclick="certReload()">🔄 重新加载证书</button><span class="mut" style="margin-left:8px;font-size:12px">手动模式：在服务器替换证书后点此重新加载三服务。</span>'}
+       :dockerManual
+         ?'<button class="mut" style="margin-left:8px" onclick="certReload()">🔄 同步并重新加载证书</button><span class="mut" style="margin-left:8px;font-size:12px">手动模式：从宿主同步目录导入证书并重启三服务（需先执行上方同步脚本）。</span>'
+         :'<button class="mut" style="margin-left:8px" onclick="certReload()">🔄 重新加载证书</button><span class="mut" style="margin-left:8px;font-size:12px">手动模式：在服务器替换证书后点此重新加载三服务。</span>'}
    </div>
    <div class="help" style="margin-top:12px">⚠️ 切换来源或改路径会让面板自身也重启（TLS 证书变了），届时会断开需重新登录。「立即签发」耗时约 1-3 分钟（DNS-01），请耐心等待。</div></div>`;
   $('#cert_mode').onchange=()=>{
@@ -878,8 +956,15 @@ async function loadCert(){
 async function saveCertConfig(){
   const mode=$('#cert_mode').value;
   const body={mode};
-  if(mode==='manual'){body.fullchain=$('#cert_fullchain').value;body.privkey=$('#cert_privkey').value}
-  else{
+  const dockerManual=(await api('api/cert/config')).docker_mode;
+  if(mode==='manual'){
+    if(dockerManual){
+      body.host_fullchain=$('#cert_host_fullchain')?$('#cert_host_fullchain').value:'';
+      body.host_privkey=$('#cert_host_privkey')?$('#cert_host_privkey').value:'';
+    }else{
+      body.fullchain=$('#cert_fullchain').value;body.privkey=$('#cert_privkey').value
+    }
+  }else{
     // v1.5.27：acme 模式一并提交 Dynu 凭证（仅收集非空字段，空串=清空，后端按 nil 判断）
     const ak=$('#dynu_api_key').value.trim();
     const cid=$('#dynu_client_id').value.trim();
@@ -895,9 +980,10 @@ async function saveCertConfig(){
   toast('正在保存…（三服务将重启）');
   const j=await api('api/cert/config',{method:'POST',body:JSON.stringify(body)});
   if(j.ok&&j.new_url){showRestartOverlay(j.msg||'证书设置已保存，面板即将重启',j.new_url,j.restart_in||3);return}
-  if(j.ok)toast('已保存');
+  if(j.ok){toast('已保存');if(mode==='manual'&&dockerManual)loadCert()}
   else toast(j.error||'保存失败');
 }
+
 async function certIssue(){
   if(!confirm('立即签发证书？将通过 Dynu DNS-01 向 Let\'s Encrypt 申请，耗时约 1-3 分钟，期间不要关闭页面。'))return;
   toast('正在签发…（DNS-01 验证，约 1-3 分钟）');
@@ -929,7 +1015,7 @@ async function loadSet(){
   const ipHint=j.server_ip_hint?`<div class="help" style="margin:4px 0 0 0;color:var(--warn,#ffc107)">⚠️ ${j.server_ip_hint}</div>`:'';
   const ipResolved=j.server_ip_resolved?`<div class="help" style="margin:4px 0 0 0">当前生效连接地址：<code>${j.server_ip_resolved}</code>${j.server_ip?'（手动填写）':'（自动探测）'}</div>`:'';
   $('#content').innerHTML=`<div class="card"><h3>⚙️ 面板设置</h3>
-   ${f('panel_title','网页标题',j.panel_title,'ANS-GO 管理面板')}
+   ${f('panel_title','节点信息',j.panel_title,'例如 NodeName（浏览器标题与节点名称基础名）')}
    ${f('url_path','URL 路径',j.url_path,'/xxxx/')}
    ${f('admin_user','管理员用户名',j.admin_user,'')}
    ${f('admin_pass','新密码(留空不改)','','留空表示不修改','password')}
@@ -944,6 +1030,7 @@ async function loadSet(){
    </div></div>
    <div class="help" style="margin:0 0 4px 0">节点信息「连接地址」显示此 IP。VPC/NAT 网络下 UDP 探测只能拿内网，须手动填写或点「自动检测」。留空则显示域名。</div>
    ${ipHint}${ipResolved}
+   <div class="help" style="margin:6px 0 0 0">「节点信息」用作浏览器标题与各服务节点名称的基础名：浏览器标题为 <code>&lt;节点信息&gt;_ANS</code>，节点 URI 名称为 <code>&lt;节点信息&gt;-AT/NV/SS/SK</code>。留空或保持默认则显示 <code>Manage</code>。</div>
    <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
    <div class="help" style="margin:0 0 10px 0">域名伪装站点（格式 <code>proxy:https://站点</code> 反代，或 <code>page</code> 用默认页）。保存后 caddy 自动重载。</div>
    ${(j.caddy_enable==='true')?f('disguise_panel','直访伪装(:443)',j.disguise_panel,'proxy:https://example.com'):'<div class="row"><label>直访伪装(:443)</label><div class="f"><span class="mut" style="font-size:12px">已禁用（--no-caddy 模式，:443 由现有 web 服务器接管）</span></div></div>'}
@@ -972,13 +1059,15 @@ async function saveSet(){
   // v1.5.22: g() 防御元素缺失（如 --no-caddy 模式下 s_disguise_panel 不渲染），
   // 返回空串而非抛 TypeError 中断整个保存（旧版会在该场景下「点保存无反应」）。
   const g=id=>{const e=$('#s_'+id);return e?e.value:''};
+  const nodeBaseName=v=>{v=(v||'').trim();return (!v||v==='ANS-GO 管理面板')?'Manage':v};
+  const panelDisplayTitle=v=>nodeBaseName(v)+'_ANS';
   const body={panel_title:g('panel_title'),url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive'),server_ip:g('server_ip')};
   if(g('admin_pass'))body.admin_pass=g('admin_pass');
   // 只传发生变化的字段由后端处理；这里全传，后端按指针判断（空串/0 会触发改动）
   const j=await api('api/settings',{method:'POST',body:JSON.stringify(body)});
   if(j.ok){
     if(j.new_url){showRestartOverlay(j.msg||'面板即将重启',j.new_url,3);return}
-    document.title=body.panel_title||'ANS-GO 管理面板';toast('设置已保存');
+    document.title=panelDisplayTitle(body.panel_title);toast('设置已保存');
   }else toast(j.error||'保存失败');
 }
 

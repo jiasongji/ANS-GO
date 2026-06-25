@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# =============================================================================
+# ansgo-sync-manual-cert —— Docker manual 证书同步：固定挂载源 -> 容器运行副本
+#
+# 输入（宿主计划任务写入，容器内只读挂载）：
+#   /host/manual-certs/fullchain.pem
+#   /host/manual-certs/privkey.pem
+#
+# 输出（caddy/sing-box/ansgo-panel 实际使用）：
+#   /etc/ssl/ansgo/fullchain.pem
+#   /etc/ssl/ansgo/privkey.pem
+#
+# 行为：
+#   1. 校验输入文件存在且非空、可解析为证书/私钥、二者匹配
+#   2. 与现有副本比对，未变化则直接退出（退出码 0，不触发 reload）
+#   3. 有变化时原子替换（临时文件 + mv），权限 fullchain=0644 / privkey=0600
+#   4. 同步成功且证书确实更新，退出码 10（由调用方据此决定是否 reload）
+#
+# 本脚本只负责同步，不做 reload。调用方式：
+#   docker exec ansgo /usr/local/bin/ansgo-sync-manual-cert
+#   docker exec ansgo /usr/local/bin/ansgo-sync-manual-cert && \
+#     docker exec ansgo /usr/local/bin/ansgo-cert-reload
+#
+# 退出码：
+#   0  = 无变化（或已是最新的）
+#   10 = 同步成功，证书已更新（建议随后 reload）
+#   非 0 = 失败（输入缺失/格式错误/不匹配/写盘失败），旧证书保持不变
+# =============================================================================
+set -uo pipefail
+
+SRC_FULL="/host/manual-certs/fullchain.pem"
+SRC_KEY="/host/manual-certs/privkey.pem"
+DST_DIR="/etc/ssl/ansgo"
+DST_FULL="$DST_DIR/fullchain.pem"
+DST_KEY="$DST_DIR/privkey.pem"
+
+log(){ echo "[ansgo-sync-manual-cert] $*"; }
+die(){ echo "[ansgo-sync-manual-cert] 错误: $*" >&2; exit "${2:-1}"; }
+
+[ -s "$SRC_FULL" ] || die "同步源证书不存在或为空: $SRC_FULL（请先在宿主执行同步脚本）" 2
+[ -s "$SRC_KEY" ]  || die "同步源私钥不存在或为空: $SRC_KEY（请先在宿主执行同步脚本）" 2
+
+mkdir -p "$DST_DIR" || die "无法创建目标目录 $DST_DIR" 1
+
+# 仅当容器内可用 openssl 时做格式 + 匹配校验，避免坏证书覆盖旧可用证书
+if command -v openssl >/dev/null 2>&1; then
+  openssl x509 -in "$SRC_FULL" -noout >/dev/null 2>&1 || die "证书解析失败（非合法 PEM 证书）: $SRC_FULL" 3
+  if openssl pkey -in "$SRC_KEY" -noout >/dev/null 2>&1; then
+    : # ok
+  elif openssl rsa -in "$SRC_KEY" -noout >/dev/null 2>&1; then
+    : # 兼容旧 RSA 私钥
+  else
+    die "私钥解析失败: $SRC_KEY" 3
+  fi
+  # 比较证书公钥与私钥公钥的 modulus 是否一致（RSA/EC 通用），采用 fail-closed：
+  # 任一侧提取为空或二者不一致即拒绝（宁可保留旧证书，也不放过不匹配的新证书）
+  cmod=$(openssl x509 -in "$SRC_FULL" -pubkey -noout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+  kmod=$(openssl pkey -in "$SRC_KEY" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+  if [ -z "$cmod" ] || [ -z "$kmod" ] || [ "$cmod" != "$kmod" ]; then
+    die "证书与私钥不匹配或无法提取公钥指纹（cmod=${cmod:-空}, kmod=${kmod:-空}），拒绝覆盖现有证书" 4
+  fi
+fi
+
+# 无变化判定：若两文件都存在且与源完全一致，直接退出 0
+unchanged=0
+if [ -s "$DST_FULL" ] && [ -s "$DST_KEY" ]; then
+  if cmp -s "$SRC_FULL" "$DST_FULL" && cmp -s "$SRC_KEY" "$DST_KEY"; then
+    unchanged=1
+  fi
+fi
+
+if [ "$unchanged" = 1 ]; then
+  log "证书未变化，跳过同步（如需重启服务请手动执行 ansgo-cert-reload）"
+  exit 0
+fi
+
+# 原子替换：先写临时文件，再 mv 到目标。若私钥替换失败，回滚证书以避免半替换的不匹配对。
+tmp_full="$(mktemp "$DST_DIR/fullchain.pem.XXXXXX")" || die "无法创建临时文件" 1
+tmp_key="$(mktemp "$DST_DIR/privkey.pem.XXXXXX")" || { rm -f "$tmp_full"; die "无法创建临时文件" 1; }
+trap 'rm -f "$tmp_full" "$tmp_key"' EXIT
+
+install -m 0644 "$SRC_FULL" "$tmp_full" || die "写入临时证书失败" 1
+install -m 0600 "$SRC_KEY"  "$tmp_key"  || die "写入临时私钥失败" 1
+
+# 先替换私钥；私钥成功后再替换证书（证书替换失败时回滚私钥，保持成对一致）
+if ! mv -f "$tmp_key" "$DST_KEY" 2>/dev/null; then
+  die "替换 $DST_KEY 失败（旧证书保留）" 1
+fi
+if ! mv -f "$tmp_full" "$DST_FULL" 2>/dev/null; then
+  # 证书替换失败：回滚私钥到旧文件（保持成对）
+  rm -f "$DST_KEY"
+  die "替换 $DST_FULL 失败，已回滚私钥（旧证书保留）" 1
+fi
+trap - EXIT
+
+chmod 0644 "$DST_FULL" 2>/dev/null || true
+chmod 0600 "$DST_KEY"  2>/dev/null || true
+
+log "证书已同步到 $DST_DIR（fullchain.pem + privkey.pem）。请执行 ansgo-cert-reload 重启三服务。"
+exit 10

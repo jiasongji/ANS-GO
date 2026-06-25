@@ -44,6 +44,8 @@ services:
       - ansgo_caddy:/etc/caddy
       - ansgo_sb:/etc/sing-box
       - ansgo_acme:/root/.acme.sh
+      # v1.5.32：Docker 手动证书同步目录（宿主计划任务写入，容器只读导入到 /etc/ssl/ansgo）
+      - /etc/ansgo-docker/manual-certs:/host/manual-certs:ro
 
 volumes:
   ansgo_etc:

@@ -29,6 +29,11 @@ CERT_PRIVKEY="${CERT_PRIVKEY:-}"
 log(){ echo "[entrypoint] $*"; }
 
 mkdir -p /etc/ansgo "$CERTDIR" /etc/sing-box /etc/caddy /var/www/html /var/log
+# v1.5.32: 标记容器环境，面板 isDockerMode() 据此识别 Docker 形态（显示 manual 证书宿主路径 UI）。
+# 注意：本 shell export 不会传给 systemd 拉起的 ansgo-panel.service，所以 isDockerMode()
+#       主要依赖下方写入的 /.dockerenv 文件（每启动都确保存在）。env 仅作容器内其它脚本参考。
+[ -f /.dockerenv ] || { : > /.dockerenv; }
+export ANSGO_DOCKER=1
 
 # v1.5.12: 端口默认随机生成（10000-65535）。容器内无 ss 命令查占用，
 # host 网络模式下 install.sh 已在宿主选好随机端口并通过 ansgo.env 透传
@@ -108,39 +113,77 @@ if grep -q '"admin_pass_hash": "PLACEHOLDER"' "$CONF" 2>/dev/null && [ -n "${PAN
 fi
 
 # ---- 3/3 证书：manual 模式同步宿主证书到 /etc/ssl/ansgo/ 卷；acme 模式无则自签占位 ----
-# v1.5.17: manual 模式【保持 cert_mode=manual】，但把 cert_fullchain/cert_privkey
-#         指向卷内副本 /etc/ssl/ansgo/（而非宿主 bind mount 路径）。
-#         原因：宿主证书目录常是 600（宝塔默认，无 x 位），sing-box.service/caddy.service
-#         的 CapabilityBoundingSet 去掉了 CAP_DAC_READ_SEARCH，即便 root 也读不了；
-#         卷内副本 644 权限，服务可正常读取。面板证书页据此正确显示"手动模式"。
-#         （v1.5.10 曾把 cert_mode 强制改成 acme 规避权限，但导致面板证书页误显示
-#          "acme 自动签发"，用户为修正又改回 manual + 宿主路径 → 服务全挂。v1.5.17 根治。）
-#         续期：宿主更新证书后，docker restart ansgo（重跑 entrypoint 自动同步卷内副本）
+# v1.5.32: Docker 手动证书改为「固定同步目录」模型：
+#   宿主计划任务把证书写入 /etc/ansgo-docker/manual-certs/（compose 只读挂载到 /host/manual-certs）
+#   -> ansgo-sync-manual-cert 校验并原子替换 /etc/ssl/ansgo/{fullchain,privkey}.pem
+#   -> caddy/sing-box/ansgo-panel 始终使用 /etc/ssl/ansgo/ 副本（权限友好，避免宿主目录 600 读不了）
+#   面板不再要求容器读取任意宿主路径，也不再动态改 compose 挂载。
+#   续期：用户在面板「证书管理」复制系统定时任务/宝塔计划任务脚本到宿主执行即可。
+# 兼容：若旧 env 仍带 CERT_FULLCHAIN/CERT_PRIVKEY 且文件可读（旧部署已 bind mount），
+#       则把它们当作初始同步源，cp 进 /host/manual-certs 的对应挂载宿主目录（若可写），
+#       或直接 cp 到 /etc/ssl/ansgo/；同时记录到 cert_host_fullchain/cert_host_privkey。
+HOST_SYNC_DIR_HOST="/etc/ansgo-docker/manual-certs"
+HOST_SYNC_FULL="/host/manual-certs/fullchain.pem"
+HOST_SYNC_KEY="/host/manual-certs/privkey.pem"
+mkdir -p "$CERTDIR"
+
+# 旧部署迁移：若 env 提供 CERT_FULLCHAIN/CERT_PRIVKEY 且 /host/manual-certs 为空，
+# 尝试把宿主源路径记录到 cert_host_*（供面板显示并生成同步脚本）。
+migrate_legacy_manual_meta(){
+  [ -z "$CERT_FULLCHAIN" ] && [ -z "$CERT_PRIVKEY" ] && return
+  [ -f "$CONF" ] || return
+  command -v python3 >/dev/null 2>&1 || return
+  python3 - "$CONF" "$CERT_FULLCHAIN" "$CERT_PRIVKEY" <<'PY' 2>/dev/null || true
+import json, sys
+p, full, key = sys.argv[1], sys.argv[2], sys.argv[3]
+c = json.load(open(p))
+chg = False
+if full and not c.get('cert_host_fullchain'):
+    c['cert_host_fullchain'] = full; chg = True
+if key and not c.get('cert_host_privkey'):
+    c['cert_host_privkey'] = key; chg = True
+if chg:
+    json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
+    print('[entrypoint] 已从 env 迁移 manual 证书宿主源路径到 cert_host_*')
+PY
+}
+
 if [ "$CERT_MODE" = "manual" ]; then
-  log "证书来源：手动模式（宿主 cert=$CERT_FULLCHAIN → 同步到卷内 $CERTDIR/）"
-  if [ ! -f "$CERT_FULLCHAIN" ] || [ ! -f "$CERT_PRIVKEY" ]; then
-    log "ERROR: 证书/私钥文件不存在（确认 docker-compose.yml 已 bind mount 宿主证书目录）"
-    log "  缺失: $([ ! -f "$CERT_FULLCHAIN" ] && echo "$CERT_FULLCHAIN") $([ ! -f "$CERT_PRIVKEY" ] && echo "$CERT_PRIVKEY")"
-  else
-    # 同步宿主证书到 ansgo_ssl 卷（容器完全控制，644 权限，服务可读）
+  log "证书来源：手动模式（Docker 同步目录 /host/manual-certs -> $CERTDIR/）"
+  # 优先用固定同步目录；若为空但旧 env 源可读，回退用旧源做一次性同步
+  if [ -s "$HOST_SYNC_FULL" ] && [ -s "$HOST_SYNC_KEY" ]; then
+    log "检测到 /host/manual-certs 证书，调用 ansgo-sync-manual-cert 同步"
+    if command -v /usr/local/bin/ansgo-sync-manual-cert >/dev/null 2>&1; then
+      /usr/local/bin/ansgo-sync-manual-cert || log "WARN: ansgo-sync-manual-cert 退出码 $?"
+    else
+      cp -f "$HOST_SYNC_FULL" "$CERTDIR/fullchain.pem"
+      cp -f "$HOST_SYNC_KEY" "$CERTDIR/privkey.pem"
+      chmod 644 "$CERTDIR/fullchain.pem"; chmod 600 "$CERTDIR/privkey.pem"
+    fi
+  elif [ -f "$CERT_FULLCHAIN" ] && [ -f "$CERT_PRIVKEY" ]; then
+    # 兼容旧部署：env 源仍可读（旧 compose 已 bind mount）
+    log "WARN: /host/manual-certs 为空，回退使用 env 证书源（旧部署兼容）。建议在面板「证书管理」复制同步脚本到宿主执行。"
     cp -f "$CERT_FULLCHAIN" "$CERTDIR/fullchain.pem"
     cp -f "$CERT_PRIVKEY" "$CERTDIR/privkey.pem"
-    chmod 644 "$CERTDIR/fullchain.pem" "$CERTDIR/privkey.pem"
-    log "已同步宿主证书到 $CERTDIR/（fullchain.pem + privkey.pem，644 权限）"
-    # panel.json 保持 cert_mode=manual，但 cert_fullchain/cert_privkey 改指卷内副本路径
-    # （genconf/Go certPaths() 据此生成 sing-box/caddy 配置，指向可读的卷内文件）
-    if [ -f "$CONF" ]; then
-      python3 -c "
-import json
-p = '$CONF'
+    chmod 644 "$CERTDIR/fullchain.pem"; chmod 600 "$CERTDIR/privkey.pem"
+    log "已从 env 源同步到 $CERTDIR/（fullchain.pem + privkey.pem）"
+  else
+    log "ERROR: 未发现 manual 证书。请在面板「证书管理」复制「系统自动任务一键安装」或「宝塔计划任务脚本」到宿主执行后再重建容器。"
+  fi
+  # 无论哪种来源，运行路径始终指向卷内副本
+  if [ -f "$CONF" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$CONF" "$CERTDIR" <<'PY' 2>/dev/null || true
+import json, sys
+p, certdir = sys.argv[1], sys.argv[2]
 c = json.load(open(p))
 c['cert_mode'] = 'manual'
-c['cert_fullchain'] = '$CERTDIR/fullchain.pem'
-c['cert_privkey'] = '$CERTDIR/privkey.pem'
+c['cert_fullchain'] = certdir + '/fullchain.pem'
+c['cert_privkey'] = certdir + '/privkey.pem'
 json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
-" 2>/dev/null && log "panel.json 已设为 manual 模式（cert_fullchain/cert_privkey 指向卷内 $CERTDIR/）"
-    fi
+print('[entrypoint] panel.json 已设为 manual 模式（运行路径指向卷内 ' + certdir + '/）')
+PY
   fi
+  migrate_legacy_manual_meta
 else
   if [ ! -s "$CERTDIR/fullchain.pem" ] || [ ! -s "$CERTDIR/privkey.pem" ]; then
     log "生成自签占位证书（真实证书将由 acme.sh 后台签发覆盖）"

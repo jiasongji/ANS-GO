@@ -205,3 +205,25 @@ func TestWriteAcmeAccountConf_UpsertsKeys(t *testing.T) {
 		t.Errorf("不应写入空 Dynu 字段:\n%s", s)
 	}
 }
+
+func TestConfig_DockerHostCertFieldsPersist(t *testing.T) {
+	c := Config{
+		Domain:            "your-domain.com",
+		CertMode:          "manual",
+		CertFullchain:     "/etc/ssl/ansgo/fullchain.pem",
+		CertPrivkey:       "/etc/ssl/ansgo/privkey.pem",
+		CertHostFullchain: "/www/server/panel/vhost/cert/your-domain.com/fullchain.pem",
+		CertHostPrivkey:   "/www/server/panel/vhost/cert/your-domain.com/privkey.pem",
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Config
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CertHostFullchain != c.CertHostFullchain || got.CertHostPrivkey != c.CertHostPrivkey {
+		t.Fatalf("host cert fields not persisted: %#v", got)
+	}
+}
