@@ -169,6 +169,45 @@ def check_port_conflicts():
         print("请在面板修改冲突端口后重试（不同服务必须使用不同端口）。", file=sys.stderr)
         sys.exit(3)
 
+def write_singbox_config(config):
+    # v1.5.28 防御：写新 config 前备份旧文件，写完用 sing-box check 预检；
+    # 校验失败则回滚旧配置并退出，避免把坏配置喂给 systemd 后 sing-box 进入 activating/restart loop。
+    os.makedirs("/etc/sing-box", exist_ok=True)
+    cfg_path = "/etc/sing-box/config.json"
+    backup = None
+    if os.path.exists(cfg_path):
+        try:
+            backup = open(cfg_path).read()
+        except Exception:
+            backup = None
+    with open(cfg_path, "w") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    sb_bin = "/usr/local/bin/sing-box"
+    if os.path.exists(sb_bin):
+        try:
+            r = subprocess.run([sb_bin, "check", "-c", cfg_path], capture_output=True, text=True, timeout=30)
+            ok = (r.returncode == 0)
+            err_out = (r.stderr or r.stdout or "").strip()
+        except Exception as e:
+            ok = False
+            err_out = str(e)
+        if not ok:
+            if backup is not None:
+                with open(cfg_path, "w") as f:
+                    f.write(backup)
+            else:
+                try:
+                    os.remove(cfg_path)
+                except FileNotFoundError:
+                    pass
+            err_tail = err_out.splitlines()
+            err_tail = err_tail[-1] if err_tail else "未知错误"
+            print("ansgo-genconf: ❌ sing-box config 校验失败，已回滚旧配置（不会重启 sing-box）：", file=sys.stderr)
+            print(f"  {err_tail}", file=sys.stderr)
+            print("  常见原因：落地服务远端 SS 密钥长度/协议字段错误，或 AnyTLS/出站配置不被当前 sing-box 支持。", file=sys.stderr)
+            sys.exit(4)
+
+
 def gen_singbox():
     inbounds = []
     # SS inbound（按开关）
@@ -275,15 +314,12 @@ def gen_singbox():
 
     # 无任何 inbound 时写一个占位配置（避免 sing-box 启动失败），
     # 但调用方应判断是否需要启动 sing-box
-    os.makedirs("/etc/sing-box", exist_ok=True)
     if not inbounds:
-        with open("/etc/sing-box/config.json", "w") as f:
-            json.dump({"log": {"level": "warn"}, "inbounds": [], "outbounds": outbounds}, f, indent=2)
+        write_singbox_config({"log": {"level": "warn"}, "inbounds": [], "outbounds": outbounds})
         print("已生成 /etc/sing-box/config.json (无启用 inbound，占位；sing-box 可不启动)")
         return
 
-    with open("/etc/sing-box/config.json", "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    write_singbox_config(config)
     note = f"ss={SS_PORT}, anytls={ANYTLS_PORT}"
     if SVC_SOCKS:
         note += f", socks={SOCKS_PORT}"

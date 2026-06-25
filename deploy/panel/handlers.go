@@ -35,6 +35,7 @@ const (
 	binAcme      = "/root/.acme.sh/acme.sh"
 	binCertIssue = "/etc/ansgo-deploy/ansgo-cert-issue.sh"
 )
+
 // acmeAccountConf：Dynu 凭证经 acme.sh _saveaccountconf_mutable 持久化于此。
 // 续期 cron 不带环境变量，必须事先写进这个文件，续期才能读到凭证。
 // 设为变量（而非常量）便于测试覆盖路径（生产运行时值不变），与 confPath/secretsPath 同口径。
@@ -237,15 +238,17 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 
 // 服务器出口 IP 解析（v1.5.18 修正 VPC 问题）。
 // 优先级：① 用户在面板设置填写的 server_ip（最高，VPC 下唯一可靠来源）
-//        ② UDP "连接" 8.8.8.8:80 探测本机出口 IP（仅当为公网时才采用）
-//        ③ 空（前端回退域名）
+//
+//	② UDP "连接" 8.8.8.8:80 探测本机出口 IP（仅当为公网时才采用）
+//	③ 空（前端回退域名）
+//
 // VPC/NAT 网络下，UDP 探测只能拿到内网网卡 IP（10./172.16-31./192.168./100.64.），
 // 公网 IP 在 NAT 网关上做 SNAT，本机无从得知。故对内网 IP 直接丢弃并回退域名，
 // 同时通过 server_ip_hint 字段告知前端「需用户手动填写公网 IP」。
 // 不调任何第三方公网 API（避免默认外发 + 符合 §13 隐私偏好）。
 var (
-	probeIPCache  string // UDP 探测到的本机出口 IP（可能为空或内网）
-	probeIPOnce   sync.Once
+	probeIPCache string // UDP 探测到的本机出口 IP（可能为空或内网）
+	probeIPOnce  sync.Once
 )
 
 func probeLocalIP() string {
@@ -328,15 +331,15 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		landings = append(landings, map[string]any{
-			"id":       L.ID,
-			"name":     L.Name,
-			"uri":      uris["landing-"+L.ID],
-			"port":     L.Port,
-			"password": pass,
-			"sni":      c.Domain,
-			"enabled":  L.Enabled,
-			"host":     c.Domain,
-			"via":      via,
+			"id":          L.ID,
+			"name":        L.Name,
+			"uri":         uris["landing-"+L.ID],
+			"port":        L.Port,
+			"password":    pass,
+			"sni":         c.Domain,
+			"enabled":     L.Enabled,
+			"host":        c.Domain,
+			"via":         via,
 			"remote_type": L.RemoteType,
 		})
 	}
@@ -533,7 +536,6 @@ func genconfRestartVerify(confTarget string) (active string, err error) {
 	return final, fmt.Errorf("%s 重启后未进入 active（当前 %s），可能配置错误或端口冲突；查看 journalctl -u %s", svc, final, svc)
 }
 
-
 // ===================== 密钥管理（委托 ansgo-admin）=====================
 
 func regenHandler(w http.ResponseWriter, r *http.Request) {
@@ -572,6 +574,10 @@ func regenHandler(w http.ResponseWriter, r *http.Request) {
 func setSecret(key, value string) error {
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
+	return setSecretLocked(key, value)
+}
+
+func setSecretLocked(key, value string) error {
 	data, err := os.ReadFile(secretsPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -609,12 +615,58 @@ func setSecret(key, value string) error {
 	return os.Rename(tmp, secretsPath)
 }
 
+// setLandingPassword 保存单个落地服务的 AnyTLS 密码。
+// v1.5.28：落地服务页一直展示「AnyTLS 密码」输入框，但旧版 saveLanding
+// 没有把该字段提交给后端，后端 update 也没有写 LANDING_<id>_PASS。
+// 用户改密码后客户端拿到的是未生效密码，表现为新增/修改后的落地 AnyTLS 不可用。
+func setLandingPassword(id, pass string) error {
+	id = strings.TrimSpace(id)
+	pass = strings.TrimSpace(pass)
+	if id == "" {
+		return fmt.Errorf("落地服务 id 不能为空")
+	}
+	if pass == "" {
+		return fmt.Errorf("落地 AnyTLS 密码不能为空")
+	}
+	return setSecret("LANDING_"+id+"_PASS", pass)
+}
+
+func cloneConfig(c Config) Config {
+	out := c
+	if c.Landings != nil {
+		out.Landings = append([]LandingService{}, c.Landings...)
+	}
+	return out
+}
+
+func backupSecretsFile() ([]byte, bool) {
+	data, err := os.ReadFile(secretsPath)
+	if err != nil {
+		return nil, false
+	}
+	return append([]byte{}, data...), true
+}
+
+func restoreSecretsFile(data []byte, existed bool) {
+	if existed {
+		_ = os.WriteFile(secretsPath, data, 0600)
+		return
+	}
+	_ = os.Remove(secretsPath)
+}
+
+func restoreLandingApply(original Config, secData []byte, secExisted bool) {
+	_ = configSet(original)
+	restoreSecretsFile(secData, secExisted)
+}
+
 // keyHandler 手动设置各协议密钥（与 regen 的随机生成互补）。
 // POST {target, method?, key?, pass?, user?}
 //   - ss      : 写 SS_METHOD + SS_KEY（校验 SS2022 密钥长度）
 //   - anytls  : 写 ANYTLS_PASS
 //   - naive   : 写 NAIVE_USER + NAIVE_PASS
 //   - socks   : 写 SOCKS_USER + SOCKS_PASS
+//
 // 落地服务密钥（原 anytls2）已移到 api/landings/regen（v1.5.26）。
 func keyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -722,10 +774,10 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 	if active, err := genconfRestartVerify(confTarget); err != nil {
 		log.Printf("keyHandler: 应用 %s 配置失败: %v（active=%s）", confTarget, err, active)
 		jwrite(w, 500, map[string]any{
-			"ok":     false,
-			"error":  err.Error(),
-			"hint":   "凭证已保存到 secrets.env 但服务未能正常重启应用新配置。请检查 journalctl -u " + confTarget + " 的错误日志。",
-			"uris":   buildURIs(configGet(), readSecrets()),
+			"ok":    false,
+			"error": err.Error(),
+			"hint":  "凭证已保存到 secrets.env 但服务未能正常重启应用新配置。请检查 journalctl -u " + confTarget + " 的错误日志。",
+			"uris":  buildURIs(configGet(), readSecrets()),
 		})
 		return
 	}
@@ -897,8 +949,9 @@ func certReloadHandler(w http.ResponseWriter, r *http.Request) {
 // certConfigHandler 读取/设置证书来源模式（acme | manual）+ Dynu 凭证（v1.5.27）
 //
 // GET  -> {mode, fullchain, privkey, cert_info, domain,
-//          dynu:{has_api_key, has_oauth, email}, dynu_configured}
-//   Dynu 凭证绝不回传明文（敏感），只回传是否存在（boolean），前端据此显示「已配置/未配置」。
+//
+//	       dynu:{has_api_key, has_oauth, email}, dynu_configured}
+//	Dynu 凭证绝不回传明文（敏感），只回传是否存在（boolean），前端据此显示「已配置/未配置」。
 //
 // POST -> {mode?, fullchain?, privkey?, dynu_api_key?, dynu_client_id?, dynu_secret?, acme_email?}
 //   - 仅当字段非 nil 时更新；传空串可清除该字段。
@@ -1065,8 +1118,8 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 			"ss_port":              c.SSPort, "anytls_port": c.AnyTLSPort, "socks_port": c.SocksPort, "naive_port": c.NaivePort,
 			"disguise_panel": c.DisguisePanel,
 			"disguise_naive": c.DisguiseNaive,
-			"caddy_enable":  c.CaddyEnable,
-			"cert_mode":     c.CertMode,
+			"caddy_enable":   c.CaddyEnable,
+			"cert_mode":      c.CertMode,
 			"cert_days_left": certInfoFull(c)["days_left"],
 		})
 		return
@@ -1758,20 +1811,20 @@ func certInfoFull(c Config) map[string]any {
 func landingToMap(L LandingService) map[string]any {
 	pass, uuid, found := readLandingSecrets(L.ID)
 	return map[string]any{
-		"id":             L.ID,
-		"name":           L.Name,
-		"enabled":        L.Enabled,
-		"port":           L.Port,
-		"has_keys":       found,
-		"password":       pass,
-		"uuid":           uuid,
-		"remote_enabled": L.RemoteEnabled,
-		"remote_type":    L.RemoteType,
-		"remote_host":    L.RemoteHost,
-		"remote_port":    L.RemotePort,
-		"remote_method":  L.RemoteMethod,
+		"id":              L.ID,
+		"name":            L.Name,
+		"enabled":         L.Enabled,
+		"port":            L.Port,
+		"has_keys":        found,
+		"password":        pass,
+		"uuid":            uuid,
+		"remote_enabled":  L.RemoteEnabled,
+		"remote_type":     L.RemoteType,
+		"remote_host":     L.RemoteHost,
+		"remote_port":     L.RemotePort,
+		"remote_method":   L.RemoteMethod,
 		"remote_password": L.RemotePassword,
-		"remote_user":    L.RemoteUser,
+		"remote_user":     L.RemoteUser,
 	}
 }
 
@@ -1810,8 +1863,9 @@ func validateLandingRemote(L *LandingService) string {
 }
 
 // landingsHandler GET 返回列表；POST 新建落地服务。
-//   GET  -> {landings: [...]}
-//   POST -> {name, port, enabled, remote_*} 创建（分配新 id + 生成凭证）
+//
+//	GET  -> {landings: [...]}
+//	POST -> {name, port, enabled, remote_*} 创建（分配新 id + 生成凭证）
 func landingsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		c := configGet()
@@ -1828,9 +1882,9 @@ func landingsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// POST: 新建
 	var b struct {
-		Name     string `json:"name"`
-		Port     int    `json:"port"`
-		Enabled  *bool  `json:"enabled"`
+		Name           string `json:"name"`
+		Port           int    `json:"port"`
+		Enabled        *bool  `json:"enabled"`
 		RemoteEnabled  *bool  `json:"remote_enabled"`
 		RemoteType     string `json:"remote_type"`
 		RemoteHost     string `json:"remote_host"`
@@ -1859,16 +1913,16 @@ func landingsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	newID := strconv.Itoa(maxID + 1)
 	L := LandingService{
-		ID:           newID,
-		Name:         name,
-		Enabled:      true, // 新建默认启用
-		Port:         b.Port,
-		RemoteType:   b.RemoteType,
-		RemoteHost:   strings.TrimSpace(b.RemoteHost),
-		RemotePort:   b.RemotePort,
-		RemoteMethod: b.RemoteMethod,
+		ID:             newID,
+		Name:           name,
+		Enabled:        true, // 新建默认启用
+		Port:           b.Port,
+		RemoteType:     b.RemoteType,
+		RemoteHost:     strings.TrimSpace(b.RemoteHost),
+		RemotePort:     b.RemotePort,
+		RemoteMethod:   b.RemoteMethod,
 		RemotePassword: b.RemotePassword,
-		RemoteUser:   strings.TrimSpace(b.RemoteUser),
+		RemoteUser:     strings.TrimSpace(b.RemoteUser),
 	}
 	if b.Enabled != nil {
 		L.Enabled = *b.Enabled
@@ -1895,23 +1949,28 @@ func landingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 生成凭证（调 ansgo-admin regen-landing <id>）
+	original := cloneConfig(c)
+	secData, secExisted := backupSecretsFile()
 	out, err := exec.Command(binAdmin, "regen-landing", newID).CombinedOutput()
 	if err != nil {
+		restoreSecretsFile(secData, secExisted)
 		jerr(w, 500, "生成落地凭证失败: "+string(out))
 		return
 	}
 	c.Landings = append(c.Landings, L)
 	if err := configSet(c); err != nil {
+		restoreLandingApply(original, secData, secExisted)
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
 	}
 	// 同步 genconf + restart + verify（v1.5.24 模式）
 	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
+		restoreLandingApply(original, secData, secExisted)
 		jwrite(w, 500, map[string]any{
-			"ok":    false,
-			"error": gerr.Error(),
-			"hint":  "落地服务已创建但 sing-box 未能正常重启，查看 journalctl -u sing-box",
-			"active": active,
+			"ok":      false,
+			"error":   gerr.Error(),
+			"hint":    "落地服务创建未应用成功，已回滚 panel.json 与落地凭证；查看 journalctl -u sing-box",
+			"active":  active,
 			"landing": landingToMap(L),
 		})
 		return
@@ -1927,7 +1986,7 @@ func landingUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b struct {
-		ID             string `json:"id"`
+		ID             string  `json:"id"`
 		Name           *string `json:"name"`
 		Port           *int    `json:"port"`
 		Enabled        *bool   `json:"enabled"`
@@ -1938,7 +1997,9 @@ func landingUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		RemoteMethod   *string `json:"remote_method"`
 		RemotePassword *string `json:"remote_password"`
 		RemoteUser     *string `json:"remote_user"`
+		Password       *string `json:"password"`
 	}
+
 	json.NewDecoder(r.Body).Decode(&b)
 	c := configGet()
 	idx := -1
@@ -1952,6 +2013,8 @@ func landingUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 404, "未找到落地服务: "+b.ID)
 		return
 	}
+	original := cloneConfig(c)
+	secData, secExisted := backupSecretsFile()
 	prev := c.Landings[idx] // 备份用于冲突回滚
 	// 应用可选字段
 	if b.Name != nil {
@@ -1996,7 +2059,12 @@ func landingUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	if b.RemoteUser != nil {
 		c.Landings[idx].RemoteUser = strings.TrimSpace(*b.RemoteUser)
 	}
+	if b.Password != nil && strings.TrimSpace(*b.Password) == "" {
+		jerr(w, 400, "落地 AnyTLS 密码不能为空")
+		return
+	}
 	// 远端校验
+
 	if msg := validateLandingRemote(&c.Landings[idx]); msg != "" {
 		jerr(w, 400, msg)
 		return
@@ -2012,12 +2080,21 @@ func landingUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
 	}
+	if b.Password != nil {
+		if err := setLandingPassword(b.ID, *b.Password); err != nil {
+			restoreLandingApply(original, secData, secExisted)
+			jerr(w, 500, "保存落地 AnyTLS 密码失败: "+err.Error())
+			return
+		}
+	}
 	// 同步 genconf + restart + verify
+
 	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
+		restoreLandingApply(original, secData, secExisted)
 		jwrite(w, 500, map[string]any{
-			"ok":    false,
-			"error": gerr.Error(),
-			"hint":  "落地服务配置已保存但 sing-box 未能正常重启，查看 journalctl -u sing-box",
+			"ok":     false,
+			"error":  gerr.Error(),
+			"hint":   "落地服务配置未应用成功，已回滚 panel.json 与落地凭证；查看 journalctl -u sing-box",
 			"active": active,
 		})
 		return
@@ -2032,7 +2109,9 @@ func landingDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 405, "方法不允许")
 		return
 	}
-	var b struct{ ID string `json:"id"` }
+	var b struct {
+		ID string `json:"id"`
+	}
 	json.NewDecoder(r.Body).Decode(&b)
 	c := configGet()
 	idx := -1
@@ -2059,9 +2138,9 @@ func landingDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	// 同步 genconf + restart + verify
 	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
 		jwrite(w, 500, map[string]any{
-			"ok":    false,
-			"error": gerr.Error(),
-			"hint":  "落地服务已删除但 sing-box 未能正常重启，查看 journalctl -u sing-box",
+			"ok":     false,
+			"error":  gerr.Error(),
+			"hint":   "落地服务已删除但 sing-box 未能正常重启，查看 journalctl -u sing-box",
 			"active": active,
 		})
 		return
@@ -2076,7 +2155,9 @@ func landingRegenHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 405, "方法不允许")
 		return
 	}
-	var b struct{ ID string `json:"id"` }
+	var b struct {
+		ID string `json:"id"`
+	}
 	json.NewDecoder(r.Body).Decode(&b)
 	c := configGet()
 	found := false
@@ -2098,9 +2179,9 @@ func landingRegenHandler(w http.ResponseWriter, r *http.Request) {
 	// 同步 genconf + restart + verify（凭证变了，sing-box 要重新读 secrets）
 	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
 		jwrite(w, 500, map[string]any{
-			"ok":    false,
-			"error": gerr.Error(),
-			"hint":  "凭证已重置但 sing-box 未能正常重启，查看 journalctl -u sing-box",
+			"ok":     false,
+			"error":  gerr.Error(),
+			"hint":   "凭证已重置但 sing-box 未能正常重启，查看 journalctl -u sing-box",
 			"active": active,
 		})
 		return
@@ -2177,8 +2258,8 @@ func landingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jwrite(w, 410, map[string]any{
-		"ok":        false,
-		"error":     "此接口已弃用（v1.5.26），请刷新页面使用新的「落地服务」页管理",
+		"ok":         false,
+		"error":      "此接口已弃用（v1.5.26），请刷新页面使用新的「落地服务」页管理",
 		"deprecated": true,
 	})
 }
@@ -2225,6 +2306,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := configGet()
+	original := cloneConfig(c)
 	var confTarget, procName string
 	switch b.Service {
 	case "ss":
@@ -2248,7 +2330,8 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if out, err := exec.Command(binGenConf, confTarget).CombinedOutput(); err != nil {
-		jerr(w, 500, "生成配置失败: "+string(out))
+		_ = configSet(original)
+		jerr(w, 500, "生成配置失败（已回滚服务开关，服务未重启）: "+string(out))
 		return
 	}
 	needProc := false
@@ -2259,7 +2342,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Action == "install" || needProc {
 		_ = exec.Command("systemctl", "enable", procName).Run()
-		_ = exec.Command("systemctl", "restart", procName).Run()
+		restartErr := exec.Command("systemctl", "restart", procName).Run()
 		// v1.5.24：验证服务真的 active（旧版无脑返回 ok，caddy deactivating 时
 		// 用户以为装好了实际没跑起来）。等待最多 4 秒确认状态。
 		st := ""
@@ -2270,12 +2353,29 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
-		if st != "active" {
+		if restartErr != nil || st != "active" {
+			_ = configSet(original)
+			_ = exec.Command(binGenConf, confTarget).Run()
+			oldNeedProc := false
+			if procName == "sing-box" {
+				oldNeedProc = original.SvcSSEnabled == "true" || original.SvcAnyTLSEnabled == "true" || original.SvcSocksEnabled == "true" || len(enabledLandings(original)) > 0
+			} else if procName == "caddy" {
+				oldNeedProc = original.CaddyEnable == "true" || original.SvcNaiveEnabled == "true"
+			}
+			if oldNeedProc {
+				_ = exec.Command("systemctl", "restart", procName).Run()
+			} else {
+				_ = exec.Command("systemctl", "stop", procName).Run()
+			}
+			errMsg := fmt.Sprintf("%s 安装后未进入 active（当前状态 %s），可能配置错误或端口冲突", procName, st)
+			if restartErr != nil {
+				errMsg = fmt.Sprintf("重启 %s 失败: %v（当前状态 %s）", procName, restartErr, st)
+			}
 			jwrite(w, 500, map[string]any{
 				"ok":      false,
 				"service": b.Service,
-				"error":   fmt.Sprintf("%s 安装后未进入 active（当前状态 %s），可能配置错误或端口冲突", procName, st),
-				"hint":    "查看日志：journalctl -u " + procName + " -n 30。常见原因：NaiveProxy 凭证含特殊字符、端口冲突、证书路径错误。",
+				"error":   errMsg,
+				"hint":    "已回滚服务开关并尝试恢复旧配置。查看日志：journalctl -u " + procName + " -n 30。常见原因：NaiveProxy 凭证含特殊字符、端口冲突、证书路径错误。",
 			})
 			return
 		}

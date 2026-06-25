@@ -787,9 +787,11 @@ async function saveLanding(p){
     enabled:$('#ld_'+p+'_en').value==='true',
     remote_enabled:$('#ld_'+p+'_ren').value==='true',
     remote_type:rtype,
-    remote_host:$('#ld_'+p+'_rhost').value,
-    remote_port:parseInt($('#ld_'+p+'_rport').value)||0,
-  };
+	    remote_host:$('#ld_'+p+'_rhost').value,
+	    remote_port:parseInt($('#ld_'+p+'_rport').value)||0,
+	    password:$('#ld_'+p+'_pass').value,
+	  };
+
   // 按远端类型取对应字段
   if(rtype==='socks'){
     body.remote_user=$('#ld_'+p+'_ruser').value;
@@ -800,9 +802,10 @@ async function saveLanding(p){
   }
   toast('正在应用…（校验 + genconf + 重启 sing-box，约 3-5 秒）');
   const j=await api('api/landings/update',{method:'POST',body:JSON.stringify(body)});
-  if(j.ok)toast('已保存，sing-box 已重启');
-  else toast(j.error||'保存失败');
-}
+	  if(j.ok){toast('已保存，sing-box 已重启');loadLanding()}
+	  else toast(j.error||'保存失败');
+	}
+
 // 重置某落地服务的 anytls 凭证
 async function regenLanding(p,btn){
   if(!confirm('重置落地服务 #'+p+' 的凭证？（现有密码将失效，客户端需更新）'))return;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.27
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.28
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
@@ -13,7 +13,7 @@
 #   - VER 与 install.sh 顶部硬编码一致，发新版只需改这一行 + commit
 #   - 复用 install.sh 的 bootstrap（解决 curl|bash 的 SIGPIPE/进程替换卡死）
 #   - panel 二进制无 -version flag（main.go 仅 -setpass），用 md5 对比判断是否真更新，
-#     启动后用 journalctl 日志行 "ansgo-panel v1.5.27 监听..." 验证版本
+#     启动后用 journalctl 日志行 "ansgo-panel v1.5.28 监听..." 验证版本
 #   - 裸金属 panel 替换走 .new→md5→.bak→mv→restart 安全流程（AGENTS.md §9 铁律）
 #   - 备份目录命名 /etc/ansgo-backup-upgrade-{TS}，遵循 ansgo-admin 约定
 # =============================================================================
@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.27"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.28"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -116,12 +116,12 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
-  - 【本版重点·补全证书管理 Dynu 凭证入口】首次以 manual（手动指定证书）模式部署的服务器，
-    后续在面板「证书管理」页切到 acme 自动签发时，缺少填写 Dynu DNS 凭证的地方，导致
-    自动签发/续期都会失败。本版在证书管理页 acme 模式下新增「Dynu 凭证」配置区
-    （API Key 路径A / Client ID+Secret 路径B / 注册邮箱），并新增「🚀 立即签发证书」按钮，
-    用已填凭证同步触发 Let's Encrypt DNS-01 签发；凭证同步写入 acme.sh account.conf，
-    续期 cron 无需再传环境变量。GET 接口只回传「是否已配置」绝不回传明文（敏感信息安全）。
+  - 【本版重点·修复落地 AnyTLS 密码保存遗漏】落地服务页「AnyTLS 密码」保存现在会写入
+    LANDING_<id>_PASS 并随 genconf + restart 同步应用，避免面板显示的新密码与 sing-box 实际
+    运行密码不一致导致落地 AnyTLS 不可用。
+  - 【防护增强】ansgo-genconf 生成 sing-box config 后会执行 sing-box check，失败立即回滚旧配置
+    并拒绝重启，避免坏配置让 sing-box 进入 activating/restart loop。
+  - v1.5.27：证书管理页补全 Dynu 凭证入口 + 立即签发证书
   - v1.5.26：多落地服务（可创建多个 anytls 落地 + 远端 SS/SOCKS5）
   - v1.5.25：NaiveProxy 代理不通根治（Caddyfile route{} 指令排序）
   - v1.5.24：NaiveProxy 凭证改同步验证 active + 🔧 修复按钮
@@ -226,7 +226,7 @@ upgrade_metal(){
   dl_or_exit "$RAW/ansgo-genconf" "$METAL_GENCONF"
   dl_or_exit "$RAW/ansgo-admin"   "$METAL_ADMIN"
   chmod 0755 "$METAL_GENCONF" "$METAL_ADMIN"
-  ok "脚本已更新（genconf: SOCKS5 inbound 生成 / admin: regen socks + info 输出 SOCKS5 URI）"
+  ok "脚本已更新（genconf: sing-box check 预检回滚 / admin: 保持最新兜底命令）"
 
   # 更新 panel 二进制（release 拉取，走 .new→md5→.bak→mv→restart 安全流程）
   hr "3/7 更新 ansgo-panel 二进制"

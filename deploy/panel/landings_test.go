@@ -108,11 +108,11 @@ func TestLandingsPortConflict_Detected(t *testing.T) {
 // TestLandingsPortConflict_NoConflict 验证不同端口 + 未启用落地的端口不参与检测。
 func TestLandingsPortConflict_NoConflict(t *testing.T) {
 	c := Config{
-		Domain:         "your-domain.com",
-		SvcSSEnabled:   "true",
-		SSPort:         33899,
+		Domain:           "your-domain.com",
+		SvcSSEnabled:     "true",
+		SSPort:           33899,
 		SvcAnyTLSEnabled: "true",
-		AnyTLSPort:     21111,
+		AnyTLSPort:       21111,
 		Landings: []LandingService{
 			{ID: "1", Name: "落地A", Enabled: true, Port: 30001},
 			{ID: "2", Name: "落地B", Enabled: false, Port: 30001}, // 未启用，不冲突
@@ -132,7 +132,7 @@ func TestLandingsSSKeyValidation(t *testing.T) {
 	good := &LandingService{
 		RemoteEnabled: true, RemoteType: "ss",
 		RemoteHost: "1.2.3.4", RemotePort: 8388,
-		RemoteMethod: "2022-blake3-aes-128-gcm",
+		RemoteMethod:   "2022-blake3-aes-128-gcm",
 		RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA==", // 24 字符
 	}
 	if msg := validateLandingRemote(good); msg != "" {
@@ -143,7 +143,7 @@ func TestLandingsSSKeyValidation(t *testing.T) {
 	bad := &LandingService{
 		RemoteEnabled: true, RemoteType: "ss",
 		RemoteHost: "1.2.3.4", RemotePort: 8388,
-		RemoteMethod: "2022-blake3-aes-128-gcm",
+		RemoteMethod:   "2022-blake3-aes-128-gcm",
 		RemotePassword: "short", // 错误长度
 	}
 	msg := validateLandingRemote(bad)
@@ -281,7 +281,7 @@ func TestBuildURIs_Landings(t *testing.T) {
 // TestSanitizeLandingName 验证落地名称做 URL fragment 安全处理。
 func TestSanitizeLandingName(t *testing.T) {
 	cases := map[string]string{
-		"香港落地":       "香港落地", // 中文保留
+		"香港落地":       "香港落地",       // 中文保留
 		"HK Landing": "HK_Landing", // 空格 -> _
 		"":           "unnamed",    // 空 -> unnamed
 		"a#b?c/d":    "a_b_c_d",    // 特殊字符 -> _
@@ -292,6 +292,42 @@ func TestSanitizeLandingName(t *testing.T) {
 		if got != want {
 			t.Errorf("sanitizeLandingName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestSetLandingPassword 验证落地服务页「AnyTLS 密码」输入框保存时，
+// 会写回 LANDING_<id>_PASS，而不是只保存端口/远端配置。
+// v1.5.28 回归：旧版前端有密码框，但 saveLanding 未提交，后端也没有字段处理，
+// 用户改了落地 AnyTLS 密码后客户端拿到的是未生效密码，表现为新增落地不可用。
+func TestSetLandingPassword(t *testing.T) {
+	tmp := t.TempDir()
+	secretsPath = filepath.Join(tmp, "secrets.env")
+	content := `SS_KEY=dGVzdA==
+LANDING_1_PASS=oldpass
+LANDING_1_UUID=11111111-1111-1111-1111-111111111111
+LANDING_2_PASS=keepme
+`
+	os.WriteFile(secretsPath, []byte(content), 0600)
+
+	if err := setLandingPassword("1", "newpass"); err != nil {
+		t.Fatalf("setLandingPassword: %v", err)
+	}
+	data, _ := os.ReadFile(secretsPath)
+	got := string(data)
+	if !contains(got, "LANDING_1_PASS=newpass") {
+		t.Fatalf("LANDING_1_PASS 未更新为新密码，内容: %s", got)
+	}
+	if contains(got, "LANDING_1_PASS=oldpass") {
+		t.Fatalf("旧 LANDING_1_PASS 仍存在，内容: %s", got)
+	}
+	if !contains(got, "LANDING_1_UUID=11111111-1111-1111-1111-111111111111") || !contains(got, "LANDING_2_PASS=keepme") {
+		t.Fatalf("更新密码时不应破坏其他凭证，内容: %s", got)
+	}
+}
+
+func TestSetLandingPasswordRejectsEmpty(t *testing.T) {
+	if err := setLandingPassword("1", "   "); err == nil {
+		t.Fatalf("空白落地 AnyTLS 密码应被拒绝")
 	}
 }
 

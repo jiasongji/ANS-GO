@@ -87,12 +87,12 @@ type Config struct {
 // 替代旧的单个硬编码 AnyTLS-2：现在可创建多个，每个有独立端口/凭证/远端配置。
 //
 //   - ID      : 内部标识（如 "1","2"），用作 sing-box tag 后缀（landing-in-<id>）
-//               + secrets.env key 前缀（LANDING_<id>_PASS/UUID）。新建时取 max+1，删除不回收。
+//   - secrets.env key 前缀（LANDING_<id>_PASS/UUID）。新建时取 max+1，删除不回收。
 //   - Enabled : 是否启用该 anytls 入站（false 则 genconf 不生成对应 inbound）。
 //   - Remote* : 远端落地出口（独立开关）。RemoteEnabled=false 时该落地走 sing-box direct。
-//               RemoteType="ss"（shadowsocks）或 "socks"（socks5），字段按类型复用：
-//               SS 用 RemoteMethod + RemotePassword；SOCKS5 用 RemoteUser + RemotePassword。
-//               远端凭证明文存 panel.json（与旧 SSLandingPassword 一致，文件已 0600 root-only）。
+//     RemoteType="ss"（shadowsocks）或 "socks"（socks5），字段按类型复用：
+//     SS 用 RemoteMethod + RemotePassword；SOCKS5 用 RemoteUser + RemotePassword。
+//     远端凭证明文存 panel.json（与旧 SSLandingPassword 一致，文件已 0600 root-only）。
 type LandingService struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
@@ -112,7 +112,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.27"
+	version = "1.5.28"
 )
 
 func loadConfig() (Config, error) {
