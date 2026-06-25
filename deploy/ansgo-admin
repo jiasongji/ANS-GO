@@ -224,6 +224,35 @@ cmd_cert_status(){
 
 cmd_cert_renew(){ do_backup >/dev/null; warn "手动触发 acme.sh 续期..."; /root/.acme.sh/acme.sh --renew -d "$(DOMAIN)" --ecc --force 2>&1 | tail -15; }
 
+# cmd_cert_issue：用 panel.json 里保存的 Dynu 凭证触发一次完整签发（v1.5.27）。
+# 对应面板「证书管理」页的「🚀 立即签发证书」。适用 manual→acme 切换后或证书丢失。
+# 凭证从 panel.json 读出注入环境（与 install.sh / panel Go runCertIssue 同语义）。
+cmd_cert_issue(){
+  local DOMAIN EMAIL DYNU_API_KEY DYNU_CLIENT_ID DYNU_SECRET
+  eval "$(python3 - "$CONF" <<'PY' 2>/dev/null
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+except Exception as e:
+    sys.exit(0)
+def sh(v):
+    v=(v or '').replace("'", "'\\''")
+    return v
+print(f"DOMAIN={sh(d.get('domain',''))}")
+print(f"EMAIL={sh(d.get('acme_email',''))}")
+print(f"DYNU_API_KEY={sh(d.get('dynu_api_key',''))}")
+print(f"DYNU_CLIENT_ID={sh(d.get('dynu_client_id',''))}")
+print(f"DYNU_SECRET={sh(d.get('dynu_secret',''))}")
+PY
+)"
+  [ -n "$DOMAIN" ] || { err "无法从 $CONF 读取 domain"; return 1; }
+  [ -n "$DYNU_API_KEY" ] || [ -n "$DYNU_CLIENT_ID" ] || { err "panel.json 未配置 Dynu 凭证（dynu_api_key 或 dynu_client_id+dynu_secret）。请在面板「证书管理」页填写，或编辑 $CONF 后重试。"; return 1; }
+  warn "触发 Let's Encrypt DNS-01 签发（域名=$DOMAIN），约 1-3 分钟..."
+  DOMAIN="$DOMAIN" EMAIL="$EMAIL" \
+    DYNU_API_KEY="$DYNU_API_KEY" DYNU_CLIENT_ID="$DYNU_CLIENT_ID" DYNU_SECRET="$DYNU_SECRET" \
+    bash /etc/ansgo-deploy/ansgo-cert-issue.sh 2>&1 | tail -25
+}
+
 cmd_panel_pass(){
   if [ -x "$BVPANEL" ]; then
     local pw; pw="$(gen_panel_pass)"
@@ -309,7 +338,7 @@ ansgo-admin —— ANS-GO 离线管理
   regen-landing <id>                 生成/重置单个落地服务凭证（v1.5.26）
   regen2                             [已弃用] 转发到 regen-landing 1
   group2 [status]                    [已弃用] 落地服务请在面板「落地服务」页管理
-  cert status | renew         证书到期 / 手动续期
+  cert status | renew | issue   证书到期 / 手动续期 / 用保存的 Dynu 凭证签发（v1.5.27）
   panel-pass                  重置面板密码（打印新密码）
   panel-path                  重置面板 URL 路径（兜底）
   panel-port [PORT]           重置面板端口（兜底）
@@ -333,7 +362,7 @@ case "$cmd" in
   regen2) cmd_regen2;;
   regen-landing) cmd_regen_landing "${1:-}";;
   group2) cmd_group2 "${1:-}";;
-  cert) case "${1:-status}" in status) cmd_cert_status;; renew) cmd_cert_renew;; *) err "用法: ansgo-admin cert [status|renew]";; esac;;
+  cert) case "${1:-status}" in status) cmd_cert_status;; renew) cmd_cert_renew;; issue) cmd_cert_issue;; *) err "用法: ansgo-admin cert [status|renew|issue]";; esac;;
   panel-pass) cmd_panel_pass;;
   panel-path) cmd_panel_path;;
   panel-port) cmd_panel_port "${1:-}";;

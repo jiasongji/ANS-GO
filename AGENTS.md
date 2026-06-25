@@ -5,12 +5,13 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前版本：v1.5.26**（install.sh 脚本版本 v1.5.26；**面板 Go 二进制 v1.5.26 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
+> **当前版本：v1.5.27**（install.sh 脚本版本 v1.5.27；**面板 Go 二进制 v1.5.27 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
 >
 > ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
+> | **v1.5.27** | **补全证书管理页 Dynu 凭证配置入口**：修复「首次以 `manual` 手动证书模式部署的服务器，后续在面板「证书管理」页切到 `acme` 自动签发时无地方填 Dynu 凭证 → 签发/续期必然失败」的遗漏。`panel.json` 新增 `dynu_api_key`/`dynu_client_id`/`dynu_secret`/`acme_email` 四字段（凭证文件 0600 root-only，与 secrets.env 同口径）；`certConfigHandler` GET 只回传「是否已配置」**绝不回传明文**（敏感信息防外泄）；POST 接受凭证后同步写入 `acme.sh` 的 `/root/.acme.sh/account.conf`（续期 cron 不带环境变量也能读到）；新增 `api/cert/issue` 同步触发完整签发（`ansgo-cert-issue.sh` + 注入凭证环境），前端「🚀 立即签发证书」按钮对应。`ansgo-admin` 新增 `cert issue` 子命令（SSH 兜底，从 panel.json 读凭证）。`upgrade.sh` 幂等补 4 个新字段；install.sh/entrypoint.sh 把 Dynu 凭证写入 panel.json | **「配置路径分支必须有对应回填入口」**：当一项配置（证书来源）有多个互斥分支（acme vs manual）且各分支需要不同参数集时，Web 面板必须为每个分支提供完整的参数填写入口——只做主分支（acme，安装时带凭证）会漏掉「从副分支切回主分支」的补参数路径。**敏感凭证 API 返回要脱敏到「存在性」**：Dynu API Key/Secret 绝不能经 HTTP 响应回传明文（即使已登录），GET 只回 `has_api_key`/`has_oauth` 布尔，前端据此显示「已配置/未配置」；前端密码框留空 = 不改（不提交该字段），与「已配置保留不变」语义一致。**acme.sh 续期 cron 不带环境变量**：`_saveaccountconf_mutable` 把 DNS 凭证持久化到 `account.conf`，所以首次签发后续期无需再传凭证；但「从未签发过」（manual 部署）的机器 `account.conf` 里没凭证，必须在切 acme + 填凭证时**主动写进 account.conf**（Go `writeAcmeAccountConf`），否则 60 天后自动续期会失败。**签发流程同步阻塞**（DNS-01 约 1-3 分钟）而非 fire-and-forget：用户需看到结果（成功/失败 + acme.sh 日志），异步无反馈 = 黑盒 |
 > | **v1.5.26** | **多落地服务（multi-landing）**：落地服务从硬编码单个 AnyTLS-2 改为**可创建多个的数组**。`panel.json` 新增 `landings: []`（每项 = 一个 anytls 入站 + 可选一个远端出站），移除旧的 `group2_enabled`/`anytls2_port`/`ss_landing_*` 扁平字段。远端出口**每落地独立开关**，支持 **SS + SOCKS5** 两种远端协议（原仅 SS）。`upgrade.sh` 把旧单落地自动迁移为 `landings[0]`（幂等 + 备份），secrets 里 `ANYTLS2_*` rename 为 `LANDING_1_*`。新增 RESTful `api/landings` CRUD（GET/POST/update/delete/regen）+ `ansgo-admin regen-landing <id>`；`regen2`/`group2` 保留兼容别名。前端落地服务页改动态列表 + 新增按钮；节点信息页遍历 landings 渲染 | **「扁平字段 → 数组」迁移必须幂等 + 自动**：升级脚本用「字段不存在才迁移」守卫 + 迁移后删旧字段，避免重复执行破坏数据；secrets key rename 用 grep 守卫（`LANDING_1_PASS` 已存在则跳过 sed）。**用户可控字符串插进 URL fragment 必须转义**：落地名称进 `anytls://...#ANS-GO-Landing-<name>`，`< > & " '` + 空格/`#?/` 会破坏 URI，前端 `escapeHtml` + Go `sanitizeLandingName` 双层处理。**CRUD 配置变更走同步事务**（复用 v1.5.24 的 `genconfRestartVerify`：genconf→restart→verify active），新增落地/改远端/删除/重置凭证全部同步，绝不 fire-and-forget。**sing-box tag 全局唯一**靠 id 后缀（`landing-in-<id>`/`landing-out-<id>`），id 取 max+1 删除不回收避免残留引用。genconf 遍历数组生成多 inbound+outbound+route，`remote_enabled=false` 时不加 outbound/rule（走 direct）。**新部署 panel.json 必须含 `"landings":[]`**（install.sh 已加），否则旧 Config 反序列化虽 nil-safe 但节点页/落地页空列表引导更友好 |
 > | **v1.5.25** | **根治 NaiveProxy「检测正常反代正常但代理不能用」**：Caddyfile 同站点块内 `forward_proxy`+`reverse_proxy`（伪装）共存时，caddy 默认指令排序把 `forward_proxy` 放在 `reverse_proxy`【之后】→ NaiveProxy 客户端 CONNECT 请求被 reverse_proxy（伪装）拦截，forward_proxy 永远拿不到代理流量。全局 `order forward_proxy before reverse_proxy` 对此**无效**（caddy 坑）。修复：用 `route {}` 块包裹 naive 站点指令，强制按书写顺序执行（forward_proxy 在前），adapted JSON subroute handlers=`[forward_proxy, reverse_proxy]` | **caddy 同站点块内多 handler 的指令排序是个大坑**：全局 `order` 指令对同站点块内的 handler 共存（如 forward_proxy+reverse_proxy）不生效，caddy 仍按内置默认顺序排（forward_proxy 天然靠后）。**必须用 `route {}` 块显式包裹**才能按书写顺序执行。官方 naiveproxy 示例用 `file_server`（天然排在 forward_proxy 后）规避了此问题；用 `reverse_proxy` 做伪装才会踩坑。**诊断方法**：`caddy adapt --config Caddyfile --adapter caddyfile` 看 JSON 里 naive 站点 route 的 `handle` 数组，forward_proxy 必须排第一。naive padding 协议本身没问题（用真实 naive 客户端 v149 验证 forward_proxy 能正常代理），问题纯在 caddy 配置生成层 |
 > | **v1.5.24** | NaiveProxy「反代正常但代理不能用」根治：旧版 keyHandler 改凭证是异步 fire-and-forget（go func genconf+restart 忽略错误）→ secrets.env 已改但 Caddyfile 没跟上 / caddy 重启 deactivating → probe_resistance 认证失败静默走伪装（反代照常打开，极具迷惑性）。修复：①keyHandler 改同步 genconf→restart→验证 active（失败报错不再掩盖）②svcInstall 安装后验证 active ③新增「🔧 修复」按钮（每张服务卡）一键 genconf+restart+验证，强制同步 secrets↔配置 | **「异步 + 忽略错误」是配置一致性的天敌**：写 secrets.env → genconf → systemctl restart 三步必须**同步顺序执行 + 检查每步退出码 + 验证最终服务 active**，任何一步 fire-and-forget 都会留下不一致。**probe_resistance 的副作用**：认证失败静默走伪装（而非 407）是 NaiveProxy 的反探测设计，但它让「凭证不匹配」表现为「反代正常」极具迷惑性——健康检测（端口 LISTEN + TCP 握手）无法发现这种逻辑层故障，必须额外验证「实际代理认证可用」或提供一键修复入口。**systemctl restart 后必须验证 is-active=active**：restart 命令成功不代表服务起来了（caddy 配置错误会进入 deactivating/failed），要轮询等待确认 |
@@ -176,6 +177,7 @@ manual 模式: cert_fullchain + cert_privkey 字段指定的绝对路径（用�
 - ⚠️ **caddy 用 restart 不用 reload**：Caddyfile 设了 `admin off`，无 admin API 通道，`systemctl reload caddy` 会失败。续期/改配置统一 `systemctl restart caddy`（naive 闪断 1-2s 可接受）。sing-box（ss+anytls）和 ansgo-panel 用 restart
 - `--keylength ec-256`（ECDSA，体积小、握手快）
 - **manual 模式续期**：用户在服务器替换证书文件后，登录面板「证书管理」页点「🔄 重新加载证书」即可（调 `ansgo-cert-reload` 重启三服务，含面板自身）；也可 SSH 执行 `/usr/local/bin/ansgo-cert-reload`
+- **v1.5.27 新增：面板内填写/切换 Dynu 凭证**。首次以 `manual` 模式部署的服务器，后续在「证书管理」页切到 `acme` 自动签发时，可在该页（acme 模式下）的「Dynu 凭证」区填写 API Key（路径A）或 Client ID+Secret（路径B）+ 注册邮箱，点「💾 保存来源设置」后凭证即持久化（写进 `panel.json` + acme.sh `account.conf`），再点「🚀 立即签发证书」同步触发 Let's Encrypt DNS-01 签发。GET 接口只回传「是否已配置」绝不回传明文。SSH 兜底：`ansgo-admin cert issue`（从 panel.json 读凭证触发签发）。**这解决了「manual 部署后切 acme 没地方填凭证」的遗漏**——acme.sh 续期 cron 不带环境变量，凭证必须事先写进 `account.conf`（首次 acme 签发时自动写入；从未签发过的 manual 机器需通过此入口补写）
 
 ---
 
@@ -277,7 +279,7 @@ https://your-domain.com:15608/<随机URL路径>/
    - **同步事务**：所有写操作（新增/保存/删除/重置凭证）走 v1.5.24 的 `genconfRestartVerify`（genconf→restart→verify active），非 fire-and-forget
    - **校验**：端口冲突（sing-box 同进程）+ SS2022 密钥长度 + SOCKS5 凭证非空，失败即时反馈
    - ⚠️ **架构约束告知**：只有落地服务（landings）才路由到远端出口；NaiveProxy / 第一组 SOCKS5 不参与远端落地
-6. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果
+6. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果。**v1.5.27 起 acme 模式新增「Dynu 凭证」配置区**（API Key 路径A / Client ID+Secret 路径B / 注册邮箱）+ **「🚀 立即签发证书」按钮**（同步触发 Let's Encrypt DNS-01，约 1-3 分钟，回显 acme.sh 日志）。凭证只回传「已配置/未配置」状态不回传明文；解决 manual 部署后切 acme 没地方填凭证的遗漏。**新增 `api/cert/issue` 端点**
 7. **面板设置**：网页标题 / URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 服务器公网 IP（v1.5.18，VPC 必填 + 🔍 自动检测按钮）/ 伪装站点。**v1.5.19 起 `--no-caddy` 模式（caddy_enable=false）时隐藏「直访伪装(:443)」**（该站点由 nginx 等接管，caddy 不再生成，改了也不会生效）；Naive 伪装始终显示。**v1.5.22 起保存逻辑修复**：仅 url_path/panel_port 真正变化才重启（旧版每次保存都重启）；`saveSet()` 防御 disguise_panel 输入缺失（`--no-caddy` 场景）
 8. **日志查看**：tail 最近 N 行
 9. **顶栏管理面板状态圆点**（v1.5.20）：顶栏用户名右侧一个小圆点，绿=运行中 / 红=未运行 / 灰=获取失败，hover 显示「管理面板：运行中 :端口」。登录时 + 每次切换页面时静默刷新（`refreshPanelDot()` 拉 `api/dashboard`，fire-and-forget 不阻塞页面加载）。**管理面板状态从仪表盘移出**（避免与代理服务并列显示冗余），全局常驻顶栏可见
@@ -311,6 +313,7 @@ ansgo-admin regen2              # [已弃用] 转发到 regen-landing 1
 ansgo-admin group2 [status]     # [已弃用] 落地服务请在面板「落地服务」页管理
 ansgo-admin cert status         # 证书到期
 ansgo-admin cert renew          # 手动续期
+ansgo-admin cert issue          # 用 panel.json 里保存的 Dynu 凭证触发完整签发（v1.5.27，manual→acme 切换后的 SSH 兜底）
 ansgo-admin panel-pass          # 重置面板密码（打印新密码）
 ansgo-admin panel-path          # 重置面板 URL 路径（兜底）
 ansgo-admin panel-port          # 重置面板端口（兜底）
@@ -422,6 +425,7 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 - **用户可控凭证插进结构化配置文件必须校验元字符**（v1.5.23）：NaiveProxy 用户名/密码被 `ansgo-genconf` 直接插进 Caddyfile 的 `basic_auth myuser mypass` 指令。**含空格/`{}`/`#` 等的密码会破坏 Caddyfile 语法** → `caddy validate` 失败 → caddy 重启失败 → Naive 无法运行（AnyTLS/SS 走 sing-box 不受影响，故「改 Naive 密码只挂 Naive」）。`keyHandler` 旧版对 SOCKS5 做了 `ContainsAny(": \t\r\n")` 校验却**漏了 NaiveProxy**（复制粘贴遗漏，同 v1.5.21 的 url_path 守卫遗漏同源）。修复用**三层防御**：①前端 `svcSave` 正则 `/[ \t\r\n{}]/` 拦截即时反馈 ②后端 `keyHandler` 拒绝（防 API 绕过）③**`genconf` 写完 Caddyfile 后 `caddy validate` 预检，失败回滚旧配置不重启**（终极兜底——即使前两层都漏，也永远不会把坏配置喂给 caddy 让它挂掉）。**通用规律**：任何「用户输入 → 字符串拼接进 Caddyfile/Nginx conf/systemd unit/JSON」的路径，都必须在生成后用对应工具 validate（`caddy validate` / `nginx -t` / `sing-box check` / `jq empty`），失败回滚。go func 里 `genconf && restart` 要检查 genconf 退出码，失败不重启。
 - **「异步 fire-and-forget + 忽略错误」是配置一致性的天敌**（v1.5.24，最高优先级）：`keyHandler` 改 NaiveProxy 凭证的旧流程是 `go func { genconf caddy; systemctl restart caddy }()` ——两步都在 goroutine 里且 `_ =` 忽略错误，HTTP 响应立即返回 `{ok:true}`。**问题链**：写 secrets.env（同步成功）→ 异步 genconf（可能失败/被杀）→ 异步 restart（可能 deactivating）→ 用户收到 ok:true 但实际 caddy 没用新配置跑起来 → secrets.env(新)与 Caddyfile(旧)不一致。**NaiveProxy 的 probe_resistance 让这种不一致极具迷惑性**：认证失败时静默走伪装（反代照常打开 200），而非返回 407，用户看到「反代正常」就以为服务好的，实则代理认证全失败。正确做法：**改凭证 = 同步事务**（genconf → restart → 轮询验证 `systemctl is-active` 真的 = active），任一步失败立即报错并给出诊断。**systemctl restart 成功 ≠ 服务起来了**：caddy 配置错误会进 deactivating/failed，restart 命令本身返回 0；必须额外 `is-active` 轮询确认（等待 2-4 秒）。**无法自动验证代理认证可用**时（需要真实客户端），提供「一键修复」入口（genconf+restart+验证）让用户能自助恢复一致状态。
 - **caddy 同站点块内多 handler 的指令排序是个大坑**（v1.5.25，NaiveProxy 代理不通的真正根因）：Caddyfile 同一站点块（如 `:44333 { ... }`）内同时写 `forward_proxy`（代理）和 `reverse_proxy`（伪装反代）时，**caddy 默认指令排序把 forward_proxy 放在 reverse_proxy 之后**——即使全局加了 `order forward_proxy before reverse_proxy` 也无效（caddy 对同站点块内 handler 共存的排序有坑，全局 order 不覆盖）。后果：NaiveProxy 客户端的 CONNECT 请求先被 reverse_proxy（伪装站）拦截处理，forward_proxy 永远拿不到代理流量 → 「检测正常、反代正常、但代理不能用」。官方 naiveproxy 示例用 `file_server`（天然排在 forward_proxy 后）规避了此问题，我们用 `reverse_proxy` 做伪装才踩坑。**修复**：用 `route {}` 块包裹站点内指令，强制按书写顺序执行（forward_proxy 写最前）。**诊断方法**：`caddy adapt --config Caddyfile --adapter caddyfile` 输出 JSON，看该站点 route 的 `handle` 数组里 forward_proxy 是否排第一；不是则用 route 块重排。**通用规律**：caddy 任何「多 handler 共存 + 需要特定执行顺序」的场景，用 `route {}` 块显式排序，不要依赖全局 order 指令。
+- **配置分支必须有对应的回填入口**（v1.5.27，证书管理 Dynu 凭证遗漏的根因）：当一项配置存在**多个互斥分支**（证书来源：`acme` vs `manual`）且各分支需要**不同参数集**（acme 需 Dynu 凭证，manual 需证书路径）时，Web 面板必须为**每个分支**提供完整的参数填写入口。本项目的坑：安装时 acme 模式凭证由 install.sh 经环境变量一次性注入（acme.sh `_saveaccountconf_mutable` 持久化到 `account.conf`），面板「证书管理」页只做了「主分支 acme 已装好就只需续期」+「切 manual 填路径」，**漏掉了「从 manual 切回 acme 且 `account.conf` 里没凭证」的补参数路径**——首次 manual 部署的服务器从未跑过 acme.sh，`account.conf` 空，切 acme 后续期/签发都失败，但面板没地方填凭证。**通用规律**：设计「可切换的配置分支」时，要列出所有「分支切换」路径并为每条路径补齐所需参数的填写入口，不能只覆盖「安装时默认分支」。**敏感凭证 API 返回必须脱敏到「存在性」**：Dynu API Key/Secret 经 HTTP 响应回传明文是安全违规（即使已登录会话），GET 只回 `has_api_key`/`has_oauth` 布尔让前端显示「已配置/未配置」；前端密码框留空 = 不改（不提交该字段），与「已配置保留不变」语义一致（避免空串覆盖已有值）。**acme.sh 续期 cron 不带环境变量**：DNS 凭证靠 `account.conf` 持久化，首次签发自动写入；但从未签发过的机器必须**主动**写（Go `writeAcmeAccountConf` 把凭证 upsert 进 `account.conf`），否则 60 天后自动续期失败。**签发是同步阻塞操作**（DNS-01 约 1-3 分钟），用户需看到成功/失败 + acme.sh 日志，不能 fire-and-forget（异步无反馈 = 黑盒，用户不知道成没成）。
 
 ---
 
@@ -587,7 +591,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrad
 
 1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 多协议连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
 2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.25
+3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.27
 4. **客户端实测（可选）**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
 
 ---

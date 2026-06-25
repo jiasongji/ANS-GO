@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.25
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.27
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
@@ -13,7 +13,7 @@
 #   - VER 与 install.sh 顶部硬编码一致，发新版只需改这一行 + commit
 #   - 复用 install.sh 的 bootstrap（解决 curl|bash 的 SIGPIPE/进程替换卡死）
 #   - panel 二进制无 -version flag（main.go 仅 -setpass），用 md5 对比判断是否真更新，
-#     启动后用 journalctl 日志行 "ansgo-panel v1.5.25 监听..." 验证版本
+#     启动后用 journalctl 日志行 "ansgo-panel v1.5.27 监听..." 验证版本
 #   - 裸金属 panel 替换走 .new→md5→.bak→mv→restart 安全流程（AGENTS.md §9 铁律）
 #   - 备份目录命名 /etc/ansgo-backup-upgrade-{TS}，遵循 ansgo-admin 约定
 # =============================================================================
@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.26"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.27"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -116,15 +116,15 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
-  - 【本版重点·根治 NaiveProxy 代理不通】Caddyfile 指令顺序修复：
-    根因是 naive 站点块内 forward_proxy + reverse_proxy（伪装）共存时，caddy 默认
-    指令排序把 forward_proxy 放在 reverse_proxy【之后】→ NaiveProxy 客户端的 CONNECT
-    请求被 reverse_proxy（伪装站）拦截，forward_proxy 永远拿不到代理流量 →
-    「检测正常、反代正常打开、但客户端代理不能用」。全局 order 指令对此无效（caddy 坑）。
-    修复：用 route {} 块包裹 naive 站点指令，强制按书写顺序执行（forward_proxy 在前）。
-    已验证 adapted JSON 的 subroute handlers=[forward_proxy, reverse_proxy]。
-    （官方 naiveproxy 示例用 file_server 不受影响，我们用 reverse_proxy 做伪装才踩坑）
-  - v1.5.24：keyHandler 改同步验证 active + svcInstall 验证 + 🔧 修复按钮
+  - 【本版重点·补全证书管理 Dynu 凭证入口】首次以 manual（手动指定证书）模式部署的服务器，
+    后续在面板「证书管理」页切到 acme 自动签发时，缺少填写 Dynu DNS 凭证的地方，导致
+    自动签发/续期都会失败。本版在证书管理页 acme 模式下新增「Dynu 凭证」配置区
+    （API Key 路径A / Client ID+Secret 路径B / 注册邮箱），并新增「🚀 立即签发证书」按钮，
+    用已填凭证同步触发 Let's Encrypt DNS-01 签发；凭证同步写入 acme.sh account.conf，
+    续期 cron 无需再传环境变量。GET 接口只回传「是否已配置」绝不回传明文（敏感信息安全）。
+  - v1.5.26：多落地服务（可创建多个 anytls 落地 + 远端 SS/SOCKS5）
+  - v1.5.25：NaiveProxy 代理不通根治（Caddyfile route{} 指令排序）
+  - v1.5.24：NaiveProxy 凭证改同步验证 active + 🔧 修复按钮
   - v1.5.23：NaiveProxy 凭证含空格/{} 破坏 Caddyfile 三层防御
   - v1.5.22：面板设置保存无反应 + 侧栏版本号
 
@@ -327,6 +327,15 @@ for k in ("group2_enabled","anytls2_port","naive2_port",
           "ss_landing_method","ss_landing_password"):
     if k in d:
         d.pop(k)
+
+# === v1.5.27: 证书管理页 Dynu 凭证字段（幂等：字段不存在才补空串）===
+# 这些字段让「首次 manual 部署后切 acme」能在面板填 Dynu 凭证并签发。
+# acme.sh 续期 cron 读 /root/.acme.sh/account.conf，凭证由面板写入。
+# 已存在的部署通常 account.conf 已含凭证（首次 acme 签发时持久化），此处只补 panel.json 字段占位。
+for k in ("dynu_api_key","dynu_client_id","dynu_secret","acme_email"):
+    if k not in d:
+        d[k] = ""
+        changed.append(f"{k}=''（v1.5.27 新增证书凭证字段，可在面板证书页填写）")
 
 # 原子写（tmp + rename）
 import os

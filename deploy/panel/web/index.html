@@ -830,6 +830,13 @@ async function loadCert(){
   const mode=cfg.mode||'acme';
   const certRows=c.error?'':Object.entries(c).filter(([k])=>k!=='error').map(([k,v])=>`<tr><th>${{subject:'域名',issuer:'签发者',issuer_org:'签发机构',not_before:'生效',not_after:'到期',days_left:'剩余天数'}[k]||k}</th><td>${k==='days_left'?`<b style="color:${v<14?'var(--err)':'var(--ok)'}">${v} 天</b>`:v}</td></tr>`).join('');
   const isAcme=mode==='acme';
+  // v1.5.27：Dynu 凭证存在状态（GET 绝不回传明文，只回 boolean）
+  const dynu=cfg.dynu||{has_api_key:false,has_oauth:false};
+  const dynuState = cfg.dynu_configured
+    ? '<span style="color:var(--ok)">✓ 已配置（可签发/续期）</span>'
+    : '<span style="color:var(--err)">✗ 未配置（manual 部署首次切 acme 需填写）</span>';
+  const akPh = dynu.has_api_key ? '（已配置，留空保留不变）' : 'Dynu 控制台 → API Keys';
+  const cidPh = dynu.has_oauth ? '（已配置，留空保留不变）' : 'Dynu 控制台 → OAuth2';
   $('#content').innerHTML=`<div class="card"><h3>📜 证书管理</h3>
    <table>${certRows||'<tr><td colspan="2" style="color:var(--err)">'+(c.error||'无证书信息')+'</td></tr>'}</table>
    <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
@@ -842,25 +849,58 @@ async function loadCert(){
      <div class="row"><label>证书文件路径</label><div class="f"><input id="cert_fullchain" value="${cfg.fullchain||''}" placeholder="/绝对路径/fullchain.pem"></div></div>
      <div class="row"><label>私钥文件路径</label><div class="f"><input id="cert_privkey" value="${cfg.privkey||''}" placeholder="/绝对路径/privkey.pem"></div></div>
    </div>
+   <div id="acme_wrap" style="display:${isAcme?'block':'none'};border-top:1px dashed var(--bd);margin-top:14px;padding-top:10px">
+     <div class="row" style="align-items:flex-start"><label>Dynu 凭证</label><div class="f">
+       <div style="margin-bottom:6px">${dynuState}<span class="mut" style="font-size:12px;margin-left:8px">用于 DNS-01 验证签发与续期</span></div>
+       <div class="help" style="margin:0 0 8px 0">首次以手动证书部署的服务器，切到 acme 自动签发前需填写 Dynu 凭证。<b>二选一即可</b>：路径A（API Key，推荐）或路径B（OAuth Client ID+Secret）。凭证仅保存在本机配置文件（0600），不回传明文。</div>
+       <div class="row"><label style="min-width:90px">API Key（路径A）</label><div class="f"><input id="dynu_api_key" type="password" placeholder="${akPh}" autocomplete="off"></div></div>
+       <div class="row"><label style="min-width:90px">Client ID（路径B）</label><div class="f"><input id="dynu_client_id" type="password" placeholder="${cidPh}" autocomplete="off"></div></div>
+       <div class="row"><label style="min-width:90px">Secret（路径B）</label><div class="f"><input id="dynu_secret" type="password" placeholder="${dynu.has_oauth?'（已配置，留空保留不变）':'OAuth Secret'}" autocomplete="off"></div></div>
+       <div class="row"><label style="min-width:90px">注册邮箱</label><div class="f"><input id="acme_email" value="${cfg.acme_email||''}" placeholder="留空用 admin@域名"></div></div>
+     </div></div>
+   </div>
    <div style="margin-top:10px">
      <button class="primary" onclick="saveCertConfig()">💾 保存来源设置</button>
      ${isAcme
-       ?'<button class="mut" style="margin-left:8px" onclick="certRenew()">🔄 手动续期</button><span class="mut" style="margin-left:8px;font-size:12px">acme.sh 已配置 60 天自动续期。</span>'
+       ?'<button class="mut" style="margin-left:8px" onclick="certIssue()">🚀 立即签发证书</button><button class="mut" style="margin-left:8px" onclick="certRenew()">🔄 手动续期</button><span class="mut" style="margin-left:8px;font-size:12px">「立即签发」用于切换来源/补凭证后首次签发；「手动续期」更新即将到期证书。</span>'
        :'<button class="mut" style="margin-left:8px" onclick="certReload()">🔄 重新加载证书</button><span class="mut" style="margin-left:8px;font-size:12px">手动模式：在服务器替换证书后点此重新加载三服务。</span>'}
    </div>
-   <div class="help" style="margin-top:12px">⚠️ 切换来源或改路径会让面板自身也重启（TLS 证书变了），届时会断开需重新登录。</div></div>`;
-  $('#cert_mode').onchange=()=>{$('#manual_wrap').style.display=$('#cert_mode').value==='manual'?'block':'none'};
+   <div class="help" style="margin-top:12px">⚠️ 切换来源或改路径会让面板自身也重启（TLS 证书变了），届时会断开需重新登录。「立即签发」耗时约 1-3 分钟（DNS-01），请耐心等待。</div></div>`;
+  $('#cert_mode').onchange=()=>{
+    const m=$('#cert_mode').value;
+    $('#manual_wrap').style.display=m==='manual'?'block':'none';
+    $('#acme_wrap').style.display=m==='acme'?'block':'none';
+  };
 }
 async function saveCertConfig(){
   const mode=$('#cert_mode').value;
   const body={mode};
   if(mode==='manual'){body.fullchain=$('#cert_fullchain').value;body.privkey=$('#cert_privkey').value}
+  else{
+    // v1.5.27：acme 模式一并提交 Dynu 凭证（仅收集非空字段，空串=清空，后端按 nil 判断）
+    const ak=$('#dynu_api_key').value.trim();
+    const cid=$('#dynu_client_id').value.trim();
+    const sec=$('#dynu_secret').value.trim();
+    const email=$('#acme_email').value.trim();
+    // 密码框留空 = 不改（不提交该字段），与「已配置保留不变」语义一致
+    if($('#dynu_api_key').value!=='')body.dynu_api_key=ak;
+    if($('#dynu_client_id').value!=='')body.dynu_client_id=cid;
+    if($('#dynu_secret').value!=='')body.dynu_secret=sec;
+    body.acme_email=email;
+  }
   if(!confirm('保存证书来源设置？面板及三服务将重启，会断开连接。'))return;
   toast('正在保存…（三服务将重启）');
   const j=await api('api/cert/config',{method:'POST',body:JSON.stringify(body)});
   if(j.ok&&j.new_url){showRestartOverlay(j.msg||'证书设置已保存，面板即将重启',j.new_url,j.restart_in||3);return}
   if(j.ok)toast('已保存');
   else toast(j.error||'保存失败');
+}
+async function certIssue(){
+  if(!confirm('立即签发证书？将通过 Dynu DNS-01 向 Let\'s Encrypt 申请，耗时约 1-3 分钟，期间不要关闭页面。'))return;
+  toast('正在签发…（DNS-01 验证，约 1-3 分钟）');
+  const j=await api('api/cert/issue',{method:'POST'});
+  if(j.ok){toast('证书签发完成');loadCert()}
+  else{toast(j.msg||j.error||'签发失败');if(j.log){console.log('cert issue log:\n'+j.log)}}
 }
 async function certReload(){
   if(!confirm('重新加载证书？caddy/sing-box/面板都会重启，会断开连接。'))return;

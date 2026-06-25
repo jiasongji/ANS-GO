@@ -71,6 +71,10 @@ if [ ! -f "$CONF" ]; then
   "cert_dir": "/etc/ssl/ansgo",
   "cert_fullchain": "${CERT_FULLCHAIN}",
   "cert_privkey": "${CERT_PRIVKEY}",
+  "dynu_api_key": "${DYNU_API_KEY:-}",
+  "dynu_client_id": "${DYNU_CLIENT_ID:-}",
+  "dynu_secret": "${DYNU_SECRET:-}",
+  "acme_email": "${EMAIL:-}",
   "db_path": "/etc/ansgo/sessions.db"
 }
 EOF

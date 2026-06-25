@@ -30,10 +30,15 @@ var indexHTML []byte
 var qrcodeJS []byte
 
 const (
-	binGenConf = "/usr/local/bin/ansgo-genconf"
-	binAdmin   = "/usr/local/bin/ansgo-admin"
-	binAcme    = "/root/.acme.sh/acme.sh"
+	binGenConf   = "/usr/local/bin/ansgo-genconf"
+	binAdmin     = "/usr/local/bin/ansgo-admin"
+	binAcme      = "/root/.acme.sh/acme.sh"
+	binCertIssue = "/etc/ansgo-deploy/ansgo-cert-issue.sh"
 )
+// acmeAccountConf：Dynu 凭证经 acme.sh _saveaccountconf_mutable 持久化于此。
+// 续期 cron 不带环境变量，必须事先写进这个文件，续期才能读到凭证。
+// 设为变量（而非常量）便于测试覆盖路径（生产运行时值不变），与 confPath/secretsPath 同口径。
+var acmeAccountConf = "/root/.acme.sh/account.conf"
 
 // ===================== 路由根 =====================
 
@@ -91,6 +96,8 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		requireAuth(certConfigHandler)(w, r)
 	case rel == "api/cert/reload":
 		requireAuth(certReloadHandler)(w, r)
+	case rel == "api/cert/issue":
+		requireAuth(certIssueHandler)(w, r)
 	case rel == "api/settings":
 		requireAuth(settingsHandler)(w, r)
 	case rel == "api/detect-public-ip":
@@ -729,6 +736,107 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 
 // ===================== 证书 =====================
 
+// dynuConfigured 报告当前是否已配置 Dynu 凭证（任一路径齐全即视为可签发）。
+// 路径 A：dynu_api_key；路径 B：dynu_client_id + dynu_secret。
+func dynuConfigured(c Config) bool {
+	return c.DynuAPIKey != "" || (c.DynuClientID != "" && c.DynuSecret != "")
+}
+
+// acmeEmailOrDefault 返回 acme 注册邮箱，缺省回退 admin@<域名>（与 cert-issue.sh 一致）。
+func acmeEmailOrDefault(c Config) string {
+	if e := strings.TrimSpace(c.AcmeEmail); e != "" {
+		return e
+	}
+	if c.Domain != "" {
+		return "admin@" + c.Domain
+	}
+	return "admin@example.com"
+}
+
+// writeAcmeAccountConf 把 Dynu 凭证 + 邮箱写进 acme.sh 的 account.conf，
+// 使续期 cron（不带环境变量）也能读到凭证。
+//
+// account.conf 是 KEY='VALUE' 的 shell 脚本片段（acme.sh 用 source 加载）。
+// 本函数：读取现有内容 → 按行 upsert 指定键 → 原子写回。
+// 空字段不写（保留 acme.sh 已持久化的旧值，不主动清除）。
+func writeAcmeAccountConf(c Config) error {
+	if _, err := os.Stat(acmeAccountConf); err != nil {
+		// account.conf 不存在通常意味着 acme.sh 未安装；交给 issue 流程安装后再写。
+		// 不在此报错——issue 流程内部会安装 acme.sh。
+	}
+	kv := map[string]string{}
+	if v := strings.TrimSpace(c.AcmeEmail); v != "" {
+		kv["ACCOUNT_EMAIL"] = v
+	}
+	if v := strings.TrimSpace(c.DynuAPIKey); v != "" {
+		kv["DYNU_API_KEY"] = v
+	}
+	if v := strings.TrimSpace(c.DynuClientID); v != "" {
+		kv["Dynu_ClientId"] = v
+	}
+	if v := strings.TrimSpace(c.DynuSecret); v != "" {
+		kv["Dynu_Secret"] = v
+	}
+	if len(kv) == 0 {
+		return nil
+	}
+	data, _ := os.ReadFile(acmeAccountConf)
+	lines := strings.Split(string(data), "\n")
+	written := make(map[string]bool)
+	var out []string
+	for _, ln := range lines {
+		key := ""
+		if eq := strings.IndexByte(ln, '='); eq > 0 {
+			key = strings.TrimSpace(ln[:eq])
+		}
+		if newv, ok := kv[key]; ok {
+			out = append(out, fmt.Sprintf("%s='%s'", key, newv))
+			written[key] = true
+			continue
+		}
+		out = append(out, ln)
+	}
+	// 追加新增键（原文件没有的）
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	// 稳定顺序：ACCOUNT_EMAIL, DYNU_API_KEY, Dynu_ClientId, Dynu_Secret
+	order := []string{"ACCOUNT_EMAIL", "DYNU_API_KEY", "Dynu_ClientId", "Dynu_Secret"}
+	seen := map[string]bool{}
+	for _, k := range order {
+		if _, ok := kv[k]; ok && !written[k] && !seen[k] {
+			out = append(out, fmt.Sprintf("%s='%s'", k, kv[k]))
+			seen[k] = true
+		}
+	}
+	content := strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
+	tmp := acmeAccountConf + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, acmeAccountConf)
+}
+
+// runCertIssue 调用 ansgo-cert-issue.sh 签发证书（同步阻塞，约 1-3 分钟）。
+// 凭证从 Config 注入环境变量（与 install.sh 同语义），不再依赖调用方传环境。
+// 返回 (日志, 错误)。
+func runCertIssue(c Config) (string, error) {
+	// 先把凭证写进 account.conf，保证续期 cron 可用（issue 流程也会通过环境读到）。
+	_ = writeAcmeAccountConf(c)
+
+	cmd := exec.Command("bash", binCertIssue)
+	cmd.Env = append(os.Environ(),
+		"DOMAIN="+c.Domain,
+		"EMAIL="+acmeEmailOrDefault(c),
+		"DYNU_API_KEY="+c.DynuAPIKey,
+		"DYNU_CLIENT_ID="+c.DynuClientID,
+		"DYNU_SECRET="+c.DynuSecret,
+	)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func certHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	jwrite(w, 200, certInfoFull(c))
@@ -744,6 +852,8 @@ func certRenewHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 400, "当前为手动证书模式，无法通过 acme.sh 续期。请在服务器替换证书文件后点击「重新加载证书」。")
 		return
 	}
+	// v1.5.27：续期前确保 account.conf 含最新凭证（manual→acme 切换后续期也能读到）。
+	_ = writeAcmeAccountConf(c)
 	out, err := exec.Command("sh", "-c", binAcme+" --renew -d "+c.Domain+" --ecc --force 2>&1; "+binGenConf+" all 2>/dev/null; /usr/local/bin/ansgo-cert-reload").CombinedOutput()
 	if err != nil {
 		jwrite(w, 500, map[string]any{"ok": false, "log": string(out)})
@@ -784,9 +894,17 @@ func certReloadHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// certConfigHandler 读取/设置证书来源模式（acme | manual）
-// GET  -> {mode, fullchain, privkey, cert_info}
-// POST -> {mode, fullchain?, privkey?}；manual 模式校验两文件可读，写配置后重启三服务
+// certConfigHandler 读取/设置证书来源模式（acme | manual）+ Dynu 凭证（v1.5.27）
+//
+// GET  -> {mode, fullchain, privkey, cert_info, domain,
+//          dynu:{has_api_key, has_oauth, email}, dynu_configured}
+//   Dynu 凭证绝不回传明文（敏感），只回传是否存在（boolean），前端据此显示「已配置/未配置」。
+//
+// POST -> {mode?, fullchain?, privkey?, dynu_api_key?, dynu_client_id?, dynu_secret?, acme_email?}
+//   - 仅当字段非 nil 时更新；传空串可清除该字段。
+//   - manual 模式校验两文件可读。
+//   - 切到 acme 或更新了 Dynu 凭证时，把凭证写进 acme.sh account.conf（供续期 cron 使用）。
+//   - 保存后重生成配置 + 重启 caddy/sing-box/面板。
 func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	if r.Method == "GET" {
@@ -796,16 +914,27 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"privkey":   c.CertPrivkey,
 			"cert_info": certInfoFull(c),
 			"domain":    c.Domain,
+			"dynu": map[string]bool{
+				"has_api_key": c.DynuAPIKey != "",
+				"has_oauth":   c.DynuClientID != "" && c.DynuSecret != "",
+			},
+			"dynu_configured": dynuConfigured(c),
+			"acme_email":      c.AcmeEmail,
 		})
 		return
 	}
 	// POST
 	var b struct {
-		Mode      *string `json:"mode"`
-		Fullchain *string `json:"fullchain"`
-		Privkey   *string `json:"privkey"`
+		Mode         *string `json:"mode"`
+		Fullchain    *string `json:"fullchain"`
+		Privkey      *string `json:"privkey"`
+		DynuAPIKey   *string `json:"dynu_api_key"`
+		DynuClientID *string `json:"dynu_client_id"`
+		DynuSecret   *string `json:"dynu_secret"`
+		AcmeEmail    *string `json:"acme_email"`
 	}
 	json.NewDecoder(r.Body).Decode(&b)
+	dynuChanged := false
 	if b.Mode != nil {
 		m := strings.TrimSpace(*b.Mode)
 		if m != "acme" && m != "manual" {
@@ -819,6 +948,27 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Privkey != nil {
 		c.CertPrivkey = strings.TrimSpace(*b.Privkey)
+	}
+	if b.DynuAPIKey != nil {
+		if v := strings.TrimSpace(*b.DynuAPIKey); v != c.DynuAPIKey {
+			dynuChanged = true
+		}
+		c.DynuAPIKey = strings.TrimSpace(*b.DynuAPIKey)
+	}
+	if b.DynuClientID != nil {
+		if v := strings.TrimSpace(*b.DynuClientID); v != c.DynuClientID {
+			dynuChanged = true
+		}
+		c.DynuClientID = strings.TrimSpace(*b.DynuClientID)
+	}
+	if b.DynuSecret != nil {
+		if v := strings.TrimSpace(*b.DynuSecret); v != c.DynuSecret {
+			dynuChanged = true
+		}
+		c.DynuSecret = strings.TrimSpace(*b.DynuSecret)
+	}
+	if b.AcmeEmail != nil {
+		c.AcmeEmail = strings.TrimSpace(*b.AcmeEmail)
 	}
 	// manual 模式必须两路径齐全且可读
 	if c.CertMode == "manual" {
@@ -839,6 +989,13 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
 	}
+	// v1.5.27：acme 模式且凭证有变更 → 同步写进 account.conf，确保续期 cron 可用。
+	if c.CertMode == "acme" && dynuChanged && dynuConfigured(c) {
+		if err := writeAcmeAccountConf(c); err != nil {
+			// 写 account.conf 失败不阻断主流程（issue 时还会再写一次），仅记录。
+			log.Printf("certConfig: 写 account.conf 警告: %v", err)
+		}
+	}
 	// 证书路径/模式变化影响 caddy + sing-box + 面板自身，全部重生成并重启。
 	// 面板自身因 TLS 证书也变，需要 scheduleSelfRestart 并提示前端 overlay 重新登录。
 	go func() {
@@ -852,6 +1009,38 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "restart_in": 3, "new_url": newURL,
 		"msg":  "证书设置已保存，三服务将在 3 秒后重启（面板会断开，请用新证书重新访问）。",
 		"cert": certInfoFull(c),
+	})
+}
+
+// certIssueHandler 触发一次完整 acme 签发流程（ansgo-cert-issue.sh）。
+// 适用场景：manual→acme 切换后、或证书丢失/DNS 变更后，用已保存的 Dynu 凭证重新签发。
+// v1.5.27：补全「首次 manual 部署后切 acme 没法签发」的遗漏。
+//
+// 同步阻塞执行（约 1-3 分钟 DNS-01 签发），失败返回 acme.sh 日志供前端展示。
+func certIssueHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jerr(w, 405, "方法不允许")
+		return
+	}
+	c := configGet()
+	if c.CertMode != "acme" {
+		jerr(w, 400, "当前不是 acme 自动签发模式，请先在「证书来源」切到 acme 并保存。")
+		return
+	}
+	if !dynuConfigured(c) {
+		jerr(w, 400, "尚未配置 Dynu 凭证。请先填写 API Key（路径A）或 Client ID+Secret（路径B）并保存，再点签发。")
+		return
+	}
+	out, err := runCertIssue(c)
+	if err != nil {
+		jwrite(w, 500, map[string]any{"ok": false, "log": out,
+			"msg": "签发失败，请检查凭证与域名 DNS 是否正确指向本机。"})
+		return
+	}
+	jwrite(w, 200, map[string]any{
+		"ok": true, "log": out,
+		"cert": certInfoFull(c),
+		"msg":  "证书已签发并安装。如需让面板立即用新证书，请点「🔄 手动续期」或稍候自动 reload。",
 	})
 }
 

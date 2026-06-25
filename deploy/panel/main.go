@@ -71,7 +71,16 @@ type Config struct {
 	CertDir       string `json:"cert_dir"`
 	CertFullchain string `json:"cert_fullchain"`
 	CertPrivkey   string `json:"cert_privkey"`
-	DBPath        string `json:"db_path"`
+	// v1.5.27：Dynu DNS-01 凭证 + acme 注册邮箱。首次以 manual 模式部署的服务器，
+	// 之后在面板切到 acme 时，之前没有地方填这些凭证 → 自动签发/续期都会失败。
+	// 这三个字段把 Dynu 凭证收进面板（凭证文件 0600 root-only，与 secrets.env 同口径），
+	// 让 manual→acme 的切换能真正完成签发；切回 manual 时也不清空（保留以便切回）。
+	// 凭证经 maskDynuSecret() 写入 acme.sh 的 account.conf，续期 cron 无需再传环境变量。
+	DynuAPIKey   string `json:"dynu_api_key"`
+	DynuClientID string `json:"dynu_client_id"`
+	DynuSecret   string `json:"dynu_secret"`
+	AcmeEmail    string `json:"acme_email"`
+	DBPath       string `json:"db_path"`
 }
 
 // LandingService 一个落地服务 = 一个 anytls 入站 + 可选一个远端出站（v1.5.26）。
@@ -103,7 +112,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.26"
+	version = "1.5.27"
 )
 
 func loadConfig() (Config, error) {

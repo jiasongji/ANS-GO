@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.26
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.27
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.26"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.26，落地服务改为可创建多个的列表 + 远端支持 SS/SOCKS5）
+VER="v1.5.27"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.27，证书管理页补全 Dynu 凭证配置入口）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -938,6 +938,10 @@ if [ ! -f /etc/ansgo/panel.json ]; then
   "cert_dir": "/etc/ssl/ansgo",
   "cert_fullchain": "${CERT_FILE}",
   "cert_privkey": "${KEY_FILE}",
+  "dynu_api_key": "${DYNU_KEY}",
+  "dynu_client_id": "${DYNU_CID}",
+  "dynu_secret": "${DYNU_SECRET}",
+  "acme_email": "${EMAIL}",
   "db_path": "/etc/ansgo/sessions.db",
   "landings": []
 }
