@@ -197,11 +197,18 @@ window.addEventListener('error',e=>{console.error('[BV]',e.message,e);toast('脚
 function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',2600)}
 function copy(t){navigator.clipboard.writeText(t).then(()=>toast('已复制到剪贴板'),()=>toast('复制失败'))}
 function dot(s){const c=s==='active'?'on':(s==='inactive'||s==='failed')?'off':'unk';return `<span class="dot ${c}"></span>${s}`}
+// v1.5.32: 节点信息基础名 + 浏览器标题（全局，登录/切页时同步，避免只在「保存设置」后才更新）
+function nodeBaseName(v){v=(v||'').trim();return (!v||v==='ANS-GO 管理面板')?'Manage':v}
+function panelDisplayTitle(v){return nodeBaseName(v)+'_ANS'}
+// 拉取一次设置并把 document.title 同步为 <节点信息>_ANS（后端已渲染，这里覆盖兼容缓存/SPA 切换场景）
+async function syncPanelTitle(){
+  try{const j=await api('api/settings');if(j&&!j.error&&j.panel_title!==undefined){document.title=panelDisplayTitle(j.panel_title)}}catch(e){}
+}
 async function checkAuth(){
   const j=await api('api/auth');
   // v1.5.22: 侧栏底部显示面板版本号（来自后端 -ldflags 注入），方便核实升级是否生效
   if(j.version){const vt=$('#verTag');if(vt)vt.textContent='v'+j.version}
-  if(j.authed){$('#topuser').textContent='👤 '+j.user;showApp();showTab('dash');refreshPanelDot()}
+  if(j.authed){$('#topuser').textContent='👤 '+j.user;showApp();showTab('dash');refreshPanelDot();syncPanelTitle()}
   else{$('#login').style.display='flex';$('#app').style.display='none';$('#lu').focus()}
 }
 async function doLogin(){
@@ -211,7 +218,7 @@ async function doLogin(){
   try{
     const j=await api('api/login',{method:'POST',body:JSON.stringify({user:u,pass:p})});
     $('#lerr').style.color='var(--err)';
-    if(j.ok){$('#topuser').textContent='👤 '+(u||'admin');showApp();showTab('dash')}
+    if(j.ok){$('#topuser').textContent='👤 '+(u||'admin');showApp();showTab('dash');syncPanelTitle()}
     else $('#lerr').textContent=j.error||'登录失败';
   }catch(e){$('#lerr').style.color='var(--err)';$('#lerr').textContent='登录异常: '+e.message;console.error(e)}
 }
@@ -1059,8 +1066,6 @@ async function saveSet(){
   // v1.5.22: g() 防御元素缺失（如 --no-caddy 模式下 s_disguise_panel 不渲染），
   // 返回空串而非抛 TypeError 中断整个保存（旧版会在该场景下「点保存无反应」）。
   const g=id=>{const e=$('#s_'+id);return e?e.value:''};
-  const nodeBaseName=v=>{v=(v||'').trim();return (!v||v==='ANS-GO 管理面板')?'Manage':v};
-  const panelDisplayTitle=v=>nodeBaseName(v)+'_ANS';
   const body={panel_title:g('panel_title'),url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive'),server_ip:g('server_ip')};
   if(g('admin_pass'))body.admin_pass=g('admin_pass');
   // 只传发生变化的字段由后端处理；这里全传，后端按指针判断（空串/0 会触发改动）
