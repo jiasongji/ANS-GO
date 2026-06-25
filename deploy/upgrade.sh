@@ -93,13 +93,19 @@ readtty(){
   printf '%s' "$line"
 }
 
-dl(){ # URL DEST —— curl 优先 wget 兜底，含 3 次重试 + 断点续传
+# dl：下载 URL 到 DEST。curl 优先，wget 兜底。
+#   - 不用 -C -（断点续传）：对 raw.githubusercontent 的小文本脚本会触发 416
+#     （Range not satisfiable），且重试时残留的部分文件会再次 416 形成死循环。
+#   - 每次重试前 rm -f 清掉残留，确保全新下载。
+#   - --retry 3 + --retry-delay 2 让 curl 自己处理瞬时网络抖动。
+dl(){ # URL DEST
   local url="$1" dest="$2" i
   for i in 1 2 3; do
+    rm -f "$dest"
     if command -v curl >/dev/null; then
-      curl -fsSL --retry 3 --retry-delay 2 -C - "$url" -o "$dest" && return 0
+      curl -fsSL --retry 3 --retry-delay 2 "$url" -o "$dest" && return 0
     else
-      wget -c -qO "$dest" "$url" && return 0
+      wget -qO "$dest" "$url" && return 0
     fi
     [ "$i" -lt 3 ] && { warn "下载第 ${i} 次失败，重试…（$url）"; sleep 2; }
   done
@@ -107,28 +113,31 @@ dl(){ # URL DEST —— curl 优先 wget 兜底，含 3 次重试 + 断点续传
 }
 # dl_verified：下载并校验大小（防止 GFW/CDN 截断导致 0 字节或残缺文件覆盖好二进制）。
 # 参数：URL DEST MIN_SIZE（字节，下载后文件必须 >= 该大小才算完整）。
+# 用于 release 大二进制（panel）；小文本脚本（genconf/admin）直接用 dl。
 dl_verified(){ # URL DEST MIN_SIZE
-  local url="$1" dest="$2" min_sz="${3:-1048576}" i rc
+  local url="$1" dest="$2" min_sz="${3:-1048576}" i sz
   for i in 1 2 3; do
-    dl "$url" "$dest" || rc=$?
-    [ -n "${rc:-}" ] && { rc=""; [ "$i" -lt 3 ] && continue || return 1; }
-    # 校验：文件存在且大小 >= min_sz（二进制至少几 MB；空文件/截断文件会被挡掉）
-    if [ -f "$dest" ]; then
-      local sz
-      sz=$(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest" 2>/dev/null || echo 0)
-      if [ "$sz" -ge "$min_sz" ] 2>/dev/null; then
-        return 0
+    if dl "$url" "$dest"; then
+      # 校验：文件存在且大小 >= min_sz（二进制至少几 MB；空文件/截断文件会被挡掉）
+      if [ -f "$dest" ]; then
+        sz=$(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest" 2>/dev/null || echo 0)
+        if [ "${sz:-0}" -ge "$min_sz" ] 2>/dev/null; then
+          return 0
+        fi
+        warn "下载文件不完整（$sz 字节 < 最小 $min_sz），第 ${i} 次重试…"
+      else
+        warn "下载后文件不存在，第 ${i} 次重试…"
       fi
-      warn "下载文件不完整（$(printf '%d' "$sz") 字节 < 最小 $min_sz），第 ${i} 次重试…"
     else
-      warn "下载后文件不存在，第 ${i} 次重试…"
+      warn "下载失败，第 ${i} 次重试…（$url）"
     fi
     rm -f "$dest"
     [ "$i" -lt 3 ] && sleep 2
   done
   return 1
 }
-dl_or_exit(){ dl_verified "$1" "$2" "${MIN_ASSET_SIZE:-1048576}" || { err "下载失败或文件不完整（3 次重试后仍无效）: $1"; exit 3; }; }
+dl_or_exit(){ dl "$1" "$2" || { err "下载失败（3 次重试后仍无效）: $1"; exit 3; }; }
+dl_verified_or_exit(){ dl_verified "$1" "$2" "${MIN_ASSET_SIZE:-1048576}" || { err "下载失败或文件不完整（3 次重试后仍无效）: $1"; exit 3; }; }
 
 usage(){ cat <<EOF
 用法: bash upgrade.sh [选项]
@@ -269,7 +278,7 @@ upgrade_metal(){
   local panel_tmp="/tmp/ansgo-panel-${VER_NUM}.new"
   log "从 release 下载 ansgo-panel-linux-${AARCH} (${VER})"
   # 面板二进制约 11MB，最小校验 5MB（挡住 0 字节 / 截断文件覆盖好二进制）
-  MIN_ASSET_SIZE=5242880 dl_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" "$panel_tmp"
+  MIN_ASSET_SIZE=5242880 dl_verified_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" "$panel_tmp"
   chmod 0755 "$panel_tmp"
 
   local new_panel_md5
