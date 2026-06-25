@@ -170,10 +170,10 @@ if changed:
 " 2>/dev/null || true
 fi
 
-# v1.5.30: 修复旧部署遗留的非法 SS2022 密钥。
-# v1.5.28+ 在 genconf 后执行 sing-box check，历史坏 SS_KEY 会导致任何保存/修复都被
-# "decode psk: illegal base64" 阻断。容器重建升级时若 SS 已启用且密钥非法，自动重置为
-# base64(16/32 bytes)，让升级恢复可操作状态（SS 客户端需重新复制新节点信息）。
+# v1.5.31: 修复/规范化旧部署遗留的非标准 SS2022 密钥。
+# v1.5.28+ 在 genconf 后执行 sing-box check；sing-box 的 SS2022 password 只接受标准 base64
+#（带 padding），raw/url-safe/完全非法的 SS_KEY 都会导致保存/修复被 decode psk 阻断。
+# 容器重建升级时若 SS 已启用：可解码的 raw/url-safe 密钥规范化为标准 base64；不可解码才重置。
 python3 - <<'PY' 2>/dev/null || true
 import base64, json, os
 CONF='/etc/ansgo/panel.json'; SECRETS='/etc/ansgo/secrets.env'
