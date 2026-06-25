@@ -74,6 +74,12 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case rel == "" || rel == "/" || rel == "index.html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// v1.5.32：HTML 禁止缓存。面板 SPA 是单 HTML（JS 内联），升级后二进制内嵌的新版
+		// HTML 必须立即下发，否则浏览器用缓存的旧 HTML（旧 JS）→ 看起来"升级没生效"。
+		// qrcode.min.js 仍可长缓存（内容稳定，文件名不变但体积大）。
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
 		title := panelDisplayTitle(c)
 		page := strings.Replace(string(indexHTML), "<title>ANS-GO 管理面板</title>", "<title>"+html.EscapeString(title)+"</title>", 1)
 		w.Write([]byte(page))

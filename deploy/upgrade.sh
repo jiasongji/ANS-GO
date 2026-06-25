@@ -93,11 +93,42 @@ readtty(){
   printf '%s' "$line"
 }
 
-dl(){ # URL DEST —— curl 优先 wget 兜底
-  if command -v curl >/dev/null; then curl -fsSL "$1" -o "$2"
-  else wget -qO "$2" "$1"; fi
+dl(){ # URL DEST —— curl 优先 wget 兜底，含 3 次重试 + 断点续传
+  local url="$1" dest="$2" i
+  for i in 1 2 3; do
+    if command -v curl >/dev/null; then
+      curl -fsSL --retry 3 --retry-delay 2 -C - "$url" -o "$dest" && return 0
+    else
+      wget -c -qO "$dest" "$url" && return 0
+    fi
+    [ "$i" -lt 3 ] && { warn "下载第 ${i} 次失败，重试…（$url）"; sleep 2; }
+  done
+  return 1
 }
-dl_or_exit(){ dl "$1" "$2" || { err "下载失败: $1"; exit 3; }; }
+# dl_verified：下载并校验大小（防止 GFW/CDN 截断导致 0 字节或残缺文件覆盖好二进制）。
+# 参数：URL DEST MIN_SIZE（字节，下载后文件必须 >= 该大小才算完整）。
+dl_verified(){ # URL DEST MIN_SIZE
+  local url="$1" dest="$2" min_sz="${3:-1048576}" i rc
+  for i in 1 2 3; do
+    dl "$url" "$dest" || rc=$?
+    [ -n "${rc:-}" ] && { rc=""; [ "$i" -lt 3 ] && continue || return 1; }
+    # 校验：文件存在且大小 >= min_sz（二进制至少几 MB；空文件/截断文件会被挡掉）
+    if [ -f "$dest" ]; then
+      local sz
+      sz=$(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest" 2>/dev/null || echo 0)
+      if [ "$sz" -ge "$min_sz" ] 2>/dev/null; then
+        return 0
+      fi
+      warn "下载文件不完整（$(printf '%d' "$sz") 字节 < 最小 $min_sz），第 ${i} 次重试…"
+    else
+      warn "下载后文件不存在，第 ${i} 次重试…"
+    fi
+    rm -f "$dest"
+    [ "$i" -lt 3 ] && sleep 2
+  done
+  return 1
+}
+dl_or_exit(){ dl_verified "$1" "$2" "${MIN_ASSET_SIZE:-1048576}" || { err "下载失败或文件不完整（3 次重试后仍无效）: $1"; exit 3; }; }
 
 usage(){ cat <<EOF
 用法: bash upgrade.sh [选项]
@@ -237,11 +268,26 @@ upgrade_metal(){
   hr "3/7 更新 ansgo-panel 二进制"
   local panel_tmp="/tmp/ansgo-panel-${VER_NUM}.new"
   log "从 release 下载 ansgo-panel-linux-${AARCH} (${VER})"
-  dl_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" "$panel_tmp"
+  # 面板二进制约 11MB，最小校验 5MB（挡住 0 字节 / 截断文件覆盖好二进制）
+  MIN_ASSET_SIZE=5242880 dl_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" "$panel_tmp"
   chmod 0755 "$panel_tmp"
 
   local new_panel_md5
   new_panel_md5=$(md5sum "$panel_tmp" 2>/dev/null | awk '{print $1}')
+
+  # 校验下载的二进制内嵌版本号 = 目标版本（防 CDN 缓存返回旧版二进制）
+  local dl_ver
+  dl_ver=$(grep -ao "main\.version=[0-9.]*" "$panel_tmp" 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+  if [ -z "$dl_ver" ]; then
+    # fallback：直接在二进制里找版本字符串
+    dl_ver=$(grep -ao "${VER_NUM}" "$panel_tmp" 2>/dev/null | head -1 || true)
+  fi
+  if [ -n "$dl_ver" ] && [ "$dl_ver" != "$VER_NUM" ]; then
+    err "下载的二进制内嵌版本 ${dl_ver} 与目标 ${VER_NUM} 不符（GitHub CDN 可能返回了缓存旧版）"
+    err "  清除缓存重试：rm -f '$panel_tmp' 后重跑本脚本；或手动从浏览器下载 release 资产后 scp 上传。"
+    rm -f "$panel_tmp"
+    exit 3
+  fi
 
   if [ -n "$old_panel_md5" ] && [ "$old_panel_md5" = "$new_panel_md5" ]; then
     ok "panel 二进制 md5 与当前一致（${new_panel_md5:0:12}...），跳过替换"
