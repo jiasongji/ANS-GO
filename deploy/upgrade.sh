@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.29
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.30
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
@@ -13,7 +13,7 @@
 #   - VER 与 install.sh 顶部硬编码一致，发新版只需改这一行 + commit
 #   - 复用 install.sh 的 bootstrap（解决 curl|bash 的 SIGPIPE/进程替换卡死）
 #   - panel 二进制无 -version flag（main.go 仅 -setpass），用 md5 对比判断是否真更新，
-#     启动后用 journalctl 日志行 "ansgo-panel v1.5.29 监听..." 验证版本
+#     启动后用 journalctl 日志行 "ansgo-panel v1.5.30 监听..." 验证版本
 #   - 裸金属 panel 替换走 .new→md5→.bak→mv→restart 安全流程（AGENTS.md §9 铁律）
 #   - 备份目录命名 /etc/ansgo-backup-upgrade-{TS}，遵循 ansgo-admin 约定
 # =============================================================================
@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.29"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.30"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -116,11 +116,11 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
-  - 【本版重点·全局端口冲突检测】Naive(caddy)、AnyTLS/SS/SOCKS/落地(sing-box)、面板端口
-    现在统一按主机网络命名空间检测，拒绝跨进程同端口，避免 caddy/sing-box bind 冲突后进入
-    activating/restart loop。
-  - 【落地诊断增强】落地服务健康检测在本机入站正常之外，会额外探测远端出口 host:port；
-    远端不可达时明确提示「本机落地入站正常，但远端落地出口不可达」。
+  - 【本版重点·修复旧部署非法 SS_KEY 阻断保存/修复】旧部署若遗留非合法 base64 的 SS_KEY，
+    v1.5.28+ 的 sing-box check 会在任何参数保存/修复时失败（decode psk: illegal base64）。
+    本版升级时会自动检测已启用 SS 的非法 SS_KEY 并重置为合法 base64 密钥；面板保存 SS 密钥
+    也会明确提示「不是合法 base64」或「字节数不对」。
+  - v1.5.29：全局端口冲突检测 + 落地远端出口诊断
   - v1.5.28：落地 AnyTLS 密码保存 + sing-box config 预检回滚
   - v1.5.27：证书管理页补全 Dynu 凭证入口 + 立即签发证书
   - v1.5.26：多落地服务（可创建多个 anytls 落地 + 远端 SS/SOCKS5）
@@ -374,6 +374,44 @@ PY
         log "  ~ ANYTLS2_PASS/UUID -> LANDING_1_PASS/UUID（v1.5.26 凭证迁移）"; added=1
       fi
     fi
+    # v1.5.30: 修复旧部署遗留非法 SS2022 密钥。v1.5.28+ 会执行 sing-box check，
+    # 历史坏 SS_KEY 会让任何保存/修复卡在 decode psk: illegal base64。
+    python3 - "$METAL_PANEL_CONF" "$METAL_SECRETS" <<'PY'
+import base64, json, os, sys
+conf,secrets=sys.argv[1:3]
+try:
+    cfg=json.load(open(conf))
+except Exception:
+    cfg={}
+if str(cfg.get('svc_ss_enabled','true')).lower() in ('true','1') and os.path.exists(secrets):
+    lines=open(secrets).read().splitlines(); data={}
+    for line in lines:
+        if '=' in line and not line.lstrip().startswith('#'):
+            k,v=line.split('=',1); data[k]=v.strip().strip('"')
+    method=data.get('SS_METHOD') or cfg.get('ss_method') or '2022-blake3-aes-128-gcm'
+    want=16 if method.startswith('2022-blake3-aes-128') else (32 if method.startswith('2022-blake3-aes-256') else 0)
+    def valid(k):
+        if want <= 0: return True
+        for alt in (k, k+'=', k+'==', k+'==='):
+            for cand in (alt, alt.replace('-','+').replace('_','/')):
+                try:
+                    raw=base64.b64decode(cand.encode(), validate=True)
+                    return len(raw)==want
+                except Exception:
+                    pass
+        return False
+    if want and not valid(data.get('SS_KEY','')):
+        new=base64.b64encode(os.urandom(want)).decode(); out=[]; seen=False
+        for line in lines:
+            if line.startswith('SS_KEY='):
+                out.append('SS_KEY='+new); seen=True
+            else:
+                out.append(line)
+        if not seen: out.append('SS_KEY='+new)
+        open(secrets,'w').write('\n'.join(out).rstrip('\n')+'\n')
+        os.chmod(secrets,0o600)
+        print('  ~ SS_KEY 非法，已自动重置（SS 客户端需重新复制节点信息）')
+PY
     chmod 600 "$METAL_SECRETS"
     [ "$added" = 0 ] && ok "secrets.env 凭证已齐全，无需补全" || ok "secrets.env 凭证已补全/迁移"
   fi

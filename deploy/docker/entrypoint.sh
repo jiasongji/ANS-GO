@@ -170,6 +170,49 @@ if changed:
 " 2>/dev/null || true
 fi
 
+# v1.5.30: 修复旧部署遗留的非法 SS2022 密钥。
+# v1.5.28+ 在 genconf 后执行 sing-box check，历史坏 SS_KEY 会导致任何保存/修复都被
+# "decode psk: illegal base64" 阻断。容器重建升级时若 SS 已启用且密钥非法，自动重置为
+# base64(16/32 bytes)，让升级恢复可操作状态（SS 客户端需重新复制新节点信息）。
+python3 - <<'PY' 2>/dev/null || true
+import base64, json, os
+CONF='/etc/ansgo/panel.json'; SECRETS='/etc/ansgo/secrets.env'
+try:
+    cfg=json.load(open(CONF))
+except Exception:
+    cfg={}
+if str(cfg.get('svc_ss_enabled','true')).lower() in ('true','1') and os.path.exists(SECRETS):
+    pairs=[]; data={}
+    for line in open(SECRETS):
+        if '=' in line and not line.lstrip().startswith('#'):
+            k,v=line.rstrip('\n').split('=',1); data[k]=v.strip().strip('"')
+        pairs.append(line.rstrip('\n'))
+    method=data.get('SS_METHOD') or cfg.get('ss_method') or '2022-blake3-aes-128-gcm'
+    want=16 if method.startswith('2022-blake3-aes-128') else (32 if method.startswith('2022-blake3-aes-256') else 0)
+    def valid(k):
+        if want <= 0: return True
+        for alt in (k, k+'=', k+'==', k+'==='):
+            for cand in (alt, alt.replace('-','+').replace('_','/')):
+                try:
+                    raw=base64.b64decode(cand.encode(), validate=True)
+                    return len(raw)==want
+                except Exception:
+                    pass
+        return False
+    if want and not valid(data.get('SS_KEY','')):
+        new=base64.b64encode(os.urandom(want)).decode()
+        seen=False; out=[]
+        for line in pairs:
+            if line.startswith('SS_KEY='):
+                out.append('SS_KEY='+new); seen=True
+            else:
+                out.append(line)
+        if not seen: out.append('SS_KEY='+new)
+        open(SECRETS,'w').write('\n'.join(out).rstrip('\n')+'\n')
+        os.chmod(SECRETS,0o600)
+        print('[entrypoint] 已修复非法 SS_KEY（SS 客户端需重新复制节点信息）')
+PY
+
 # 生成 sing-box / caddy 配置（幂等；失败时写兜底 Caddyfile，避免 caddy 起不来）
 if /usr/local/bin/ansgo-genconf all >/var/log/ansgo-genconf.log 2>&1; then
   log "已生成 sing-box + caddy 配置"

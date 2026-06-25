@@ -191,6 +191,21 @@ func TestLandingRemoteProbe(t *testing.T) {
 	}
 }
 
+// TestSS2022KeyError 验证 SS2022 密钥错误能区分「不是合法 base64」与「长度不对」。
+// v1.5.30 回归：旧部署里存在非法 SS_KEY 时，sing-box check 报 decode psk，
+// 面板原错误只说长度错误，用户不知道是历史密钥格式坏了。
+func TestSS2022KeyError(t *testing.T) {
+	if msg := ss2022KeyError("2022-blake3-aes-128-gcm", "AAAAAAAAAAAAAAAAAAAAAA=="); msg != "" {
+		t.Fatalf("合法 base64(16字节) 不应报错: %s", msg)
+	}
+	if msg := ss2022KeyError("2022-blake3-aes-128-gcm", "ABCDEFGHIJKLMNOPQRST:"); msg == "" || !contains(msg, "不是合法 base64") {
+		t.Fatalf("非法 base64 应提示格式错误，got: %q", msg)
+	}
+	if msg := ss2022KeyError("2022-blake3-aes-128-gcm", "c2hvcnQ="); msg == "" || !contains(msg, "需 base64(16字节)") {
+		t.Fatalf("合法 base64 但长度错误应提示字节数，got: %q", msg)
+	}
+}
+
 // TestLandingsSSKeyValidation 验证 SS2022 密钥长度校验：短密钥应被拒绝。
 // 2022-blake3-aes-128-gcm 需 base64(16字节)=24字符密钥。
 func TestLandingsSSKeyValidation(t *testing.T) {

@@ -686,15 +686,8 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 		if method == "" {
 			method = "2022-blake3-aes-128-gcm"
 		}
-		wantBytes := 0
-		switch {
-		case strings.HasPrefix(method, "2022-blake3-aes-128"):
-			wantBytes = 16
-		case strings.HasPrefix(method, "2022-blake3-aes-256"):
-			wantBytes = 32
-		}
-		if wantBytes > 0 && !validSS2022Key(b.Key, wantBytes) {
-			jerr(w, 400, fmt.Sprintf("密钥长度错误：%s 需 base64(%d字节) 的密钥", method, wantBytes))
+		if msg := ss2022KeyError(method, b.Key); msg != "" {
+			jerr(w, 400, msg)
 			return
 		}
 		if err := setSecret("SS_METHOD", method); err != nil {

@@ -31,7 +31,7 @@ case "${1:-all}" in
 esac
 
 python3 - "$@" <<'PYEOF'
-import json, os, sys, subprocess
+import json, os, sys, subprocess, base64
 
 CONF = "/etc/ansgo/panel.json"
 CERTDIR = os.environ.get("BV_CERTDIR", "/etc/ssl/ansgo")
@@ -54,7 +54,7 @@ SS_PORT = int(g("ss_port", 23456))
 ANYTLS_PORT = int(g("anytls_port", 8443))
 SOCKS_PORT = int(g("socks_port", 10808))
 NAIVE_PORT = int(g("naive_port", 44333))
-SS_METHOD = os.environ.get("SS_METHOD", "2022-blake3-aes-128-gcm")
+SS_METHOD = "2022-blake3-aes-128-gcm"
 
 # v1.5.26: 多落地服务（替代旧的 group2_enabled/anytls2_port/ss_landing_* 扁平字段）。
 #   panel.json 的 landings 数组，每项 = 一个 anytls 入站 + 可选一个远端出站（SS/SOCKS5）。
@@ -105,7 +105,39 @@ def sec(k):
         sys.exit(2)
     return v
 
+SS_METHOD = secrets.get("SS_METHOD") or g("ss_method", "") or os.environ.get("SS_METHOD", "") or "2022-blake3-aes-128-gcm"
 SS_KEY = sec("SS_KEY")
+
+def validate_ss2022_key(method, key):
+    want = 0
+    if method.startswith("2022-blake3-aes-128"):
+        want = 16
+    elif method.startswith("2022-blake3-aes-256"):
+        want = 32
+    if want <= 0:
+        return ""
+    raw = None
+    for alt in (key, key + "=", key + "==", key + "==="):
+        for candidate in (alt, alt.replace("-", "+").replace("_", "/")):
+            try:
+                raw = base64.b64decode(candidate.encode(), validate=True)
+                break
+            except Exception:
+                pass
+        if raw is not None:
+            break
+    if raw is None:
+        return f"SS_KEY 不是合法 base64；{method} 需 base64({want}字节) 密钥。请在面板点 SS 的 🎲 生成后保存，或执行 ansgo-admin regen ss"
+    if len(raw) != want:
+        return f"SS_KEY 长度错误；{method} 需 base64({want}字节) 密钥，当前解码后 {len(raw)} 字节。请重新生成 SS 密钥"
+    return ""
+
+if SVC_SS:
+    msg = validate_ss2022_key(SS_METHOD, SS_KEY)
+    if msg:
+        print("ansgo-genconf: " + msg, file=sys.stderr)
+        sys.exit(2)
+
 ANYTLS_PASS = sec("ANYTLS_PASS")
 ANYTLS_UUID = sec("ANYTLS_UUID")
 SOCKS_USER = secrets.get("SOCKS_USER", "")
