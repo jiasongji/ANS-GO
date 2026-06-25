@@ -445,6 +445,10 @@ func portHandler(w http.ResponseWriter, r *http.Request) {
 	switch b.Target {
 	case "panel":
 		c.PanelPort = b.Port
+		if msg := portConflicts(c); msg != "" {
+			jerr(w, 400, "端口冲突: "+msg)
+			return
+		}
 		if err := configSet(c); err != nil {
 			jerr(w, 500, "保存配置失败: "+err.Error())
 			return
@@ -1298,6 +1302,23 @@ func logsHandler(w http.ResponseWriter, r *http.Request) {
 
 // ===================== 服务健康检测（v1.5.12）=====================
 
+func probeLandingRemote(L LandingService, timeout time.Duration) (string, int64) {
+	if !L.RemoteEnabled {
+		return "skip", 0
+	}
+	if strings.TrimSpace(L.RemoteHost) == "" || L.RemotePort <= 0 {
+		return "no", 0
+	}
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(L.RemoteHost, strconv.Itoa(L.RemotePort)), timeout)
+	ms := time.Since(start).Milliseconds()
+	if err != nil {
+		return "no", ms
+	}
+	_ = conn.Close()
+	return "yes", ms
+}
+
 // healthHandler 检测单个服务的运行状态：
 //  1. systemd 是否 active（systemctl is-active）
 //  2. 配置端口是否在 LISTEN（ss -tln）
@@ -1320,6 +1341,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		enabled    bool
 	}
 	info := svcInfo{}
+	var landingForProbe *LandingService
 	caddyActive := c.CaddyEnable == "true" || c.SvcNaiveEnabled == "true"
 	switch b.Target {
 	case "ss":
@@ -1337,6 +1359,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	case "anytls2":
 		// v1.5.26 兼容：旧前端书签可能仍用 anytls2，映射到 landings[0]
 		if len(c.Landings) > 0 {
+			landingForProbe = &c.Landings[0]
 			info = svcInfo{"sing-box", strconv.Itoa(c.Landings[0].Port), c.Landings[0].Enabled}
 		} else {
 			info = svcInfo{"sing-box", "0", false}
@@ -1356,6 +1379,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 				jerr(w, 400, "未找到落地服务: "+lid)
 				return
 			}
+			landingForProbe = L
 			info = svcInfo{"sing-box", strconv.Itoa(L.Port), L.Enabled}
 		} else {
 			jerr(w, 400, "target 必须为 ss/anytls/socks/naive/panel/caddy/landing-<id>")
@@ -1384,6 +1408,15 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			tcpConnect = "yes"
 		}
 	}
+	landingRemote := "skip"
+	landingRemoteMs := int64(0)
+	landingRemoteAddr := ""
+	if landingForProbe != nil && info.enabled && active == "active" && portListening == "yes" && tcpConnect == "yes" {
+		landingRemote, landingRemoteMs = probeLandingRemote(*landingForProbe, 2*time.Second)
+		if landingForProbe.RemoteEnabled {
+			landingRemoteAddr = net.JoinHostPort(landingForProbe.RemoteHost, strconv.Itoa(landingForProbe.RemotePort))
+		}
+	}
 	summary := "正常"
 	if !info.enabled {
 		summary = "服务未启用（请先在服务管理页安装）"
@@ -1393,8 +1426,10 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		summary = "端口 " + info.port + " 未监听（检查服务日志）"
 	} else if tcpConnect != "yes" {
 		summary = "端口监听但 TCP 握手失败（防火墙或服务异常）"
+	} else if landingForProbe != nil && landingForProbe.RemoteEnabled && landingRemote != "yes" {
+		summary = "本机落地入站正常，但远端落地出口不可达（" + landingRemoteAddr + "），请检查远端服务/防火墙/端口"
 	}
-	jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "unit": info.unit, "enabled": info.enabled, "active": active, "port": info.port, "port_listening": portListening, "tcp_connect": tcpConnect, "tcp_ms": tcpMs, "summary": summary})
+	jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "unit": info.unit, "enabled": info.enabled, "active": active, "port": info.port, "port_listening": portListening, "tcp_connect": tcpConnect, "tcp_ms": tcpMs, "landing_remote": landingRemote, "landing_remote_ms": landingRemoteMs, "landing_remote_addr": landingRemoteAddr, "summary": summary})
 }
 
 // repairHandler 一键修复代理服务配置（v1.5.24）。
@@ -1478,48 +1513,48 @@ func svcActive(svc string) string {
 
 func validPort(p int) bool { return p > 0 && p < 65536 }
 
-// portConflicts 检查 caddy / sing-box 各自承载的端口集合内部是否有重复
-// （跨进程端口重复是允许的，caddy 和 sing-box 是独立进程）。
-// 返回冲突描述，空串表示无冲突。v1.5.14 新增。
-//
-// caddy 端口：:443 伪装站（CaddyEnable=true 时）+ naive
-// sing-box 端口：ss + anytls + anytls2（启用时）
-// panel 端口不属于任何载体，单独校验，不在此函数内。
+// portConflicts 检查所有本机监听端口是否有重复。
+// v1.5.29：caddy / sing-box / 面板虽是独立进程，但在裸金属与 Docker host 网络下
+// 处于同一网络命名空间，跨进程同端口同样会 bind: address already in use。
+// 旧版只检查「同进程内部」冲突，漏掉 naive(caddy) 与 landing(sing-box) 同端口，
+// 导致 caddy 进入 activating/restart loop。
+// 返回冲突描述，空串表示无冲突。
 func portConflicts(c Config) string {
-	caddyPorts := map[int][]string{}
-	addCaddy := func(port int, name string) { caddyPorts[port] = append(caddyPorts[port], name) }
+	ports := map[int][]string{}
+	add := func(port int, name string) {
+		if port > 0 {
+			ports[port] = append(ports[port], name)
+		}
+	}
+	if c.PanelPort > 0 {
+		add(c.PanelPort, "panel")
+	}
 	if c.CaddyEnable == "true" {
-		addCaddy(443, ":443 伪装站")
+		add(443, ":443 伪装站")
+		add(80, ":80 跳转")
 	}
 	if c.SvcNaiveEnabled == "true" {
-		addCaddy(c.NaivePort, "naive")
+		add(c.NaivePort, "naive(caddy)")
 	}
-	sbPorts := map[int][]string{}
-	addSB := func(port int, name string) { sbPorts[port] = append(sbPorts[port], name) }
 	if c.SvcSSEnabled == "true" {
-		addSB(c.SSPort, "ss")
+		add(c.SSPort, "ss(sing-box)")
 	}
 	if c.SvcAnyTLSEnabled == "true" {
-		addSB(c.AnyTLSPort, "anytls")
+		add(c.AnyTLSPort, "anytls(sing-box)")
 	}
 	if c.SvcSocksEnabled == "true" {
-		addSB(c.SocksPort, "socks")
+		add(c.SocksPort, "socks(sing-box)")
 	}
 	// v1.5.26: 多落地服务端口（每个启用落地的 anytls 端口）
 	for _, L := range c.Landings {
-		if L.Enabled && L.Port != 0 {
-			addSB(L.Port, "landing-"+L.ID+"("+L.Name+")")
+		if L.Enabled {
+			add(L.Port, "landing-"+L.ID+"("+L.Name+")(sing-box)")
 		}
 	}
 	var errs []string
-	for port, names := range caddyPorts {
+	for port, names := range ports {
 		if len(names) > 1 {
-			errs = append(errs, fmt.Sprintf("caddy 端口 %d 被 %s 同时占用", port, strings.Join(names, "+")))
-		}
-	}
-	for port, names := range sbPorts {
-		if len(names) > 1 {
-			errs = append(errs, fmt.Sprintf("sing-box 端口 %d 被 %s 同时占用", port, strings.Join(names, "+")))
+			errs = append(errs, fmt.Sprintf("端口 %d 被 %s 同时占用（同一主机网络命名空间内不能重复监听）", port, strings.Join(names, "+")))
 		}
 	}
 	return strings.Join(errs, "; ")
@@ -2323,6 +2358,10 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 		confTarget, procName = "caddy", "caddy"
 	default:
 		jerr(w, 400, "service 必须为 ss/anytls/socks/naive")
+		return
+	}
+	if msg := portConflicts(c); msg != "" {
+		jerr(w, 400, "端口冲突: "+msg)
 		return
 	}
 	if err := configSet(c); err != nil {

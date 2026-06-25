@@ -1,9 +1,11 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestLandingsConfig_LoadsArray 验证含 landings 数组的 panel.json 能被正确加载到 Config.Landings。
@@ -105,6 +107,39 @@ func TestLandingsPortConflict_Detected(t *testing.T) {
 	t.Logf("检测到端口冲突（符合预期）: %s", msg)
 }
 
+// TestLandingsPortConflict_NaivePortConflict 验证 Naive(caddy) 与落地 AnyTLS(sing-box)
+// 不能使用同一端口。v1.5.29 回归：Docker/host 网络下两进程处于同一网络命名空间，
+// sing-box 已监听落地端口时 caddy 监听同端口会 bind: address already in use 并卡 activating。
+func TestLandingsPortConflict_NaivePortConflict(t *testing.T) {
+	c := Config{
+		Domain:          "your-domain.com",
+		SvcNaiveEnabled: "true",
+		NaivePort:       30001,
+		Landings: []LandingService{
+			{ID: "1", Name: "落地A", Enabled: true, Port: 30001},
+		},
+	}
+	msg := portConflicts(c)
+	if msg == "" {
+		t.Fatalf("Naive 与落地 AnyTLS 使用同端口应被拒绝")
+	}
+	t.Logf("检测到跨进程端口冲突（符合预期）: %s", msg)
+}
+
+func TestLandingsPortConflict_PanelPortConflict(t *testing.T) {
+	c := Config{
+		Domain:    "your-domain.com",
+		PanelPort: 30001,
+		Landings: []LandingService{
+			{ID: "1", Name: "落地A", Enabled: true, Port: 30001},
+		},
+	}
+	msg := portConflicts(c)
+	if msg == "" {
+		t.Fatalf("Panel 与落地 AnyTLS 使用同端口应被拒绝")
+	}
+}
+
 // TestLandingsPortConflict_NoConflict 验证不同端口 + 未启用落地的端口不参与检测。
 func TestLandingsPortConflict_NoConflict(t *testing.T) {
 	c := Config{
@@ -122,6 +157,37 @@ func TestLandingsPortConflict_NoConflict(t *testing.T) {
 	msg := portConflicts(c)
 	if msg != "" {
 		t.Errorf("portConflicts 不应报告冲突，但返回: %s", msg)
+	}
+}
+
+// TestLandingRemoteProbe 验证落地服务启用远端出口时，健康检测能额外探测远端 host:port。
+// v1.5.29 回归：旧版只检测本机 landing 入站端口，远端 SS 不可达时仍显示「正常」。
+func TestLandingRemoteProbe(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	ok := LandingService{RemoteEnabled: true, RemoteHost: "127.0.0.1", RemotePort: port}
+	if status, ms := probeLandingRemote(ok, time.Second); status != "yes" || ms < 0 {
+		t.Fatalf("可达远端应返回 yes，got status=%s ms=%d", status, ms)
+	}
+
+	direct := LandingService{RemoteEnabled: false}
+	if status, _ := probeLandingRemote(direct, time.Second); status != "skip" {
+		t.Fatalf("remote_enabled=false 应跳过远端探测，got %s", status)
+	}
+
+	bad := LandingService{RemoteEnabled: true, RemoteHost: "127.0.0.1", RemotePort: 1}
+	if status, _ := probeLandingRemote(bad, 100*time.Millisecond); status != "no" {
+		t.Fatalf("不可达远端应返回 no，got %s", status)
 	}
 }
 

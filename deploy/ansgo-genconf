@@ -49,6 +49,7 @@ def g(k, d=""):
     return cfg.get(k, d)
 
 DOMAIN = g("domain", "example.com")
+PANEL_PORT = int(g("panel_port", 15608))
 SS_PORT = int(g("ss_port", 23456))
 ANYTLS_PORT = int(g("anytls_port", 8443))
 SOCKS_PORT = int(g("socks_port", 10808))
@@ -122,46 +123,42 @@ def landing_secret(id, key_suffix):
     return secrets.get(f"LANDING_{id}_{key_suffix}", "")
 
 # ===================== 生成 sing-box config =====================
-# v1.5.14: 端口冲突预检测——naive 走 caddy，ss/anytls/socks/落地服务 同走 sing-box，
-#   两服务端口撞了会导致生成的配置语法/语义错误（caddy "ambiguous site definition" 或
-#   sing-box 同进程 bind 同端口失败），服务进入重启循环。genconf 在生成前必须显式拒绝。
+# v1.5.14: 端口冲突预检测。
+# v1.5.29: 扩展为全局本机监听端口检测。caddy / sing-box / 面板虽是独立进程，
+#   但在裸金属与 Docker host 网络下处于同一网络命名空间，跨进程同端口同样会
+#   bind: address already in use。genconf 在生成前必须显式拒绝。
 def check_port_conflicts():
-    # caddy 承载的端口 -> 服务名列表（同端口多个服务名 = 冲突）
-    caddy_ports = {}
-    def add_caddy(port, name):
-        caddy_ports.setdefault(port, []).append(name)
-    # sing-box 承载的端口 -> 服务名列表
-    sb_ports = {}
-    def add_sb(port, name):
-        sb_ports.setdefault(port, []).append(name)
+    ports = {}
+    def add(port, name):
+        try:
+            port = int(port)
+        except (ValueError, TypeError):
+            return
+        if port > 0:
+            ports.setdefault(port, []).append(name)
 
+    add(PANEL_PORT, "panel")
     if CADDY_ENABLE:
-        add_caddy(443, ":443 伪装站")
+        add(443, ":443 伪装站")
+        add(80, ":80 跳转")
     if SVC_NAIVE:
-        add_caddy(NAIVE_PORT, "naive")
+        add(NAIVE_PORT, "naive(caddy)")
     if SVC_SS:
-        add_sb(SS_PORT, "ss")
+        add(SS_PORT, "ss(sing-box)")
     if SVC_ANYTLS:
-        add_sb(ANYTLS_PORT, "anytls")
+        add(ANYTLS_PORT, "anytls(sing-box)")
     if SVC_SOCKS:
-        add_sb(SOCKS_PORT, "socks")
+        add(SOCKS_PORT, "socks(sing-box)")
     # v1.5.26: 多落地服务端口（每个启用落地的 anytls 端口）
     for L in LANDINGS:
         if str(L.get("enabled", "false")).lower() in ("true", "1") and L.get("port"):
-            try:
-                lport = int(L["port"])
-            except (ValueError, TypeError):
-                continue
             lname = L.get("name", L.get("id", "?"))
-            add_sb(lport, f"landing-{L.get('id','?')}({lname})")
+            add(L.get("port"), f"landing-{L.get('id','?')}({lname})(sing-box)")
 
     errors = []
-    for port, names in caddy_ports.items():
+    for port, names in ports.items():
         if len(names) > 1:
-            errors.append(f"caddy 端口 {port} 被 {'+'.join(names)} 同时占用（Caddyfile 会报 ambiguous site definition）")
-    for port, names in sb_ports.items():
-        if len(names) > 1:
-            errors.append(f"sing-box 端口 {port} 被 {'+'.join(names)} 同时占用（同进程无法 bind 相同端口）")
+            errors.append(f"端口 {port} 被 {'+'.join(names)} 同时占用（同一主机网络命名空间内不能重复监听）")
     if errors:
         print("ansgo-genconf: 检测到端口冲突，拒绝生成配置：", file=sys.stderr)
         for e in errors:
