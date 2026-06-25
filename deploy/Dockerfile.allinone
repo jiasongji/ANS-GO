@@ -98,9 +98,11 @@ COPY --from=panel   /out/ansgo-panel /usr/local/bin/ansgo-panel
 
 # ---- 拷贝管理脚本 + 证书工具 ----
 COPY deploy/ansgo-admin deploy/ansgo-genconf deploy/ansgo-cert-reload \
+     deploy/ansgo-sync-manual-cert \
      deploy/ansgo-cert-issue.sh deploy/dns_dynukey.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/ansgo-admin /usr/local/bin/ansgo-genconf \
-             /usr/local/bin/ansgo-cert-reload /usr/local/bin/ansgo-cert-issue.sh \
+             /usr/local/bin/ansgo-cert-reload /usr/local/bin/ansgo-sync-manual-cert \
+             /usr/local/bin/ansgo-cert-issue.sh \
              /usr/local/bin/dns_dynukey.sh
 # ansgo-cert-issue.sh 会从 /etc/ansgo-deploy/ 拷 reload 钩子，预置一份
 RUN mkdir -p /etc/ansgo-deploy && \

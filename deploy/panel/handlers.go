@@ -30,16 +30,29 @@ var indexHTML []byte
 var qrcodeJS []byte
 
 const (
-	binGenConf   = "/usr/local/bin/ansgo-genconf"
-	binAdmin     = "/usr/local/bin/ansgo-admin"
-	binAcme      = "/root/.acme.sh/acme.sh"
-	binCertIssue = "/etc/ansgo-deploy/ansgo-cert-issue.sh"
+	binGenConf          = "/usr/local/bin/ansgo-genconf"
+	binAdmin            = "/usr/local/bin/ansgo-admin"
+	binAcme             = "/root/.acme.sh/acme.sh"
+	binCertIssue        = "/etc/ansgo-deploy/ansgo-cert-issue.sh"
+	binManualCertSync   = "/usr/local/bin/ansgo-sync-manual-cert"
+	dockerRuntimeCert   = "/etc/ssl/ansgo/fullchain.pem"
+	dockerRuntimeKey    = "/etc/ssl/ansgo/privkey.pem"
 )
 
 // acmeAccountConf：Dynu 凭证经 acme.sh _saveaccountconf_mutable 持久化于此。
 // 续期 cron 不带环境变量，必须事先写进这个文件，续期才能读到凭证。
 // 设为变量（而非常量）便于测试覆盖路径（生产运行时值不变），与 confPath/secretsPath 同口径。
 var acmeAccountConf = "/root/.acme.sh/account.conf"
+
+func isDockerMode() bool {
+	if os.Getenv("ANSGO_DOCKER") == "1" {
+		return true
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	return false
+}
 
 // ===================== 路由根 =====================
 
@@ -61,10 +74,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case rel == "" || rel == "/" || rel == "index.html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		title := c.PanelTitle
-		if title == "" {
-			title = "ANS-GO 管理面板"
-		}
+		title := panelDisplayTitle(c)
 		page := strings.Replace(string(indexHTML), "<title>ANS-GO 管理面板</title>", "<title>"+html.EscapeString(title)+"</title>", 1)
 		w.Write([]byte(page))
 	case rel == "static/qrcode.min.js":
@@ -920,6 +930,28 @@ func certReloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := configGet()
+	// Docker manual 模式：服务使用容器内 /etc/ssl/ansgo/ 副本，宿主证书由计划任务同步到
+	// 固定挂载目录 /host/manual-certs。先跑同步脚本（仅在证书变化时才替换）再 reload，
+	// 让「同步并重新加载」按钮具备真实同步能力，而不是只 reload 旧副本。
+	if c.CertMode == "manual" && isDockerMode() {
+		if _, err := os.Stat(binManualCertSync); err != nil {
+			jerr(w, 500, "容器内未找到同步脚本 "+binManualCertSync+"，请通过升级脚本更新镜像。")
+			return
+		}
+		// 检查同步源是否就绪（/host/manual-certs 由宿主计划任务填充）
+		srcFull := "/host/manual-certs/fullchain.pem"
+		srcKey := "/host/manual-certs/privkey.pem"
+		if _, err := os.Stat(srcFull); err != nil {
+			jerr(w, 400, "尚未发现同步源 "+srcFull+"。请在证书管理页复制「系统自动任务一键安装」或「宝塔计划任务脚本」到宿主机执行后再点此按钮。")
+			return
+		}
+		if _, err := os.Stat(srcKey); err != nil {
+			jerr(w, 400, "尚未发现同步源 "+srcKey+"。请在证书管理页复制「系统自动任务一键安装」或「宝塔计划任务脚本」到宿主机执行后再点此按钮。")
+			return
+		}
+		syncOut, _ := exec.Command("/bin/bash", binManualCertSync).CombinedOutput()
+		log.Printf("cert reload (docker manual): ansgo-sync-manual-cert: %s", string(syncOut))
+	}
 	// 校验当前证书文件可读（避免路径错误导致三服务全部起不来）
 	fullchain, privkey := certPaths(c)
 	if _, err := os.ReadFile(fullchain); err != nil {
@@ -959,12 +991,18 @@ func certReloadHandler(w http.ResponseWriter, r *http.Request) {
 func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	if r.Method == "GET" {
+		runtimeFullchain, runtimePrivkey := certPaths(c)
 		jwrite(w, 200, map[string]any{
-			"mode":      c.CertMode,
-			"fullchain": c.CertFullchain,
-			"privkey":   c.CertPrivkey,
-			"cert_info": certInfoFull(c),
-			"domain":    c.Domain,
+			"mode":              c.CertMode,
+			"fullchain":         c.CertFullchain,
+			"privkey":           c.CertPrivkey,
+			"host_fullchain":    c.CertHostFullchain,
+			"host_privkey":      c.CertHostPrivkey,
+			"runtime_fullchain": runtimeFullchain,
+			"runtime_privkey":   runtimePrivkey,
+			"docker_mode":       isDockerMode(),
+			"cert_info":         certInfoFull(c),
+			"domain":            c.Domain,
 			"dynu": map[string]bool{
 				"has_api_key": c.DynuAPIKey != "",
 				"has_oauth":   c.DynuClientID != "" && c.DynuSecret != "",
@@ -976,13 +1014,15 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// POST
 	var b struct {
-		Mode         *string `json:"mode"`
-		Fullchain    *string `json:"fullchain"`
-		Privkey      *string `json:"privkey"`
-		DynuAPIKey   *string `json:"dynu_api_key"`
-		DynuClientID *string `json:"dynu_client_id"`
-		DynuSecret   *string `json:"dynu_secret"`
-		AcmeEmail    *string `json:"acme_email"`
+		Mode          *string `json:"mode"`
+		Fullchain     *string `json:"fullchain"`
+		Privkey       *string `json:"privkey"`
+		HostFullchain *string `json:"host_fullchain"`
+		HostPrivkey   *string `json:"host_privkey"`
+		DynuAPIKey    *string `json:"dynu_api_key"`
+		DynuClientID  *string `json:"dynu_client_id"`
+		DynuSecret    *string `json:"dynu_secret"`
+		AcmeEmail     *string `json:"acme_email"`
 	}
 	json.NewDecoder(r.Body).Decode(&b)
 	dynuChanged := false
@@ -999,6 +1039,12 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Privkey != nil {
 		c.CertPrivkey = strings.TrimSpace(*b.Privkey)
+	}
+	if b.HostFullchain != nil {
+		c.CertHostFullchain = strings.TrimSpace(*b.HostFullchain)
+	}
+	if b.HostPrivkey != nil {
+		c.CertHostPrivkey = strings.TrimSpace(*b.HostPrivkey)
 	}
 	if b.DynuAPIKey != nil {
 		if v := strings.TrimSpace(*b.DynuAPIKey); v != c.DynuAPIKey {
@@ -1021,19 +1067,34 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if b.AcmeEmail != nil {
 		c.AcmeEmail = strings.TrimSpace(*b.AcmeEmail)
 	}
-	// manual 模式必须两路径齐全且可读
+	// manual 模式必须两路径齐全。Docker 部署下用户填写的是宿主源路径，容器服务仍使用 /etc/ssl/ansgo/ 副本；
+	// 因此不在容器内直接读取宿主源路径，而是由同步脚本/计划任务导入固定挂载目录。
 	if c.CertMode == "manual" {
-		if c.CertFullchain == "" || c.CertPrivkey == "" {
-			jerr(w, 400, "手动模式需同时提供证书与私钥的完整文件路径")
-			return
-		}
-		if _, err := os.ReadFile(c.CertFullchain); err != nil {
-			jerr(w, 400, "证书文件无法读取: "+err.Error())
-			return
-		}
-		if _, err := os.ReadFile(c.CertPrivkey); err != nil {
-			jerr(w, 400, "私钥文件无法读取: "+err.Error())
-			return
+		if isDockerMode() {
+			if c.CertHostFullchain == "" && c.CertHostPrivkey == "" {
+				// 兼容旧前端/旧 API：把 fullchain/privkey 当作宿主源路径接收。
+				c.CertHostFullchain = strings.TrimSpace(c.CertFullchain)
+				c.CertHostPrivkey = strings.TrimSpace(c.CertPrivkey)
+			}
+			if c.CertHostFullchain == "" || c.CertHostPrivkey == "" {
+				jerr(w, 400, "Docker 手动模式需同时提供宿主机证书与私钥的完整文件路径")
+				return
+			}
+			c.CertFullchain = dockerRuntimeCert
+			c.CertPrivkey = dockerRuntimeKey
+		} else {
+			if c.CertFullchain == "" || c.CertPrivkey == "" {
+				jerr(w, 400, "手动模式需同时提供证书与私钥的完整文件路径")
+				return
+			}
+			if _, err := os.ReadFile(c.CertFullchain); err != nil {
+				jerr(w, 400, "证书文件无法读取: "+err.Error())
+				return
+			}
+			if _, err := os.ReadFile(c.CertPrivkey); err != nil {
+				jerr(w, 400, "私钥文件无法读取: "+err.Error())
+				return
+			}
 		}
 	}
 	if err := configSet(c); err != nil {
@@ -1665,16 +1726,16 @@ func buildURIs(c Config, s secretData) map[string]string {
 	u := map[string]string{}
 	if s.SSKey != "" {
 		ui := base64.RawURLEncoding.EncodeToString([]byte(c.SSMethod + ":" + s.SSKey))
-		u["ss"] = fmt.Sprintf("ss://%s@%s:%d#ANS-GO-SS", ui, c.Domain, c.SSPort)
+		u["ss"] = fmt.Sprintf("ss://%s@%s:%d#%s", ui, c.Domain, c.SSPort, nodeFragment(c, "SS"))
 	}
 	if s.AnyTLSPass != "" {
-		u["anytls"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#ANS-GO-AnyTLS", s.AnyTLSPass, c.Domain, c.AnyTLSPort, c.Domain)
+		u["anytls"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", s.AnyTLSPass, c.Domain, c.AnyTLSPort, c.Domain, nodeFragment(c, "AT"))
 	}
 	if s.SocksUser != "" {
-		u["socks"] = fmt.Sprintf("socks5://%s:%s@%s:%d#ANS-GO-SOCKS5", url.QueryEscape(s.SocksUser), url.QueryEscape(s.SocksPass), c.Domain, c.SocksPort)
+		u["socks"] = fmt.Sprintf("socks5://%s:%s@%s:%d#%s", url.QueryEscape(s.SocksUser), url.QueryEscape(s.SocksPass), c.Domain, c.SocksPort, nodeFragment(c, "SK"))
 	}
 	if s.NaiveUser != "" {
-		u["naive"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#ANS-GO-Naive", url.QueryEscape(s.NaiveUser), url.QueryEscape(s.NaivePass), c.Domain, c.NaivePort)
+		u["naive"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#%s", url.QueryEscape(s.NaiveUser), url.QueryEscape(s.NaivePass), c.Domain, c.NaivePort, nodeFragment(c, "NV"))
 	}
 	// v1.5.26: 多落地服务 URI（key=landing-<id>）
 	for _, L := range c.Landings {
@@ -1686,7 +1747,11 @@ func buildURIs(c Config, s secretData) map[string]string {
 			continue
 		}
 		// 名称做 URL fragment 安全处理（# 后的字符），去掉空白
-		frag := "ANS-GO-Landing-" + sanitizeLandingName(L.Name)
+		name := sanitizeLandingName(L.Name)
+		if name == "unnamed" && L.ID != "" {
+			name = L.ID
+		}
+		frag := nodeFragment(c, "LD-"+name)
 		u["landing-"+L.ID] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", pass, c.Domain, L.Port, c.Domain, frag)
 	}
 	return u

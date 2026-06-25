@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.31
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.32
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.31"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.31，规范化 SS_KEY 为 sing-box 接受的标准 base64）
+VER="v1.5.32"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.32，节点命名 + Docker 手动证书同步）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -531,33 +531,21 @@ EOF
 
   dl_or_exit "$RAW/docker-compose.yml" "$DIR/docker-compose.yml"
 
-  # v1.5.10: manual 证书模式——由 entrypoint.sh 在容器启动时把宿主证书
-  #   bind mount 进来并同步到 /etc/ssl/ansgo/ 卷。这里不再注入 docker-compose
-  #   volumes（v1.5.10 的 bind mount 方案有 SELinux/权限问题，实测失败）。
-  #   新方案：install.sh 把 manual 证书路径写到 ansgo.env（CERT_FULLCHAIN/CERT_PRIVKEY），
-  #   docker-compose.yml 增加只读 bind mount（下方注入），entrypoint 启动时
-  #   读 CERT_FULLCHAIN，cp 到 /etc/ssl/ansgo/，genconf 用 acme 路径。
+  # v1.5.32: Docker 手动证书改为「固定同步目录」模型。
+  #   compose 已固定挂载 /etc/ansgo-docker/manual-certs -> /host/manual-certs（只读），
+  #   不再为 cert/key 原目录动态注入 bind mount（旧方案对 Let's Encrypt live->archive
+  #   symlink、宝塔 600 目录权限都不稳）。首次部署时直接把 CLI 提供的证书复制进同步目录。
+  mkdir -p "$DIR/manual-certs"
+  chmod 700 "$DIR/manual-certs"
   if [ "$CERT_MODE" = "manual" ] && [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ]; then
-    CERT_DIR_HOST=$(dirname "$CERT_FILE")
-    KEY_DIR_HOST=$(dirname "$KEY_FILE")
-    log "manual 证书模式：宿主证书目录 bind mount → entrypoint 启动时同步到 /etc/ssl/ansgo/"
-    log "  续期后操作: docker exec ansgo ansgo-sync-manual-cert && docker exec ansgo ansgo-cert-reload"
-    # 去重收集要挂载的目录（cert 和 key 常在同目录）
-    declare -A MOUNT_DIRS=()
-    for d in "$CERT_DIR_HOST" "$KEY_DIR_HOST"; do
-      [ -d "$d" ] && MOUNT_DIRS["$d"]=1
-    done
-    # 在 volumes 段追加 bind mount（entrypoint 会从此路径 cp 到 /etc/ssl/ansgo/）
-    for d in "${!MOUNT_DIRS[@]}"; do
-      awk -v dir="$d" '
-        /- ansgo_acme:\/root\/\.acme\.sh/ {
-          print
-          printf "      - %s:%s:ro\n", dir, dir
-          next
-        }
-        {print}
-      ' "$DIR/docker-compose.yml" > "$DIR/docker-compose.yml.tmp" && mv "$DIR/docker-compose.yml.tmp" "$DIR/docker-compose.yml"
-    done
+    if [ -s "$CERT_FILE" ] && [ -s "$KEY_FILE" ]; then
+      install -m 0644 "$CERT_FILE" "$DIR/manual-certs/fullchain.pem"
+      install -m 0600 "$KEY_FILE"  "$DIR/manual-certs/privkey.pem"
+      log "manual 证书模式：已把证书复制到固定同步目录 $DIR/manual-certs/（容器启动自动同步到 /etc/ssl/ansgo）"
+      log "  续期后操作：在面板「证书管理」复制「系统自动任务一键安装」或「宝塔计划任务脚本」到宿主执行"
+    else
+      warn "manual 证书模式：证书/私钥文件不存在或为空，跳过初始复制（容器内将用自签占位，请在面板补填宿主真实路径）"
+    fi
   fi
 
   cd "$DIR" || exit 1

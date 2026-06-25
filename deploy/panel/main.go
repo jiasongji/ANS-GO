@@ -67,10 +67,13 @@ type Config struct {
 	Landings []LandingService `json:"landings"`
 	// 证书来源：cert_mode="acme"(默认) 走 cert_dir/fullchain.pem+privkey.pem；
 	// "manual" 用 cert_fullchain/cert_privkey 两个绝对路径（与 acme 二选一）
-	CertMode      string `json:"cert_mode"`
-	CertDir       string `json:"cert_dir"`
-	CertFullchain string `json:"cert_fullchain"`
-	CertPrivkey   string `json:"cert_privkey"`
+		CertMode          string `json:"cert_mode"`
+		CertDir           string `json:"cert_dir"`
+		CertFullchain     string `json:"cert_fullchain"`
+		CertPrivkey       string `json:"cert_privkey"`
+		CertHostFullchain string `json:"cert_host_fullchain"`
+		CertHostPrivkey   string `json:"cert_host_privkey"`
+
 	// v1.5.27：Dynu DNS-01 凭证 + acme 注册邮箱。首次以 manual 模式部署的服务器，
 	// 之后在面板切到 acme 时，之前没有地方填这些凭证 → 自动签发/续期都会失败。
 	// 这三个字段把 Dynu 凭证收进面板（凭证文件 0600 root-only，与 secrets.env 同口径），
@@ -112,7 +115,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.31"
+	version = "1.5.32"
 )
 
 func loadConfig() (Config, error) {
@@ -212,6 +215,39 @@ func normalizePath(p string) string {
 		p = p + "/"
 	}
 	return p
+}
+
+func nodeBaseName(c Config) string {
+	title := strings.TrimSpace(c.PanelTitle)
+	if title == "" || title == "ANS-GO 管理面板" {
+		return "Manage"
+	}
+	return title
+}
+
+func panelDisplayTitle(c Config) string {
+	return nodeBaseName(c) + "_ANS"
+}
+
+func safeFragmentPart(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "Manage"
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case ' ', '\t', '\n', '\r', '#', '?', '/', '\\', '&', '<', '>', '"', '\'':
+			b.WriteRune('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func nodeFragment(c Config, suffix string) string {
+	return safeFragmentPart(nodeBaseName(c)) + "-" + safeFragmentPart(suffix)
 }
 
 func configGet() Config {
