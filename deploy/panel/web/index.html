@@ -872,12 +872,12 @@ function dockerManualTaskBlock(kind,title,script,btnHint){
   const id='docker_sync_'+kind;
   return `<div class="card" style="padding:12px;margin:8px 0;background:var(--card2)">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer" onclick="dockerSyncToggle('${id}')">
-      <span><b>${title}</b> <span class="mut" style="font-size:12px;margin-left:4px">点击展开</span></span>
+      <span><b>${title}</b></span>
       <span id="${id}_ico" style="color:var(--mut)">▶</span>
     </div>
     <div id="${id}_body" style="display:none;margin-top:10px">
       <div class="help" style="margin:0 0 6px 0">${btnHint}</div>
-      <div class="uri-box" id="${id}_code">${(script||'').replace(/</g,'&lt;')}</div>
+      <div class="uri-box" id="${id}_code" style="white-space:pre-wrap;word-break:normal;overflow-x:auto">${(script||'').replace(/</g,'&lt;')}</div>
       <button class="mut" type="button" onclick="copy(($('#${id}_code').textContent))">📋 复制脚本</button>
     </div>
   </div>`;
