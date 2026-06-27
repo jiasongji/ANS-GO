@@ -61,6 +61,91 @@ SS_METHOD = "2022-blake3-aes-128-gcm"
 #   旧的 group2 单落地服务由 upgrade.sh 迁移为 landings[0]。
 LANDINGS = g("landings", []) or []
 
+# v1.5.35: 与 Go 端 normalizeLanding / migrateLandings 同语义的落地服务规范化。
+#   背景：entrypoint 在 ansgo-panel 启动前就调用了 ansgo-genconf，所以 Go 端的启动迁移
+#   （修「填了远端字段但 remote_enabled=false」脏数据）此时还没跑，生成的 config.json
+#   仍是旧的。这里在 genconf 入口同步做一次规范化 + 落盘，保证容器/裸金属重启后
+#   config.json 立刻反映修正（无需进面板重存）。
+#   规则：远端字段齐全（host + port + 凭证）且 SS2022 密钥可规范化时，自动 remote_enabled=true；
+#         按 remote_type 清理无关字段（ss 清 remote_user；socks 清 remote_method）。
+def _ss2022_key_ok(method, key):
+    """返回规范化后的合法 SS2022 密钥；非法/长度错返回 None。"""
+    if not key:
+        return None
+    want = 16 if (method or "").startswith("2022-blake3-aes-128") else \
+           (32 if (method or "").startswith("2022-blake3-aes-256") else 0)
+    if want <= 0:
+        return key
+    import re as _re
+    for cand in (key.strip(), key.strip() + "=="):
+        for v in (cand, cand.replace("-", "+").replace("_", "/")):
+            try:
+                raw = base64.b64decode(v.encode(), validate=True)
+                if len(raw) == want:
+                    return base64.b64encode(raw).decode()
+            except Exception:
+                pass
+    return None
+
+def _normalize_landings_and_persist(cfg_obj):
+    """原地规范化 cfg_obj['landings']，若有变化则写回 panel.json（幂等）。"""
+    lands = cfg_obj.get("landings") or []
+    if not isinstance(lands, list) or not lands:
+        return
+    changed = False
+    for L in lands:
+        if not isinstance(L, dict):
+            continue
+        L["remote_host"] = (L.get("remote_host") or "").strip()
+        rtype = (L.get("remote_type") or "ss").strip().lower() or "ss"
+        L["remote_type"] = rtype
+        if not (L.get("remote_method") or "").strip():
+            L["remote_method"] = "2022-blake3-aes-128-gcm"
+        host = L["remote_host"]
+        try:
+            port = int(L.get("remote_port", 0) or 0)
+        except (ValueError, TypeError):
+            port = 0
+        password = (L.get("remote_password") or "")
+        # 字段齐全 + 校验通过 → 自动启用
+        if not _to_bool(L.get("remote_enabled")) and host and port > 0 and password:
+            if rtype != "socks" or (L.get("remote_user") or ""):
+                method = L.get("remote_method", "2022-blake3-aes-128-gcm")
+                if rtype == "socks":
+                    L["remote_enabled"] = True
+                    changed = True
+                else:
+                    norm = _ss2022_key_ok(method, password)
+                    if norm is not None:
+                        L["remote_enabled"] = True
+                        if norm != password:
+                            L["remote_password"] = norm
+                        changed = True
+        # 按类型清理无关字段
+        if rtype == "socks":
+            if L.get("remote_method"):
+                L["remote_method"] = ""
+                changed = True
+        else:
+            L["remote_type"] = "ss"
+            if L.get("remote_user"):
+                L["remote_user"] = ""
+                changed = True
+    if changed:
+        try:
+            import json as _json
+            with open(CONF, "w") as f:
+                _json.dump(cfg_obj, f, indent=2, ensure_ascii=False)
+            print("[ansgo-genconf] 已按 v1.5.35 规范化落地服务远端开关（远端字段齐全的落地自动启用远端出口）")
+        except Exception as e:
+            print(f"[ansgo-genconf] WARN: 规范化写盘失败: {e}", file=sys.stderr)
+
+def _to_bool(v):
+    return str(v).strip().lower() in ("true", "1", "yes")
+
+_normalize_landings_and_persist(cfg)
+LANDINGS = cfg.get("landings") or []
+
 # 伪装站点
 DISGUISE_PANEL = g("disguise_panel", "proxy:https://example.com")
 DISGUISE_NAIVE = g("disguise_naive", "proxy:https://example.com")

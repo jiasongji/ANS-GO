@@ -520,9 +520,15 @@ async function checkHealth(target,btn){
     <span style="color:${ok?'var(--ok)':'var(--err)'}">${ok?'✅':'❌'}</span> <b>${label}:</b> ${val}</div>`;
   const remoteOk=!j.landing_remote||j.landing_remote==='skip'||j.landing_remote==='yes';
   const allOk=j.enabled&&j.active==='active'&&j.port_listening==='yes'&&j.tcp_connect==='yes'&&remoteOk;
-  const remoteLine=(j.landing_remote&&j.landing_remote!=='skip')
-    ? line(j.landing_remote==='yes','远端落地',`${esc(j.landing_remote_protocol||'tcp')} ${esc(j.landing_remote_addr||'')} ${j.landing_remote==='yes'?'可用':'异常'}${j.landing_remote_ms?' ('+j.landing_remote_ms+'ms)':''}`)
-    : '';
+  // v1.5.35: 落地服务的远端检测行始终显示——skip 时说明「未启用远端（走 direct）」，
+  // 让用户明确知道为何没做远端协议探测，而不是空白让人误以为「没检测」。
+  const isLanding=(target||'').indexOf('landing')===0||target==='anytls2';
+  let remoteLine='';
+  if(j.landing_remote&&j.landing_remote!=='skip'){
+    remoteLine=line(j.landing_remote==='yes','远端落地',`${esc(j.landing_remote_protocol||'tcp')} ${esc(j.landing_remote_addr||'')} ${j.landing_remote==='yes'?'可用':'异常'}${j.landing_remote_ms?' ('+j.landing_remote_ms+'ms)':''}`);
+  }else if(isLanding&&j.landing_remote==='skip'){
+    remoteLine=line(false,'远端落地','未启用远端出口（该落地走 direct 直连，会暴露中转 IP；在「落地服务」页启用远端后再检测）');
+  }
   const remoteReason=j.landing_remote_reason
     ? `<div style="font-size:12px;line-height:1.7;color:${j.landing_remote==='yes'?'var(--mut)':'var(--warn)'}"><b>远端说明:</b> ${esc(j.landing_remote_reason)}</div>`
     : '';
@@ -751,13 +757,25 @@ function renderLandingCard(L){
   const ssFields=rtype==='ss';
   const socksFields=rtype==='socks';
   const rMethod=L.remote_method||'2022-blake3-aes-128-gcm';
-  return `<div class="card"><h3>📦 ${escapeHtml(L.name||('落地#'+p))} ${en?'<span class="tag" style="background:var(--ok);color:#fff">已启用</span>':'<span class="tag">已关闭</span>'}</h3>
+  // v1.5.35: 顶部「出口方式」徽章 —— 让「远端落地」是否真正启用一眼可见，
+  // 避免「填了远端字段但开关没开 → 走 direct 泄漏中转 IP」的迷惑。
+  const ren=L.remote_enabled===true;
+  const viaBadge=ren
+    ? (rtype==='socks'?'<span class="tag" style="background:var(--ok);color:#fff">🌐 出口：SOCKS5 远端落地</span>'
+                     :'<span class="tag" style="background:var(--ok);color:#fff">🌐 出口：SS 远端落地</span>')
+    : '<span class="tag" style="background:var(--warn);color:#fff">⚠️ 出口：直连（未启用远端，会暴露中转 IP）</span>';
+  // 检测是否「填了远端字段但开关没开」（后端 normalizeLanding 会自动修，这里仅提示）
+  const fieldsFilled=(L.remote_host||'')!==''&&(L.remote_port||0)>0;
+  const staleHint=(!ren&&fieldsFilled)
+    ? '<div class="help" style="margin-top:4px;color:var(--warn)">检测到已填写远端地址/端口但「启用远端」为关闭。保存后将自动启用远端出口（v1.5.35），或手动把「启用远端」改为「启用」。</div>'
+    : '';
+  return `<div class="card"><h3>📦 ${escapeHtml(L.name||('落地#'+p))} ${en?'<span class="tag" style="background:var(--ok);color:#fff">已启用</span>':'<span class="tag">已关闭</span>'} ${viaBadge}</h3>
     <div class="row"><label>名称</label><div class="f"><input id="ld_${p}_name" value="${escapeHtml(L.name||'')}" placeholder="如：香港落地"></div></div>
     <div class="row"><label>端口</label><div class="f"><input id="ld_${p}_port" type="number" value="${L.port||''}" placeholder="10000-65535"></div></div>
     <div class="row"><label>启用</label><div class="f"><select id="ld_${p}_en"><option value="false" ${!en?'selected':''}>关闭</option><option value="true" ${en?'selected':''}>启用</option></select></div></div>
     <div class="row"><label>AnyTLS 密码</label><div class="f field-inline"><input id="ld_${p}_pass" value="${escapeHtml(L.password||'')}" placeholder="🎲 随机生成或手动填" ${L.has_keys?'':'disabled'}><button class="mut dice" title="随机生成（不自动保存）" onclick="genField('ld_${p}_pass')">🎲</button></div></div>
     <div style="border-top:1px solid var(--bd);margin:12px 0;padding-top:10px"><b>🌐 远端落地出口</b></div>
-    <div class="row"><label>启用远端</label><div class="f"><select id="ld_${p}_ren" onchange="toggleRemoteType('${p}')"><option value="false" ${!L.remote_enabled?'selected':''}>关闭（走 direct）</option><option value="true" ${L.remote_enabled?'selected':''}>启用</option></select></div></div>
+    <div class="row"><label>启用远端</label><div class="f"><select id="ld_${p}_ren" onchange="onLandingRemoteToggle('${p}')"><option value="false" ${!ren?'selected':''}>关闭（走 direct）</option><option value="true" ${ren?'selected':''}>启用</option></select></div></div>
     <div class="row"><label>远端类型</label><div class="f"><select id="ld_${p}_rtype" onchange="toggleRemoteType('${p}')"><option value="ss" ${ssFields?'selected':''}>Shadowsocks</option><option value="socks" ${socksFields?'selected':''}>SOCKS5</option></select></div></div>
     <div class="row"><label>远端地址</label><div class="f"><input id="ld_${p}_rhost" value="${escapeHtml(L.remote_host||'')}" placeholder="落地机 IP 或域名"></div></div>
     <div class="row"><label>远端端口</label><div class="f"><input id="ld_${p}_rport" type="number" value="${L.remote_port||''}" placeholder="如 8388 / 1080"></div></div>
@@ -769,6 +787,7 @@ function renderLandingCard(L){
       <div class="row"><label>SOCKS5 用户</label><div class="f"><input id="ld_${p}_ruser" value="${escapeHtml(L.remote_user||'')}"></div></div>
       <div class="row"><label>SOCKS5 密码</label><div class="f"><input id="ld_${p}_rpass2" value="${escapeHtml(L.remote_password||'')}"></div></div>
     </div>
+    ${staleHint}
     <div class="ops-row">
       <button class="primary" onclick="saveLanding('${p}')">💾 保存</button>
       <button class="mut" onclick="regenLanding('${p}',this)">🎲 重置凭证</button>
@@ -776,7 +795,7 @@ function renderLandingCard(L){
       <button class="mut" style="color:var(--err)" onclick="deleteLanding('${p}')">🗑 删除</button>
     </div>
     <div id="health-landing-${p}" style="margin-top:6px"></div>
-    <div class="help" style="margin-top:8px">「💾 保存」会校验后同步 genconf + 重启 sing-box（约 3-5 秒）；「🎲 重置凭证」生成新 anytls 密码（旧凭证失效）；远端密钥错误会导致落地连接失败。</div>
+    <div class="help" style="margin-top:8px">「💾 保存」会校验后同步 genconf + 重启 sing-box（约 3-5 秒）；「🎲 重置凭证」生成新 anytls 密码（旧凭证失效）；远端密钥错误会导致落地连接失败。v1.5.35：远端字段（地址+端口+密钥）齐全时保存会自动启用远端出口。</div>
   </div>`;
 }
 // escapeHtml 防止名称/密码里的 < > & " ' 破坏 HTML 属性（v1.5.26 新增，落地名称用户可控）
@@ -786,6 +805,15 @@ function toggleRemoteType(p){
   const rtype=$('#ld_'+p+'_rtype').value;
   $('#ld_'+p+'_sswrap').style.display=(rtype==='ss')?'block':'none';
   $('#ld_'+p+'_sockswrap').style.display=(rtype==='socks')?'block':'none';
+}
+// v1.5.35: 「启用远端」开关切换时给即时反馈（用户明确选「启用」时确认远端字段已填）
+function onLandingRemoteToggle(p){
+  const ren=$('#ld_'+p+'_ren').value==='true';
+  if(ren){
+    const host=($('#ld_'+p+'_rhost').value||'').trim();
+    const port=parseInt($('#ld_'+p+'_rport').value)||0;
+    if(!host||!port){toast('已启用远端，但远端地址/端口为空——请填写落地机地址和端口后再保存');}
+  }
 }
 // 新增落地服务（弹窗）
 async function newLanding(){

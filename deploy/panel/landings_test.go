@@ -335,6 +335,111 @@ func TestSanitizeProbeLogRedactsSensitiveFields(t *testing.T) {
 	}
 }
 
+// TestNormalizeLanding_AutoEnableWhenFieldsComplete 是 v1.5.35 的核心回归测试。
+// 复现用户报告的 bug：「新增第二个落地服务后，填了远端地址/端口/密钥但「启用远端」开关
+// 仍是关闭 → remote_enabled=false → genconf 不生成 outbound/route → 第二个落地走 direct
+// 泄漏中转 IP，且健康检测跳过远端协议探测」。修复：normalizeLanding 在远端字段齐全且
+// 校验通过时自动把 RemoteEnabled 置 true。
+func TestNormalizeLanding_AutoEnableWhenFieldsComplete(t *testing.T) {
+	// 场景：SS 远端字段齐全但 remote_enabled=false（用户报告的脏数据）
+	L := &LandingService{
+		ID: "2", Name: "AL-SGP", Enabled: true, Port: 33088,
+		RemoteEnabled: false, // ← 关键：用户填了字段但没开开关
+		RemoteType:    "ss", RemoteHost: "198.51.100.2", RemotePort: 19922,
+		RemoteMethod: "2022-blake3-aes-128-gcm", RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA==",
+	}
+	normalizeLanding(L)
+	if !L.RemoteEnabled {
+		t.Fatalf("远端字段齐全时应自动启用 remote_enabled，got %+v", L)
+	}
+	if L.RemoteType != "ss" {
+		t.Errorf("SS 类型应保留，got %q", L.RemoteType)
+	}
+	if L.RemoteUser != "" {
+		t.Errorf("SS 类型应清空 remote_user（避免字段串味），got %q", L.RemoteUser)
+	}
+}
+
+// TestNormalizeLanding_KeepsDisabledWhenFieldsIncomplete 验证字段不全时不自动启用，
+// 避免误启用一个半成品配置。
+func TestNormalizeLanding_KeepsDisabledWhenFieldsIncomplete(t *testing.T) {
+	cases := []LandingService{
+		{RemoteEnabled: false, RemoteHost: "", RemotePort: 0, RemotePassword: ""}, // 全空
+		{RemoteEnabled: false, RemoteHost: "1.2.3.4", RemotePort: 0, RemotePassword: "x"}, // 缺 port
+		{RemoteEnabled: false, RemoteHost: "1.2.3.4", RemotePort: 8388, RemotePassword: ""}, // 缺 password
+		{RemoteEnabled: false, RemoteHost: "", RemotePort: 8388, RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA=="}, // 缺 host
+	}
+	for i, L := range cases {
+		orig := L
+		normalizeLanding(&L)
+		if L.RemoteEnabled {
+			t.Errorf("case %d: 字段不全时不应自动启用，orig=%+v got=%+v", i, orig, L)
+		}
+	}
+}
+
+// TestNormalizeLanding_SOCKSAutoEnable 验证 SOCKS5 远端字段齐全也能自动启用。
+func TestNormalizeLanding_SOCKSAutoEnable(t *testing.T) {
+	L := &LandingService{
+		ID: "3", Enabled: true, Port: 33090,
+		RemoteEnabled: false,
+		RemoteType:    "socks", RemoteHost: "198.51.100.7", RemotePort: 1080,
+		RemoteUser: "socksuser", RemotePassword: "sockspass",
+	}
+	normalizeLanding(L)
+	if !L.RemoteEnabled {
+		t.Fatalf("SOCKS5 远端字段齐全时应自动启用，got %+v", L)
+	}
+	if L.RemoteMethod != "" {
+		t.Errorf("SOCKS5 类型应清空 remote_method，got %q", L.RemoteMethod)
+	}
+}
+
+// TestNormalizeLanding_RespectsExplicitDisable 验证用户显式清空字段后不会被强制启用。
+// remote_enabled=false 且字段全空 → 保持 disabled（正常 direct 落地）。
+func TestNormalizeLanding_RespectsExplicitDisable(t *testing.T) {
+	L := &LandingService{
+		ID: "4", Enabled: true, Port: 33091,
+		RemoteEnabled: false,
+		RemoteType: "ss", RemoteHost: "", RemotePort: 0, RemotePassword: "",
+	}
+	normalizeLanding(L)
+	if L.RemoteEnabled {
+		t.Errorf("字段全空时不应自动启用（保留用户 explicit direct 选择），got %+v", L)
+	}
+}
+
+// TestMigrateLandings_FixesStaleEnabledFalse 是 v1.5.35 启动迁移回归测试：
+// panel.json 里存在「远端字段齐全但 remote_enabled=false」的脏数据时，migrateLandings
+// 应检测到变化并返回 true（main 据此落盘），确保容器/裸金属重启后旧脏数据自动修复。
+func TestMigrateLandings_FixesStaleEnabledFalse(t *testing.T) {
+	c := &Config{
+		Domain: "your-domain.com",
+		Landings: []LandingService{
+			// 落地1：正常的已启用远端（不应变化）
+			{ID: "1", Enabled: true, Port: 33001, RemoteEnabled: true, RemoteType: "ss",
+				RemoteHost: "192.0.2.1", RemotePort: 8388, RemoteMethod: "2022-blake3-aes-128-gcm",
+				RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA=="},
+			// 落地2：脏数据——字段齐全但 remote_enabled=false（应被修复）
+			{ID: "2", Enabled: true, Port: 33002, RemoteEnabled: false, RemoteType: "ss",
+				RemoteHost: "198.51.100.2", RemotePort: 8388, RemoteMethod: "2022-blake3-aes-128-gcm",
+				RemotePassword: "BBBBBBBBBBBBBBBBBBBBBB=="},
+			// 落地3：纯 direct 落地（字段全空，不应变化）
+			{ID: "3", Enabled: true, Port: 33003, RemoteEnabled: false, RemoteType: "ss"},
+		},
+	}
+	changed := migrateLandings(c)
+	if !changed {
+		t.Fatalf("存在脏数据时 migrateLandings 应返回 true")
+	}
+	if !c.Landings[1].RemoteEnabled {
+		t.Fatalf("落地2 应被自动启用远端，got %+v", c.Landings[1])
+	}
+	if c.Landings[2].RemoteEnabled {
+		t.Errorf("落地3 字段全空不应被启用，got %+v", c.Landings[2])
+	}
+}
+
 func TestCleanupProbeTempDir(t *testing.T) {
 	dir := t.TempDir()
 	oldProbe := filepath.Join(dir, "ansgo-ss-probe-old.json")

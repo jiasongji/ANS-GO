@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.34"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.33，健康检测协议级诊断）
+VER="v1.5.35"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.35，多落地远端自动启用修复）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in

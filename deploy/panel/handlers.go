@@ -2247,6 +2247,16 @@ func certInfoFull(c Config) map[string]any {
 // landingToMap 把一个 LandingService 转成 API 响应用的 map（含从 secrets 读出的 password/uuid）。
 func landingToMap(L LandingService) map[string]any {
 	pass, uuid, found := readLandingSecrets(L.ID)
+	// v1.5.35: remote_via 给前端一个明确的「出口方式」描述，避免「填了字段但开关没开」时
+	// 卡片看起来配置齐全实则走 direct 的迷惑。
+	remoteVia := "direct"
+	if L.RemoteEnabled {
+		if L.RemoteType == "socks" {
+			remoteVia = "socks5-landing"
+		} else {
+			remoteVia = "ss-landing"
+		}
+	}
 	return map[string]any{
 		"id":              L.ID,
 		"name":            L.Name,
@@ -2262,6 +2272,7 @@ func landingToMap(L LandingService) map[string]any {
 		"remote_method":   L.RemoteMethod,
 		"remote_password": L.RemotePassword,
 		"remote_user":     L.RemoteUser,
+		"remote_via":      remoteVia,
 	}
 }
 
@@ -2297,6 +2308,59 @@ func validateLandingRemote(L *LandingService) string {
 		L.RemotePassword = normKey
 	}
 	return ""
+}
+
+// normalizeLanding 落地服务规范化（v1.5.35）。
+// 解决「新增第二个落地服务后不走远端出口」的根因：用户在面板填好了远端 host/port/密钥，
+// 但「启用远端」开关仍是「关闭」，于是 remote_enabled=false → genconf 不生成 outbound/route →
+// 该落地走 direct（泄漏中转 IP），且健康检测因 RemoteEnabled=false 直接 skip 远端协议探测。
+// 修复策略（防御性自动启用）：远端字段齐全（host + port + 凭证）且能通过校验时，自动把
+// RemoteEnabled 置 true——这样既修旧部署的脏数据，也避免新部署重复踩同一坑。
+// 同时按 remote_type 清理无关字段（ss 不留 remote_user；socks 不留 remote_method），
+// 避免前端类型来回切换导致字段串味。
+func normalizeLanding(L *LandingService) {
+	L.RemoteHost = strings.TrimSpace(L.RemoteHost)
+	L.RemoteType = strings.ToLower(strings.TrimSpace(L.RemoteType))
+	if L.RemoteType == "" {
+		L.RemoteType = "ss"
+	}
+	if strings.TrimSpace(L.RemoteMethod) == "" {
+		L.RemoteMethod = "2022-blake3-aes-128-gcm"
+	}
+	// 远端字段齐全且校验通过 → 自动启用（修历史「填了字段但开关没开」的脏数据）
+	if !L.RemoteEnabled && L.RemoteHost != "" && L.RemotePort > 0 && L.RemotePassword != "" {
+		if L.RemoteType != "socks" || L.RemoteUser != "" {
+			if validateLandingRemote(L) == "" {
+				L.RemoteEnabled = true
+			}
+		}
+	}
+	// 按类型清理无关字段（避免 UI 来回切换 SS/SOCKS5 时残留）
+	if L.RemoteType == "socks" {
+		L.RemoteMethod = ""
+	} else {
+		L.RemoteType = "ss"
+		L.RemoteUser = ""
+	}
+}
+
+// migrateLandings 启动时对每个落地服务跑一遍 normalizeLanding，返回是否有字段变化。
+// 用于一次性修复历史「远端字段齐全但 remote_enabled=false」的脏数据（v1.5.35）。
+func migrateLandings(c *Config) bool {
+	if c == nil || len(c.Landings) == 0 {
+		return false
+	}
+	changed := false
+	for i := range c.Landings {
+		before := c.Landings[i]
+		nl := before
+		normalizeLanding(&nl)
+		if nl != before {
+			c.Landings[i] = nl
+			changed = true
+		}
+	}
+	return changed
 }
 
 // landingsHandler GET 返回列表；POST 新建落地服务。
@@ -2380,7 +2444,9 @@ func landingsHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 400, "端口冲突: "+msg)
 		return
 	}
-	// 远端校验
+	// v1.5.35: 规范化 + 防御性自动启用远端（与 update 路径一致）
+	normalizeLanding(&L)
+	// 远端校验（启用时）
 	if msg := validateLandingRemote(&L); msg != "" {
 		jerr(w, 400, msg)
 		return
@@ -2500,8 +2566,9 @@ func landingUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 400, "落地 AnyTLS 密码不能为空")
 		return
 	}
-	// 远端校验
-
+	// v1.5.35: 规范化 + 防御性自动启用远端（修「填了远端字段但开关没开」导致落地走 direct）
+	normalizeLanding(&c.Landings[idx])
+	// 远端校验（启用时）
 	if msg := validateLandingRemote(&c.Landings[idx]); msg != "" {
 		jerr(w, 400, msg)
 		return

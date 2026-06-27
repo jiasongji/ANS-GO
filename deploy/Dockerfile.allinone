@@ -27,8 +27,8 @@ WORKDIR /src
 COPY deploy/panel/go.mod deploy/panel/go.sum ./
 RUN go mod download
 COPY deploy/panel/ .
-# v1.5.34：默认值与 main.go 的 version 一致；CI/buildx 应通过 --build-arg PANEL_VERSION 覆盖
-ARG PANEL_VERSION=1.5.34
+# v1.5.35：默认值与 main.go 的 version 一致；CI/buildx 应通过 --build-arg PANEL_VERSION 覆盖
+ARG PANEL_VERSION=1.5.35
 RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags "-s -w -X main.version=${PANEL_VERSION}" -o /out/ansgo-panel .
 
@@ -98,6 +98,9 @@ COPY --from=caddy   /out/caddy    /usr/local/bin/caddy
 COPY --from=panel   /out/ansgo-panel /usr/local/bin/ansgo-panel
 
 # ---- 拷贝管理脚本 + 证书工具 ----
+# v1.5.35: SCRIPTS_BUST 让 buildx 在脚本内容变化时强制重建本层（默认空，CI 可传 --build-arg SCRIPTS_BUST=$(md5sum deploy/ansgo-*)）
+ARG SCRIPTS_BUST=""
+RUN echo "$SCRIPTS_BUST" > /dev/null
 COPY deploy/ansgo-admin deploy/ansgo-genconf deploy/ansgo-cert-reload \
      deploy/ansgo-sync-manual-cert \
      deploy/ansgo-cert-issue.sh deploy/dns_dynukey.sh /usr/local/bin/

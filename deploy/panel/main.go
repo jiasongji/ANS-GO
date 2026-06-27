@@ -115,7 +115,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.34"
+	version = "1.5.35"
 )
 
 func loadConfig() (Config, error) {
@@ -425,6 +425,15 @@ func main() {
 	c, err := loadConfig()
 	if err != nil {
 		log.Fatalf("读取配置失败 %s: %v", confPath, err)
+	}
+	// v1.5.35: 启动时规范化所有落地服务（修历史「填了远端字段但 remote_enabled=false」
+	// 导致落地走 direct / 健康检测跳过远端协议探测的脏数据）。规范化后若变化则落盘。
+	if migrateLandings(&c) {
+		if err := saveConfig(c); err != nil {
+			log.Printf("警告: 落地服务规范化写盘失败: %v（继续用内存中的修正值）", err)
+		} else {
+			log.Println("已按 v1.5.35 规范化落地服务远端开关（远端字段齐全的落地自动启用远端出口）")
+		}
 	}
 	cfg = c
 	if err := initDB(c.DBPath); err != nil {

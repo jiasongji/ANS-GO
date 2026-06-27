@@ -2,7 +2,7 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.34-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.35-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
@@ -557,7 +557,14 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ## ✨ 特性
 
-### v1.5.34 upgrade.sh 升级说明同步 + 浏览器硬刷新提示 + 多落地分流回归 ⭐
+### v1.5.35 多落地服务「第二个落地不走远端出口 / 检测不测远端协议」根治 ⭐
+
+- **【根因】** 新增第二个落地服务后，填了远端 host/port/密钥但「启用远端」开关仍是「关闭」→ `remote_enabled=false` → genconf 不生成 outbound/route（走 direct 泄漏中转 IP）→ 健康检测直接 skip 远端协议探测 → 表现为「填了配置不生效 + 检测不测远端」
+- **【三层修复】** ① 后端 `normalizeLanding()`（Go）+ ansgo-genconf（python）在远端字段齐全且校验通过时**自动启用 remote_enabled**；② 启动迁移 `migrateLandings()` + entrypoint ansgo-genconf 在容器/裸金属重启时**自动修复历史脏 panel.json**；③ 前端每张落地卡片顶部加「出口方式」徽章 + 健康检测 skip 时明确显示「未启用远端出口（走 direct）」
+- **【回归测试】** 新增 5 个 Go 测试锁定：字段齐全自动启用、字段不全不启用、SOCKS5 自动启用、显式 disable 保留、启动迁移修脏数据
+- 详见 [v1.5.35 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.35)
+
+### v1.5.34 upgrade.sh 升级说明同步 + 浏览器硬刷新提示 + 多落地分流回归
 
 - **【upgrade.sh】** 升级说明文案从 v1.5.32 同步到 v1.5.33/v1.5.34；裸金属/Docker 升级完成段新增「⚠️ 浏览器需硬刷新才能看到新界面」提示；Docker 版本验证改为轮询 5 次。解决裸金属用户升级后面板"看起来没变化"（实为浏览器缓存旧前端）
 - **【回归测试】** 新增多落地远端配置独立性测试 + 路由规则分流测试，锁定两个落地的远端 host/port/password 各自独立、outbound tag 不串
