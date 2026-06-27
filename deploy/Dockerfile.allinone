@@ -27,8 +27,8 @@ WORKDIR /src
 COPY deploy/panel/go.mod deploy/panel/go.sum ./
 RUN go mod download
 COPY deploy/panel/ .
-# v1.5.33：默认值与 main.go 的 version 一致；CI/buildx 应通过 --build-arg PANEL_VERSION 覆盖
-ARG PANEL_VERSION=1.5.33
+# v1.5.34：默认值与 main.go 的 version 一致；CI/buildx 应通过 --build-arg PANEL_VERSION 覆盖
+ARG PANEL_VERSION=1.5.34
 RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags "-s -w -X main.version=${PANEL_VERSION}" -o /out/ansgo-panel .
 

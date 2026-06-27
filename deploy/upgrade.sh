@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.33
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.34
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
@@ -13,7 +13,7 @@
 #   - VER 与 install.sh 顶部硬编码一致，发新版只需改这一行 + commit
 #   - 复用 install.sh 的 bootstrap（解决 curl|bash 的 SIGPIPE/进程替换卡死）
 #   - panel 二进制无 -version flag（main.go 仅 -setpass），用 md5 对比判断是否真更新，
-#     启动后用 journalctl 日志行 "ansgo-panel v1.5.33 监听..." 验证版本
+#     启动后用 journalctl 日志行 "ansgo-panel v1.5.34 监听..." 验证版本
 #   - 裸金属 panel 替换走 .new→md5→.bak→mv→restart 安全流程（AGENTS.md §9 铁律）
 #   - 备份目录命名 /etc/ansgo-backup-upgrade-{TS}，遵循 ansgo-admin 约定
 # =============================================================================
@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.33"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.34"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -156,12 +156,17 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
-  - 【本版重点·节点命名 + Docker 手动证书同步】① 面板设置「网页标题」改名「节点信息」，
-    浏览器标题自动追加 _ANS（例 NodeName -> NodeName_ANS，留空/旧默认 -> Manage_ANS）。
-    ② 节点 URI #fragment 从固定 ANS-GO-* 改为 <节点信息>-<服务简称>（AT/NV/SS/SK）。
-    ③ Docker 手动证书改为填写宿主机真实路径 + 固定同步目录 /etc/ansgo-docker/manual-certs，
-    面板生成折叠可复制的「系统自动任务一键安装」与「宝塔计划任务脚本」，证书经
-    /host/manual-certs -> /etc/ssl/ansgo 校验后导入，服务始终用容器内副本。
+  - 【v1.5.34】upgrade.sh 升级说明文案同步到 v1.5.33+；裸金属升级后显式回显面板版本号
+    （从 journalctl 日志行提取 "ansgo-panel v1.5.x 监听..." 并比对目标版本，不匹配则告警，
+    让用户明确知道升级是否真的生效）。
+  - 【v1.5.33·健康检测协议级诊断】① 主 Shadowsocks 检测新增服务器时间/UTC/时区/NTP 状态展示
+    （Docker 标记为 host 共享宿主时间，避免误报；裸金属明确未同步时提示先同步系统时间）。
+    ② 落地服务远端 Shadowsocks 检测从「只测 TCP」升级为「method/password 校验 + 临时 sing-box
+    协议探测」，失败时区分密钥格式、TCP 不通、认证/加密失败、SS2022 时间戳失败、超时/出口异常。
+    ③ 临时探测配置使用 root-only 私有目录、0600 权限、过期清理；探测日志脱敏 password。
+  - 【v1.5.32·节点命名 + Docker 手动证书同步】① 面板设置「网页标题」改名「节点信息」，
+    浏览器标题自动追加 _ANS。② 节点 URI #fragment 改为 <节点信息>-<服务简称>（AT/NV/SS/SK）。
+    ③ Docker 手动证书改为填写宿主机真实路径 + 固定同步目录 /etc/ansgo-docker/manual-certs。
   - v1.5.31：规范化 SS_KEY 为 sing-box 接受的标准 base64
   - v1.5.30：修复旧部署非法 SS_KEY 阻断保存/修复
   - v1.5.29：全局端口冲突检测 + 落地远端出口诊断
@@ -536,6 +541,9 @@ PY
   echo "    1. 登录面板 →「服务管理」页 → SOCKS5 卡片 → 点「安装」"
   echo "    2. 或 SSH 执行: ansgo-admin regen socks（生成/重置凭证，sing-box 自动重载）"
   echo "    3. 查看连接 URI: ansgo-admin info"
+  echo
+  printf '  %b⚠️ 浏览器需硬刷新才能看到新界面%b（面板前端内嵌在二进制里，升级后必须清缓存）：\n' "$C_Y" "$C_0"
+  echo "    Windows/Linux: Ctrl+Shift+R   |   macOS: Cmd+Shift+R   |   或无痕窗口打开面板"
 }
 
 # =============================================================================
@@ -617,10 +625,14 @@ upgrade_docker(){
     err "未发现运行中的 ansgo 容器（docker ps -a 检查）"
   fi
 
-  # 版本号验证（从容器日志读）
-  local logged_ver
-  logged_ver=$(docker logs ansgo 2>&1 | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' \
-    | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
+  # 版本号验证（从容器日志读；容器刚重建，日志可能要几秒才输出面板启动行）
+  local logged_ver="" vi
+  for vi in 1 2 3 4 5; do
+    sleep 2
+    logged_ver=$(docker logs ansgo 2>&1 | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' \
+      | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
+    [ -n "$logged_ver" ] && break
+  done
   if [ -n "$logged_ver" ]; then
     if [ "$logged_ver" = "$VER" ]; then
       ok "面板版本: ${logged_ver}（目标 ${VER} ✓）"
@@ -630,7 +642,7 @@ upgrade_docker(){
       err "强制重建：cd $DOCKER_DIR && $COMPOSE up -d --force-recreate"
     fi
   else
-    warn "未能从容器日志读取版本号（docker logs ansgo 2>&1 | grep 'ansgo-panel v'）"
+    warn "未能从容器日志读取版本号（可稍后执行：docker logs ansgo 2>&1 | grep 'ansgo-panel v'）"
   fi
 
   echo
@@ -640,6 +652,9 @@ upgrade_docker(){
   echo "    1. 登录面板 →「服务管理」页 → SOCKS5 卡片 → 点「安装」"
   echo "    2. 或进容器执行: docker exec ansgo ansgo-admin regen socks"
   echo "    3. 查看连接 URI: docker exec ansgo ansgo-admin info"
+  echo
+  printf '  %b⚠️ 浏览器需硬刷新才能看到新界面%b（面板前端内嵌在二进制里，升级后必须清缓存）：\n' "$C_Y" "$C_0"
+  echo "    Windows/Linux: Ctrl+Shift+R   |   macOS: Cmd+Shift+R   |   或无痕窗口打开面板"
   echo
   echo "  回滚: 编辑 ${DOCKER_COMPOSE_FILE}，把 image: ghcr.io/jiasongji/ansgo:latest"
   echo "        改成 :v1.5.15（或上一版），再 docker compose up -d"

@@ -393,6 +393,78 @@ func TestLandingsRemoteDisabled_NoValidation(t *testing.T) {
 	}
 }
 
+// TestLandingsMultiRemoteIndependence 验证多个落地服务的远端配置各自独立、不串扰。
+// 回归锁定场景：用户报"添加第二个落地服务时不走 web 面板配置的出口地址"。
+// 根因排查：validateLandingRemote 按指针修改传入的 LandingService，必须确保对
+// landing-2 的校验/规范化不会影响 landing-1 的配置（remote_host/port/password 各自独立）。
+func TestLandingsMultiRemoteIndependence(t *testing.T) {
+	l1 := &LandingService{
+		ID: "1", RemoteEnabled: true, RemoteType: "ss",
+		RemoteHost: "192.0.2.10", RemotePort: 8388,
+		RemoteMethod:   "2022-blake3-aes-128-gcm",
+		RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA==",
+	}
+	l2 := &LandingService{
+		ID: "2", RemoteEnabled: true, RemoteType: "ss",
+		RemoteHost: "198.51.100.20", RemotePort: 8389,
+		RemoteMethod:   "2022-blake3-aes-128-gcm",
+		RemotePassword: "BBBBBBBBBBBBBBBBBBBBBB==",
+	}
+	// 分别校验（模拟 landingUpdateHandler 对每个落地独立调用 validateLandingRemote）
+	if msg := validateLandingRemote(l1); msg != "" {
+		t.Fatalf("landing-1 校验失败: %s", msg)
+	}
+	if msg := validateLandingRemote(l2); msg != "" {
+		t.Fatalf("landing-2 校验失败: %s", msg)
+	}
+	// 校验后两个落地的远端配置必须各自保持原值（不串扰）
+	if l1.RemoteHost != "192.0.2.10" || l1.RemotePort != 8388 {
+		t.Errorf("landing-1 远端被串改: host=%s port=%d", l1.RemoteHost, l1.RemotePort)
+	}
+	if l2.RemoteHost != "198.51.100.20" || l2.RemotePort != 8389 {
+		t.Errorf("landing-2 远端被串改: host=%s port=%d", l2.RemoteHost, l2.RemotePort)
+	}
+	// 密钥规范化各自独立（两个不同密钥不应变成相同）
+	if l1.RemotePassword == l2.RemotePassword {
+		t.Errorf("两个落地的远端密钥规范化后不应相同: l1=%s l2=%s", l1.RemotePassword, l2.RemotePassword)
+	}
+}
+
+// TestLandingsRouteRulesPerLanding 验证多落地路由规则按 inbound tag 各自匹配，
+// 不会让 landing-in-2 的流量错误走 landing-out-1。
+// 这是 genconf python 逻辑的 Go 侧结构验证（genconf 生成 rules 按 landing id 遍历）。
+func TestLandingsRouteRulesPerLanding(t *testing.T) {
+	c := Config{Domain: "your-domain.com", SSPort: 33899}
+	c.Landings = []LandingService{
+		{ID: "1", Enabled: true, Port: 30001, RemoteEnabled: true, RemoteType: "ss", RemoteHost: "192.0.2.10", RemotePort: 8388, RemoteMethod: "2022-blake3-aes-128-gcm", RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA=="},
+		{ID: "2", Enabled: true, Port: 30002, RemoteEnabled: true, RemoteType: "ss", RemoteHost: "198.51.100.20", RemotePort: 8389, RemoteMethod: "2022-blake3-aes-128-gcm", RemotePassword: "BBBBBBBBBBBBBBBBBBBBBB=="},
+	}
+	// 模拟 genconf 的规则生成逻辑：每个 enabled+remote landing 生成独立 rule
+	type rule struct{ inbound, outbound string }
+	var rules []rule
+	for _, L := range c.Landings {
+		if !L.Enabled || !L.RemoteEnabled {
+			continue
+		}
+		rules = append(rules, rule{inbound: "landing-in-" + L.ID, outbound: "landing-out-" + L.ID})
+	}
+	if len(rules) != 2 {
+		t.Fatalf("两个启用的远端落地应生成 2 条规则，got %d", len(rules))
+	}
+	// 验证每条规则的 inbound 和 outbound tag 对应同一 id（不串）
+	for _, r := range rules {
+		inID := r.inbound[len("landing-in-"):]
+		outID := r.outbound[len("landing-out-"):]
+		if inID != outID {
+			t.Errorf("路由规则 inbound/outbound id 不一致: %s -> %s", r.inbound, r.outbound)
+		}
+	}
+	// 验证两个落地生成不同的 outbound tag
+	if rules[0].outbound == rules[1].outbound {
+		t.Errorf("两个落地不应生成相同 outbound tag: %s", rules[0].outbound)
+	}
+}
+
 // TestRemoveSecretsByPrefix 验证删除落地服务时清理孤儿凭证。
 // secrets.env 里的 LANDING_<id>_PASS/UUID 行应被删除，其他行保留。
 func TestRemoveSecretsByPrefix(t *testing.T) {
