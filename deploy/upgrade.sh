@@ -448,7 +448,7 @@ PY
     # v1.5.31: 修复/规范化旧部署遗留的非标准 SS2022 密钥。
     # sing-box 的 SS2022 password 只接受标准 base64（带 padding）；raw/url-safe/完全非法
     # SS_KEY 都会让任何保存/修复卡在 decode psk。可解码则规范化，不可解码才重置。
-    python3 - "$METAL_PANEL_CONF" "$METAL_SECRETS" <<'PY'
+    python3 - "$METAL_CONF" "$METAL_SECRETS" <<'PY'
 import base64, json, os, sys
 conf,secrets=sys.argv[1:3]
 try:
