@@ -513,18 +513,37 @@ async function checkHealth(target,btn){
   const j=await api('api/health',{method:'POST',body:JSON.stringify({target})});
   if(btn){btn.disabled=false;btn.textContent=origText}
   const box=document.getElementById('health-'+target);
+  const esc=s=>escapeHtml(String(s||''));
   if(!box)return;  // 容器不存在则只 toast
-  if(j.error){box.innerHTML=`<div style="color:var(--err);font-size:12px">❌ ${j.error}</div>`;return}
+  if(j.error){box.innerHTML=`<div style="color:var(--err);font-size:12px">❌ ${esc(j.error)}</div>`;return}
   const line=(ok,label,val)=>`<div style="font-size:12px;line-height:1.7">
     <span style="color:${ok?'var(--ok)':'var(--err)'}">${ok?'✅':'❌'}</span> <b>${label}:</b> ${val}</div>`;
-  const allOk=j.enabled&&j.active==='active'&&j.port_listening==='yes'&&j.tcp_connect==='yes';
+  const remoteOk=!j.landing_remote||j.landing_remote==='skip'||j.landing_remote==='yes';
+  const allOk=j.enabled&&j.active==='active'&&j.port_listening==='yes'&&j.tcp_connect==='yes'&&remoteOk;
+  const remoteLine=(j.landing_remote&&j.landing_remote!=='skip')
+    ? line(j.landing_remote==='yes','远端落地',`${esc(j.landing_remote_protocol||'tcp')} ${esc(j.landing_remote_addr||'')} ${j.landing_remote==='yes'?'可用':'异常'}${j.landing_remote_ms?' ('+j.landing_remote_ms+'ms)':''}`)
+    : '';
+  const remoteReason=j.landing_remote_reason
+    ? `<div style="font-size:12px;line-height:1.7;color:${j.landing_remote==='yes'?'var(--mut)':'var(--warn)'}"><b>远端说明:</b> ${esc(j.landing_remote_reason)}</div>`
+    : '';
+  const td=j.time_diag||{};
+  const timeLine=j.time_diag
+    ? `<div style="font-size:12px;line-height:1.7;color:var(--mut)"><b>服务器时间:</b> ${esc(td.now_local)}（UTC: ${esc(td.now_utc)}，时区: ${esc(td.timezone||'unknown')} ${esc(td.offset||'')}，NTP: ${esc(td.ntp_synchronized||'unknown')}）<br><span>提示：时区只影响显示；Shadowsocks 2022 依赖系统时间/NTP 同步。</span></div>`
+    : '';
+  const probeNote=(j.landing_remote_protocol==='ss')
+    ? `<div style="font-size:12px;line-height:1.7;color:var(--mut)">说明：远端 Shadowsocks 协议探测会通过远端出口访问公共连通性检测 URL。</div>`
+    : '';
   box.innerHTML=`<div style="background:var(--card2);border:1px solid var(--bd);border-radius:6px;padding:10px;margin-top:8px">
     ${line(j.enabled,'服务状态',j.enabled?'已启用':'未启用')}
     ${j.enabled?line(j.active==='active','进程',''+j.unit+': '+j.active):''}
     ${j.enabled&&j.port?line(j.port_listening==='yes','端口监听',':'+j.port+' '+(j.port_listening==='yes'?'LISTEN':'未监听')):''}
     ${j.enabled&&j.port_listening==='yes'?line(j.tcp_connect==='yes','TCP 握手',(j.tcp_connect==='yes'?'成功 ('+j.tcp_ms+'ms)':'失败')):''}
+    ${remoteLine}
+    ${remoteReason}
+    ${timeLine}
+    ${probeNote}
     <div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--bd);color:${allOk?'var(--ok)':'var(--warn)'}">
-      <b>诊断:</b> ${j.summary}
+      <b>诊断:</b> ${esc(j.summary)}
     </div></div>`;
 }
 

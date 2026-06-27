@@ -67,12 +67,12 @@ type Config struct {
 	Landings []LandingService `json:"landings"`
 	// 证书来源：cert_mode="acme"(默认) 走 cert_dir/fullchain.pem+privkey.pem；
 	// "manual" 用 cert_fullchain/cert_privkey 两个绝对路径（与 acme 二选一）
-		CertMode          string `json:"cert_mode"`
-		CertDir           string `json:"cert_dir"`
-		CertFullchain     string `json:"cert_fullchain"`
-		CertPrivkey       string `json:"cert_privkey"`
-		CertHostFullchain string `json:"cert_host_fullchain"`
-		CertHostPrivkey   string `json:"cert_host_privkey"`
+	CertMode          string `json:"cert_mode"`
+	CertDir           string `json:"cert_dir"`
+	CertFullchain     string `json:"cert_fullchain"`
+	CertPrivkey       string `json:"cert_privkey"`
+	CertHostFullchain string `json:"cert_host_fullchain"`
+	CertHostPrivkey   string `json:"cert_host_privkey"`
 
 	// v1.5.27：Dynu DNS-01 凭证 + acme 注册邮箱。首次以 manual 模式部署的服务器，
 	// 之后在面板切到 acme 时，之前没有地方填这些凭证 → 自动签发/续期都会失败。
@@ -115,7 +115,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.32"
+	version = "1.5.33"
 )
 
 func loadConfig() (Config, error) {

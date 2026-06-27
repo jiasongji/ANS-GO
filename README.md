@@ -2,11 +2,11 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.32-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.33-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
-> ℹ️ 当前开发版变更：新增 SOCKS5（sing-box inbound，强制用户名/密码）、面板自定义网页标题；NaiveProxy 保留为普通可选服务，但不参与任何远端落地，落地服务仅支持 AnyTLS-2 → 远端 SS。
+> ℹ️ 当前版本重点：健康检测新增 Shadowsocks/落地远端协议级诊断与 SS2022 时间/NTP 提示；NaiveProxy / SOCKS5 仍不参与远端落地，只有「落地服务」可配置远端出口。
 
 ---
 
@@ -556,6 +556,13 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ---
 
 ## ✨ 特性
+
+### v1.5.33 健康检测协议级诊断 + SS2022 时间提示 ⭐
+
+- **【Shadowsocks 诊断】** 主 Shadowsocks 检测新增服务器时间/UTC/时区/NTP 状态展示。Docker 场景识别为共享宿主时间（`host`），避免把容器内 `timedatectl` 不可用误报为异常；裸金属若明确未同步则提示先同步系统时间/NTP。解决 SS2022 因时间戳偏差导致「端口正常但不能用」时面板无提示的问题
+- **【落地远端协议检测】** 落地服务远端类型为 Shadowsocks 时，不再只测 TCP 端口：先校验 method/password（含 raw/url-safe base64 规范化），再启动临时 sing-box 客户端通过远端 SS 出口访问公共连通性检测 URL。失败时区分密钥格式、TCP 不通、认证/加密失败、SS2022 时间戳失败、超时/出口异常，并显示排查建议
+- **【安全与稳健】** 临时探测配置使用 root-only 私有目录与 0600 文件权限，检测后清理并定期清理过期文件；探测日志返回前脱敏 password；健康检测命令和协议探测均设置超时；前端诊断文本统一转义
+- 详见 [v1.5.33 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.33)
 
 ### v1.5.32 节点命名整改 + Docker 手动证书同步 ⭐
 

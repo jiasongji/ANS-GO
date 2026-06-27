@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,13 +33,13 @@ var indexHTML []byte
 var qrcodeJS []byte
 
 const (
-	binGenConf          = "/usr/local/bin/ansgo-genconf"
-	binAdmin            = "/usr/local/bin/ansgo-admin"
-	binAcme             = "/root/.acme.sh/acme.sh"
-	binCertIssue        = "/etc/ansgo-deploy/ansgo-cert-issue.sh"
-	binManualCertSync   = "/usr/local/bin/ansgo-sync-manual-cert"
-	dockerRuntimeCert   = "/etc/ssl/ansgo/fullchain.pem"
-	dockerRuntimeKey    = "/etc/ssl/ansgo/privkey.pem"
+	binGenConf        = "/usr/local/bin/ansgo-genconf"
+	binAdmin          = "/usr/local/bin/ansgo-admin"
+	binAcme           = "/root/.acme.sh/acme.sh"
+	binCertIssue      = "/etc/ansgo-deploy/ansgo-cert-issue.sh"
+	binManualCertSync = "/usr/local/bin/ansgo-sync-manual-cert"
+	dockerRuntimeCert = "/etc/ssl/ansgo/fullchain.pem"
+	dockerRuntimeKey  = "/etc/ssl/ansgo/privkey.pem"
 )
 
 // acmeAccountConf：Dynu 凭证经 acme.sh _saveaccountconf_mutable 持久化于此。
@@ -1380,6 +1383,330 @@ func probeLandingRemote(L LandingService, timeout time.Duration) (string, int64)
 	return "yes", ms
 }
 
+type timeDiag struct {
+	NowLocal        string `json:"now_local"`
+	NowUTC          string `json:"now_utc"`
+	Timezone        string `json:"timezone"`
+	Offset          string `json:"offset"`
+	NTPSynchronized string `json:"ntp_synchronized"`
+	Detail          string `json:"detail,omitempty"`
+}
+
+type landingRemoteProbeDetail struct {
+	Status   string    `json:"status"`
+	Protocol string    `json:"protocol"`
+	Addr     string    `json:"addr"`
+	MS       int64     `json:"ms"`
+	Reason   string    `json:"reason"`
+	Time     *timeDiag `json:"time_diag,omitempty"`
+}
+
+func currentTimeDiag() *timeDiag {
+	now := time.Now()
+	name, offset := now.Zone()
+	tz := name
+	if loc := now.Location(); loc != nil && loc.String() != "" && loc.String() != "Local" {
+		tz = loc.String()
+	}
+	d := &timeDiag{
+		NowLocal:        now.Format(time.RFC3339),
+		NowUTC:          now.UTC().Format(time.RFC3339),
+		Timezone:        tz,
+		Offset:          formatUTCOffset(offset),
+		NTPSynchronized: "unknown",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "timedatectl", "show", "-p", "Timezone", "-p", "NTPSynchronized", "--value").Output()
+	if err != nil {
+		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
+			d.NTPSynchronized = "host"
+			d.Detail = "当前为 Docker 容器，容器共享宿主内核时间；NTP 同步状态请在宿主机检查"
+		} else {
+			d.Detail = "timedatectl 不可用、超时或当前环境不支持，无法确认 NTP 同步状态"
+		}
+		return d
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+		d.Timezone = strings.TrimSpace(lines[0])
+	}
+	if len(lines) > 1 && strings.TrimSpace(lines[1]) != "" {
+		d.NTPSynchronized = strings.TrimSpace(lines[1])
+	}
+	return d
+}
+
+func formatUTCOffset(offset int) string {
+	sign := "+"
+	if offset < 0 {
+		sign = "-"
+		offset = -offset
+	}
+	return fmt.Sprintf("UTC%s%02d:%02d", sign, offset/3600, (offset%3600)/60)
+}
+
+func probeLandingRemoteDetail(L LandingService, timeout time.Duration) landingRemoteProbeDetail {
+	p := landingRemoteProbeDetail{Status: "skip", Protocol: "tcp"}
+	if !L.RemoteEnabled {
+		return p
+	}
+	p.Addr = net.JoinHostPort(strings.TrimSpace(L.RemoteHost), strconv.Itoa(L.RemotePort))
+	if strings.TrimSpace(L.RemoteHost) == "" || L.RemotePort <= 0 {
+		p.Status = "no"
+		p.Reason = "启用远端落地需填写 host/port"
+		return p
+	}
+	remoteType := strings.ToLower(strings.TrimSpace(L.RemoteType))
+	if remoteType == "" {
+		remoteType = "ss"
+	}
+	p.Protocol = remoteType
+	if remoteType == "ss" {
+		p.Time = currentTimeDiag()
+		if strings.TrimSpace(L.RemotePassword) == "" {
+			p.Status = "no"
+			p.Reason = "Shadowsocks 远端需填写密钥"
+			return p
+		}
+		normKey, msg := normalizeSS2022Key(L.RemoteMethod, L.RemotePassword)
+		if msg != "" {
+			p.Status = "no"
+			p.Reason = "远端 Shadowsocks 配置错误：" + msg
+			return p
+		}
+		L.RemotePassword = normKey
+	}
+	start := time.Now()
+	tcpTimeout := timeout / 3
+	if tcpTimeout < 500*time.Millisecond {
+		tcpTimeout = 500 * time.Millisecond
+	}
+	if tcpTimeout > 1500*time.Millisecond {
+		tcpTimeout = 1500 * time.Millisecond
+	}
+	conn, err := net.DialTimeout("tcp", p.Addr, tcpTimeout)
+	p.MS = time.Since(start).Milliseconds()
+	if err != nil {
+		p.Status = "no"
+		p.Reason = "远端 TCP 不可达：" + err.Error()
+		return p
+	}
+	_ = conn.Close()
+	if remoteType != "ss" {
+		p.Status = "yes"
+		p.Reason = "远端 TCP 可达"
+		return p
+	}
+	probeTimeout := timeout - time.Since(start)
+	if probeTimeout < time.Second {
+		probeTimeout = time.Second
+	}
+	ok, ms, reason := probeRemoteShadowsocksViaSingBox(L, probeTimeout)
+	p.MS += ms
+	if ok {
+		p.Status = "yes"
+		p.Reason = "远端 Shadowsocks 协议代理成功"
+		return p
+	}
+	p.Status = "no"
+	p.Reason = reason
+	if p.Reason == "" {
+		p.Reason = "远端 Shadowsocks 协议探测失败：请检查 method/password 是否一致、远端服务是否为 Shadowsocks、远端 SS2022 服务器时间是否已同步"
+	}
+	return p
+}
+
+func probeRemoteShadowsocksViaSingBox(L LandingService, timeout time.Duration) (bool, int64, string) {
+	if strings.TrimSpace(L.RemoteMethod) == "" {
+		L.RemoteMethod = "2022-blake3-aes-128-gcm"
+	}
+	singBox := "/usr/local/bin/sing-box"
+	if _, err := os.Stat(singBox); err != nil {
+		if alt, lookErr := exec.LookPath("sing-box"); lookErr == nil {
+			singBox = alt
+		} else {
+			return false, 0, "无法执行 sing-box 协议探测：未找到 sing-box 二进制"
+		}
+	}
+
+	port, err := pickLocalTCPPort()
+	if err != nil {
+		return false, 0, "无法分配本地临时检测端口：" + err.Error()
+	}
+	probeDir := "/etc/ansgo/probe-tmp"
+	if err := os.MkdirAll(probeDir, 0700); err != nil {
+		probeDir = ""
+	} else {
+		_ = os.Chmod(probeDir, 0700)
+		cleanupProbeTempDir(probeDir, 10*time.Minute)
+	}
+	tmp, err := os.CreateTemp(probeDir, "ansgo-ss-probe-*.json")
+	if err != nil {
+		return false, 0, "无法创建临时检测配置：" + err.Error()
+	}
+	_ = tmp.Chmod(0600)
+	cfgPath := tmp.Name()
+	defer os.Remove(cfgPath)
+	cfg := map[string]any{
+		"log":       map[string]any{"level": "warn"},
+		"inbounds":  []map[string]any{{"type": "mixed", "listen": "127.0.0.1", "listen_port": port}},
+		"outbounds": []map[string]any{{"type": "shadowsocks", "tag": "probe-ss-out", "server": L.RemoteHost, "server_port": L.RemotePort, "method": L.RemoteMethod, "password": L.RemotePassword}},
+	}
+	enc := json.NewEncoder(tmp)
+	if err := enc.Encode(cfg); err != nil {
+		tmp.Close()
+		return false, 0, "无法写入临时检测配置：" + err.Error()
+	}
+	_ = tmp.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, singBox, "run", "-c", cfgPath)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		return false, 0, "无法启动 sing-box 协议探测：" + err.Error()
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+	waitTimeout := timeout / 4
+	if waitTimeout < 500*time.Millisecond {
+		waitTimeout = 500 * time.Millisecond
+	}
+	if waitTimeout > 1500*time.Millisecond {
+		waitTimeout = 1500 * time.Millisecond
+	}
+	if !waitTCP("127.0.0.1", port, waitTimeout) {
+		return false, 0, "sing-box 临时检测客户端未能监听本地端口；日志：" + sanitizeProbeLog(out.String())
+	}
+	proxyURL, _ := url.Parse("http://127.0.0.1:" + strconv.Itoa(port))
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	return probeHTTPThroughClient(ctx, client, timeout, &out)
+}
+
+func probeHTTPThroughClient(ctx context.Context, client *http.Client, timeout time.Duration, logs *strings.Builder) (bool, int64, string) {
+	probeURLs := []string{
+		"http://cp.cloudflare.com/generate_204",
+		"https://www.cloudflare.com/cdn-cgi/trace",
+		"https://example.com/",
+	}
+	var lastErr string
+	startAll := time.Now()
+	deadline := time.Now().Add(timeout)
+	for _, probeURL := range probeURLs {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false, time.Since(startAll).Milliseconds(), classifySSProbeError(lastErr, logs.String())
+		}
+		if remaining > 1500*time.Millisecond {
+			remaining = 1500 * time.Millisecond
+		}
+		reqCtx, cancel := context.WithTimeout(ctx, remaining)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, probeURL, nil)
+		if err != nil {
+			cancel()
+			lastErr = err.Error()
+			continue
+		}
+		resp, err := client.Do(req)
+		cancel()
+		ms := time.Since(startAll).Milliseconds()
+		if err != nil {
+			lastErr = err.Error()
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			return true, ms, ""
+		}
+		lastErr = fmt.Sprintf("%s 返回 HTTP %d", probeURL, resp.StatusCode)
+	}
+	return false, time.Since(startAll).Milliseconds(), classifySSProbeError(lastErr, logs.String())
+}
+
+func classifySSProbeError(clientErr, logs string) string {
+	logs = sanitizeProbeLog(logs)
+	msg := clientErr + " " + logs
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "bad timestamp"):
+		return "远端 Shadowsocks 2022 时间戳校验失败：请同步远端服务器系统时间/NTP 后重试"
+	case strings.Contains(lower, "decode psk") || strings.Contains(lower, "bad key") || strings.Contains(lower, "decrypt") || strings.Contains(lower, "authentication"):
+		return "远端 Shadowsocks 协议认证/加密失败：请检查 method/password 是否与远端服务一致"
+	case strings.Contains(lower, "connection refused"):
+		return "远端端口拒绝连接：请检查远端服务是否监听、端口是否正确"
+	case strings.Contains(lower, "i/o timeout") || strings.Contains(lower, "timeout"):
+		return "远端 Shadowsocks 协议探测超时：请检查远端防火墙、网络连通性或远端出口"
+	default:
+		return "远端 Shadowsocks 协议探测失败：请检查 method/password 是否一致、远端服务是否为 Shadowsocks、远端 SS2022 服务器时间是否已同步；错误：" + strings.TrimSpace(clientErr)
+	}
+}
+
+func cleanupProbeTempDir(dir string, maxAge time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "ansgo-ss-probe-") || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil || info.ModTime().Before(cutoff) {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+func sanitizeProbeLog(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)("password"\s*:\s*")[^"]*(")`),
+		regexp.MustCompile(`(?i)(password\s*=\s*)\S+`),
+		regexp.MustCompile(`(?i)("remote_password"\s*:\s*")[^"]*(")`),
+	}
+	for _, re := range patterns {
+		s = re.ReplaceAllString(s, `${1}<redacted>${2}`)
+	}
+	if len(s) > 800 {
+		s = s[:800] + "..."
+	}
+	return s
+}
+
+func pickLocalTCPPort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+func waitTCP(host string, port int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
 // healthHandler 检测单个服务的运行状态：
 //  1. systemd 是否 active（systemctl is-active）
 //  2. 配置端口是否在 LISTEN（ss -tln）
@@ -1447,6 +1774,10 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var serviceTimeDiag *timeDiag
+	if b.Target == "ss" && strings.HasPrefix(c.SSMethod, "2022-") {
+		serviceTimeDiag = currentTimeDiag()
+	}
 	active := svcActive(info.unit)
 	portListening := "no"
 	if port := info.port; port != "" && port != "0" {
@@ -1469,15 +1800,13 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			tcpConnect = "yes"
 		}
 	}
-	landingRemote := "skip"
-	landingRemoteMs := int64(0)
-	landingRemoteAddr := ""
+	landingProbe := landingRemoteProbeDetail{Status: "skip"}
 	if landingForProbe != nil && info.enabled && active == "active" && portListening == "yes" && tcpConnect == "yes" {
-		landingRemote, landingRemoteMs = probeLandingRemote(*landingForProbe, 2*time.Second)
-		if landingForProbe.RemoteEnabled {
-			landingRemoteAddr = net.JoinHostPort(landingForProbe.RemoteHost, strconv.Itoa(landingForProbe.RemotePort))
-		}
+		landingProbe = probeLandingRemoteDetail(*landingForProbe, 4*time.Second)
 	}
+	landingRemote := landingProbe.Status
+	landingRemoteMs := landingProbe.MS
+	landingRemoteAddr := landingProbe.Addr
 	summary := "正常"
 	if !info.enabled {
 		summary = "服务未启用（请先在服务管理页安装）"
@@ -1488,9 +1817,17 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	} else if tcpConnect != "yes" {
 		summary = "端口监听但 TCP 握手失败（防火墙或服务异常）"
 	} else if landingForProbe != nil && landingForProbe.RemoteEnabled && landingRemote != "yes" {
-		summary = "本机落地入站正常，但远端落地出口不可达（" + landingRemoteAddr + "），请检查远端服务/防火墙/端口"
+		summary = "本机落地入站正常，但远端落地出口异常（" + landingRemoteAddr + "）：" + landingProbe.Reason
+	} else if landingForProbe != nil && landingForProbe.RemoteEnabled && landingProbe.Protocol == "ss" && landingProbe.Reason != "" {
+		summary = landingProbe.Reason + "；提示：时区只影响显示，Shadowsocks 2022 依赖系统时间/NTP 同步"
+	} else if b.Target == "ss" && serviceTimeDiag != nil && serviceTimeDiag.NTPSynchronized == "no" {
+		summary = "端口/TCP 正常；但 Shadowsocks 2022 依赖系统时间/NTP，当前显示未同步，如无法使用请先同步服务器时间"
 	}
-	jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "unit": info.unit, "enabled": info.enabled, "active": active, "port": info.port, "port_listening": portListening, "tcp_connect": tcpConnect, "tcp_ms": tcpMs, "landing_remote": landingRemote, "landing_remote_ms": landingRemoteMs, "landing_remote_addr": landingRemoteAddr, "summary": summary})
+	timeForResp := landingProbe.Time
+	if timeForResp == nil {
+		timeForResp = serviceTimeDiag
+	}
+	jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "unit": info.unit, "enabled": info.enabled, "active": active, "port": info.port, "port_listening": portListening, "tcp_connect": tcpConnect, "tcp_ms": tcpMs, "landing_remote": landingRemote, "landing_remote_ms": landingRemoteMs, "landing_remote_addr": landingRemoteAddr, "landing_remote_protocol": landingProbe.Protocol, "landing_remote_reason": landingProbe.Reason, "time_diag": timeForResp, "summary": summary})
 }
 
 // repairHandler 一键修复代理服务配置（v1.5.24）。
@@ -1934,6 +2271,14 @@ func validateLandingRemote(L *LandingService) string {
 	if !L.RemoteEnabled {
 		return ""
 	}
+	L.RemoteHost = strings.TrimSpace(L.RemoteHost)
+	L.RemoteType = strings.ToLower(strings.TrimSpace(L.RemoteType))
+	if L.RemoteType == "" {
+		L.RemoteType = "ss"
+	}
+	if strings.TrimSpace(L.RemoteMethod) == "" {
+		L.RemoteMethod = "2022-blake3-aes-128-gcm"
+	}
 	if L.RemoteHost == "" || L.RemotePort == 0 {
 		return "启用远端落地需填写 host/port"
 	}
@@ -1942,22 +2287,14 @@ func validateLandingRemote(L *LandingService) string {
 			return "SOCKS5 远端需填写用户名和密码"
 		}
 	} else { // ss（默认）
-		if L.RemoteType == "" {
-			L.RemoteType = "ss"
-		}
 		if L.RemotePassword == "" {
 			return "Shadowsocks 远端需填写密钥"
 		}
-		// SS2022 密钥长度校验（复用 validSS2022Key）
-		if strings.HasPrefix(L.RemoteMethod, "2022-blake3-aes-128") {
-			if !validSS2022Key(L.RemotePassword, 16) {
-				return "密钥长度错误：2022-blake3-aes-128-gcm 需 base64(16字节)=24字符的密钥"
-			}
-		} else if strings.HasPrefix(L.RemoteMethod, "2022-blake3-aes-256") {
-			if !validSS2022Key(L.RemotePassword, 32) {
-				return "密钥长度错误：2022-blake3-aes-256-gcm 需 base64(32字节)=44字符的密钥"
-			}
+		normKey, msg := normalizeSS2022Key(L.RemoteMethod, L.RemotePassword)
+		if msg != "" {
+			return msg
 		}
+		L.RemotePassword = normKey
 	}
 	return ""
 }

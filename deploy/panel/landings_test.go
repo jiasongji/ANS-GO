@@ -20,11 +20,11 @@ func TestLandingsConfig_LoadsArray(t *testing.T) {
   "url_path": "/admin/",
   "svc_ss_enabled": "false",
   "landings": [
-    {"id":"1","name":"香港落地","enabled":true,"port":30001,
-     "remote_enabled":true,"remote_type":"ss","remote_host":"1.2.3.4","remote_port":8388,
+    {"id":"1","name":"示例SS落地","enabled":true,"port":30001,
+     "remote_enabled":true,"remote_type":"ss","remote_host":"192.0.2.1","remote_port":8388,
      "remote_method":"2022-blake3-aes-128-gcm","remote_password":"AAAAAAAAAAAAAAAAAAAAAA==","remote_user":""},
-    {"id":"2","name":"日本SOCKS","enabled":true,"port":30002,
-     "remote_enabled":true,"remote_type":"socks","remote_host":"5.6.7.8","remote_port":1080,
+    {"id":"2","name":"示例SOCKS落地","enabled":true,"port":30002,
+     "remote_enabled":true,"remote_type":"socks","remote_host":"198.51.100.1","remote_port":1080,
      "remote_method":"","remote_password":"sockspass","remote_user":"socksuser"},
     {"id":"3","name":"直连落地","enabled":false,"port":30003,
      "remote_enabled":false,"remote_type":"ss","remote_host":"","remote_port":0,
@@ -43,10 +43,10 @@ func TestLandingsConfig_LoadsArray(t *testing.T) {
 	}
 	// 第1个：SS 远端
 	l1 := c.Landings[0]
-	if l1.ID != "1" || l1.Name != "香港落地" || !l1.Enabled || l1.Port != 30001 {
-		t.Errorf("landing[0] = %+v, want id=1 name=香港落地 enabled=true port=30001", l1)
+	if l1.ID != "1" || l1.Name != "示例SS落地" || !l1.Enabled || l1.Port != 30001 {
+		t.Errorf("landing[0] = %+v, want id=1 name=示例SS落地 enabled=true port=30001", l1)
 	}
-	if l1.RemoteType != "ss" || l1.RemoteHost != "1.2.3.4" || l1.RemoteMethod != "2022-blake3-aes-128-gcm" {
+	if l1.RemoteType != "ss" || l1.RemoteHost != "192.0.2.1" || l1.RemoteMethod != "2022-blake3-aes-128-gcm" {
 		t.Errorf("landing[0] remote mismatch: %+v", l1)
 	}
 	// 第2个：SOCKS5 远端
@@ -232,7 +232,7 @@ func TestLandingsSSKeyValidation(t *testing.T) {
 	// 正确长度（base64(16) = 24 字符）
 	good := &LandingService{
 		RemoteEnabled: true, RemoteType: "ss",
-		RemoteHost: "1.2.3.4", RemotePort: 8388,
+		RemoteHost: "192.0.2.1", RemotePort: 8388,
 		RemoteMethod:   "2022-blake3-aes-128-gcm",
 		RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA==", // 24 字符
 	}
@@ -243,15 +243,121 @@ func TestLandingsSSKeyValidation(t *testing.T) {
 	// 错误长度（太短）
 	bad := &LandingService{
 		RemoteEnabled: true, RemoteType: "ss",
-		RemoteHost: "1.2.3.4", RemotePort: 8388,
+		RemoteHost: "192.0.2.1", RemotePort: 8388,
 		RemoteMethod:   "2022-blake3-aes-128-gcm",
-		RemotePassword: "short", // 错误长度
+		RemotePassword: "c2hvcnQ=", // 合法 base64 但只有 5 字节
 	}
 	msg := validateLandingRemote(bad)
 	if msg == "" {
 		t.Errorf("错误长度 SS2022 密钥应被拒绝，但通过了校验")
 	}
-	t.Logf("短密钥被拒（符合预期）: %s", msg)
+	if !contains(msg, "当前解码后") {
+		t.Errorf("错误长度应给出详细字节数原因，got: %s", msg)
+	}
+
+	invalid := &LandingService{
+		RemoteEnabled: true, RemoteType: "ss",
+		RemoteHost: "192.0.2.1", RemotePort: 8388,
+		RemoteMethod:   "2022-blake3-aes-128-gcm",
+		RemotePassword: "ABCDEFGHIJKLMNOPQRST:",
+	}
+	if msg := validateLandingRemote(invalid); msg == "" || !contains(msg, "不是合法 base64") {
+		t.Errorf("非法 base64 应给出格式原因，got: %s", msg)
+	}
+
+	raw := &LandingService{
+		RemoteEnabled: true, RemoteType: "ss",
+		RemoteHost: "192.0.2.1", RemotePort: 8388,
+		RemoteMethod:   "2022-blake3-aes-128-gcm",
+		RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA",
+	}
+	if msg := validateLandingRemote(raw); msg != "" {
+		t.Errorf("可规范化 raw base64 不应被拒: %s", msg)
+	}
+	if raw.RemotePassword != "AAAAAAAAAAAAAAAAAAAAAA==" {
+		t.Errorf("落地 SS raw base64 应规范化为标准 base64，got %q", raw.RemotePassword)
+	}
+}
+
+func TestLandingRemoteProbeDetail_SSInvalidKeyIncludesReasonAndTime(t *testing.T) {
+	L := LandingService{
+		RemoteEnabled:  true,
+		RemoteType:     "ss",
+		RemoteHost:     "127.0.0.1",
+		RemotePort:     8388,
+		RemoteMethod:   "2022-blake3-aes-128-gcm",
+		RemotePassword: "ABCDEFGHIJKLMNOPQRST:",
+	}
+	p := probeLandingRemoteDetail(L, 100*time.Millisecond)
+	if p.Status != "no" || p.Protocol != "ss" {
+		t.Fatalf("非法 SS 配置应返回 no/ss，got status=%s protocol=%s", p.Status, p.Protocol)
+	}
+	if !contains(p.Reason, "不是合法 base64") {
+		t.Fatalf("应返回详细 base64 错误原因，got: %s", p.Reason)
+	}
+	if p.Time == nil || p.Time.NowLocal == "" || p.Time.NowUTC == "" || p.Time.Timezone == "" {
+		t.Fatalf("SS 失败诊断应包含当前时间/时区信息，got: %+v", p.Time)
+	}
+}
+
+func TestLandingRemoteProbeDetail_TCPFailureIncludesReason(t *testing.T) {
+	L := LandingService{RemoteEnabled: true, RemoteType: "ss", RemoteHost: "127.0.0.1", RemotePort: 1, RemoteMethod: "2022-blake3-aes-128-gcm", RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA=="}
+	p := probeLandingRemoteDetail(L, 50*time.Millisecond)
+	if p.Status != "no" || p.Reason == "" {
+		t.Fatalf("TCP 不可达应返回 no 且 reason 非空，got: %+v", p)
+	}
+	if p.Time == nil || p.Time.NowLocal == "" {
+		t.Fatalf("SS 远端失败应包含时间诊断，got: %+v", p.Time)
+	}
+}
+
+func TestClassifySSProbeError(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"shadowsocks: serve TCP: bad timestamp: diff 28800s", "时间戳校验失败"},
+		{"decode psk: illegal base64 data", "认证/加密失败"},
+		{"dial tcp 192.0.2.1:8388: i/o timeout", "探测超时"},
+	}
+	for _, tc := range cases {
+		if got := classifySSProbeError(tc.in, ""); !contains(got, tc.want) {
+			t.Fatalf("classifySSProbeError(%q)=%q, want contains %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestSanitizeProbeLogRedactsSensitiveFields(t *testing.T) {
+	log := `{"password":"secret-value","server":"127.0.0.1"} password=another-secret`
+	got := sanitizeProbeLog(log)
+	if contains(got, "secret-value") || contains(got, "another-secret") {
+		t.Fatalf("探测日志应脱敏 password，got: %s", got)
+	}
+	if !contains(got, "127.0.0.1") {
+		t.Fatalf("脱敏不应删除非敏感信息，got: %s", got)
+	}
+}
+
+func TestCleanupProbeTempDir(t *testing.T) {
+	dir := t.TempDir()
+	oldProbe := filepath.Join(dir, "ansgo-ss-probe-old.json")
+	freshProbe := filepath.Join(dir, "ansgo-ss-probe-new.json")
+	other := filepath.Join(dir, "keep.json")
+	for _, p := range []string{oldProbe, freshProbe, other} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-20 * time.Minute)
+	if err := os.Chtimes(oldProbe, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	cleanupProbeTempDir(dir, 10*time.Minute)
+	if _, err := os.Stat(oldProbe); !os.IsNotExist(err) {
+		t.Fatalf("过期 probe 临时文件应被清理，stat err=%v", err)
+	}
+	for _, p := range []string{freshProbe, other} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("不应清理 %s: %v", p, err)
+		}
+	}
 }
 
 // TestLandingsSocksValidation 验证 SOCKS5 远端必须有 user+password。
@@ -259,7 +365,7 @@ func TestLandingsSocksValidation(t *testing.T) {
 	// 缺用户名
 	missingUser := &LandingService{
 		RemoteEnabled: true, RemoteType: "socks",
-		RemoteHost: "5.6.7.8", RemotePort: 1080,
+		RemoteHost: "198.51.100.1", RemotePort: 1080,
 		RemoteUser: "", RemotePassword: "pass",
 	}
 	if msg := validateLandingRemote(missingUser); msg == "" {
@@ -268,7 +374,7 @@ func TestLandingsSocksValidation(t *testing.T) {
 	// 完整
 	good := &LandingService{
 		RemoteEnabled: true, RemoteType: "socks",
-		RemoteHost: "5.6.7.8", RemotePort: 1080,
+		RemoteHost: "198.51.100.1", RemotePort: 1080,
 		RemoteUser: "user", RemotePassword: "pass",
 	}
 	if msg := validateLandingRemote(good); msg != "" {
@@ -382,7 +488,7 @@ func TestBuildURIs_Landings(t *testing.T) {
 // TestSanitizeLandingName 验证落地名称做 URL fragment 安全处理。
 func TestSanitizeLandingName(t *testing.T) {
 	cases := map[string]string{
-		"香港落地":       "香港落地",       // 中文保留
+		"示例SS落地":     "示例SS落地",     // 中文保留
 		"HK Landing": "HK_Landing", // 空格 -> _
 		"":           "unnamed",    // 空 -> unnamed
 		"a#b?c/d":    "a_b_c_d",    // 特殊字符 -> _
