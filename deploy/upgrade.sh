@@ -510,10 +510,14 @@ PY
     err "ansgo-panel: $panel_active（非 active！请检查 journalctl -u ansgo-panel）"
   fi
 
-  # 版本号验证（panel 无 -version flag，从启动日志读）
-  local logged_ver
-  logged_ver=$(journalctl -u ansgo-panel -n 20 --no-pager 2>/dev/null \
-    | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
+  # 版本号验证（panel 无 -version flag，从启动日志读；restart 后面板启动要几秒，轮询）
+  local logged_ver="" vi
+  for vi in $(seq 1 10); do
+    logged_ver=$(journalctl -u ansgo-panel -n 20 --no-pager 2>/dev/null \
+      | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
+    [ -n "$logged_ver" ] && break
+    sleep 1
+  done
   if [ -n "$logged_ver" ]; then
     if [ "$logged_ver" = "$VER" ]; then
       ok "面板版本: ${logged_ver}（目标 ${VER} ✓）"
@@ -625,9 +629,10 @@ upgrade_docker(){
     err "未发现运行中的 ansgo 容器（docker ps -a 检查）"
   fi
 
-  # 版本号验证（从容器日志读；容器刚重建，日志可能要几秒才输出面板启动行）
+  # 版本号验证（从容器日志读；容器重建后 systemd 要拉起 caddy→sing-box→ansgo-panel，
+  # 面板启动行可能十几秒才输出，轮询最多 30 秒）
   local logged_ver="" vi
-  for vi in 1 2 3 4 5; do
+  for vi in $(seq 1 15); do
     sleep 2
     logged_ver=$(docker logs ansgo 2>&1 | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' \
       | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
