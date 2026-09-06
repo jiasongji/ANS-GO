@@ -8,11 +8,11 @@
 #           bash install.sh --uninstall --purge   # 彻底删除配置/卷/镜像
 #
 # 所有资源取自本仓库 GitHub / 官方上游：
-#   脚本/源码    -> raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/
-#   面板二进制    -> github.com/jiasongji/ANS-GO/releases/download/$VER/ansgo-panel-linux-<arch>
+#   脚本/源码    -> raw.githubusercontent.com/6667084/ANS-GO/main/deploy/
+#   面板二进制    -> github.com/6667084/ANS-GO/releases/download/$VER/ansgo-panel-linux-<arch>
 #   sing-box      -> SagerNet 官方 release（多架构）
 #   caddy(naive) -> klzgrad/forwardproxy 源码 + xcaddy 编译（Docker 内）或本项目预编译产物
-#   面板镜像      -> ghcr.io/jiasongji/ansgo（all-in-one，--docker 模式）
+#   面板镜像      -> ghcr.io/6667084/ansgo（all-in-one，--docker 模式）
 #
 # 适用于 Debian 11/12（含 LXC），需 root。
 # =============================================================================
@@ -77,7 +77,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
   printf '%s' "$line"
 }
 
-REPO="jiasongji/ANS-GO"
+REPO="6667084/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
 VER="v1.5.36"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.36：Docker 资源约束 + caddy 资产兜底 + 证书状态误判修复）
@@ -395,7 +395,9 @@ do_uninstall(){
           | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme)$|_ansgo_(etc|ssl|caddy|sb|acme)$' \
           | xargs -r docker volume rm 2>/dev/null || true
         log "[Docker] 删除本地镜像（容器已删，镜像可安全移除）..."
-        docker image rm ghcr.io/jiasongji/ansgo:latest 2>/dev/null || true
+        docker image rm ghcr.io/6667084/ansgo:latest 2>/dev/null || true
+        docker image rm ghcr.io/6667084/ansgo-panel:latest 2>/dev/null || true
+        docker image rm ghcr.io/jiasongji/ansgo:latest 2>/dev/null || true   # 旧用户名命名空间（改名前部署）
         docker image rm ghcr.io/jiasongji/ansgo-panel:latest 2>/dev/null || true
       fi
     else
@@ -603,7 +605,7 @@ EOF
   log "使用 compose 命令: $COMPOSE ($($COMPOSE version --short 2>/dev/null || echo unknown))"
 
   # 拉镜像：优先 compose pull；失败再用 docker pull 兜底（绕过 compose 自身问题）
-  #   v1.5.10 已发布公开镜像 ghcr.io/jiasongji/ansgo:latest（amd64+arm64）
+  #   v1.5.10 已发布公开镜像 ghcr.io/6667084/ansgo:latest（amd64+arm64）
   IMG="ghcr.io/${REPO%/*}/ansgo:latest"
   if ! $COMPOSE pull 2>&1 | tail -5; then
     warn "$COMPOSE pull 失败，尝试直接 docker pull $IMG 兜底"

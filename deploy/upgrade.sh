@@ -6,7 +6,7 @@
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
 #
 # 用法：
-#   curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash
 #   bash upgrade.sh [--docker | --metal] [--ver v1.5.25] [--yes]
 #
 # 设计要点（与 install.sh / ansgo-admin 保持一致）：
@@ -49,7 +49,7 @@ if [ -n "${_ANSGO_UPGRADE_BOOTSTRAP_TMP:-}" ] && [ -f "$_ANSGO_UPGRADE_BOOTSTRAP
 fi
 
 # ---- 版本号与资源源（与 install.sh 顶部一致）----
-REPO="jiasongji/ANS-GO"
+REPO="6667084/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
 VER="v1.5.36"         # 升级目标版本（发新版只改这一行）
@@ -151,7 +151,7 @@ usage(){ cat <<EOF
   --help, -h      显示本帮助
 
 示例:
-  curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash
   bash upgrade.sh --metal --yes
   bash upgrade.sh --docker --yes
 
@@ -699,7 +699,7 @@ upgrade_docker(){
   printf '  %b⚠️ 浏览器需硬刷新才能看到新界面%b（面板前端内嵌在二进制里，升级后必须清缓存）：\n' "$C_Y" "$C_0"
   echo "    Windows/Linux: Ctrl+Shift+R   |   macOS: Cmd+Shift+R   |   或无痕窗口打开面板"
   echo
-  echo "  回滚: 编辑 ${DOCKER_COMPOSE_FILE}，把 image: ghcr.io/jiasongji/ansgo:latest"
+  echo "  回滚: 编辑 ${DOCKER_COMPOSE_FILE}，把 image: ghcr.io/6667084/ansgo:latest"
   echo "        改成 :v1.5.15（或上一版），再 docker compose up -d"
 }
 

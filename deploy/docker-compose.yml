@@ -22,7 +22,7 @@
 # =============================================================================
 services:
   ansgo:
-    image: ghcr.io/jiasongji/ansgo:latest
+    image: ghcr.io/6667084/ansgo:latest
     # 本地构建（无 ghcr 镜像时取消注释，并把 image 改为 build）：
     # build:
     #   context: ..
