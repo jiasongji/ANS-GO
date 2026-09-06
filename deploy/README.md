@@ -39,8 +39,8 @@
 | `ansgo-admin` | `/usr/local/bin/` | 离线管理脚本（面板全挂也能 SSH 管理一切）|
 | `ansgo-panel.service` | `/etc/systemd/system/` | 面板 systemd unit |
 | `systemd/{sing-box,caddy}.service` | `/etc/systemd/system/` | 代理服务 unit |
-| `Dockerfile.allinone` / `docker-compose.yml` / `docker/entrypoint.sh` | — | ⭐ all-in-one 一体化镜像（sing-box+caddy+面板+systemd，→ `ghcr.io/jiasongji/ansgo`）|
-| `Dockerfile` | — | 面板单镜像构建（仅面板，兼容用 → `ghcr.io/jiasongji/ansgo-panel`）|
+| `Dockerfile.allinone` / `docker-compose.yml` / `docker/entrypoint.sh` | — | ⭐ all-in-one 一体化镜像（sing-box+caddy+面板+systemd，→ `ghcr.io/6667084/ansgo`）|
+| `Dockerfile` | — | 面板单镜像构建（仅面板，兼容用 → `ghcr.io/6667084/ansgo-panel`）|
 | `panel/` | 本地交叉编译 | Go 面板源码 |
 
 ---
@@ -50,13 +50,13 @@
 **交互式**（逐项确认，推荐首次使用）：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh)
 ```
 
 **带参数一键**（CI / 自动化，v1.5.12 起端口默认随机）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com --dynu-key <KEY> --email you@example.com --non-interactive
 ```
 
@@ -66,7 +66,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 ## Docker 一体化部署
 
-`install.sh --docker` 自动装 docker、生成 `ansgo.env`（凭证，600 权限）+ `docker-compose.yml`、拉 `ghcr.io/jiasongji/ansgo:latest`，`docker compose up -d` 拉起单容器：
+`install.sh --docker` 自动装 docker、生成 `ansgo.env`（凭证，600 权限）+ `docker-compose.yml`、拉 `ghcr.io/6667084/ansgo:latest`，`docker compose up -d` 拉起单容器：
 
 - 容器内 **systemd 作 PID 1**，复用裸金属全部 unit / 脚本 / 面板代码（systemctl / journalctl / ansgo-admin 原生可用，**面板 0 改动**）
 - **host 网络 + privileged + cgroup:host**，代理端口 / 面板端口直连宿主
@@ -76,7 +76,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 **部署命令**：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com --dynu-key <KEY> --docker --non-interactive
 ```
 
@@ -91,7 +91,7 @@ docker restart ansgo                                    # 重启容器
 docker compose pull && docker compose up -d             # 升级镜像
 ```
 
-> 手动构建镜像：`docker build -t ghcr.io/jiasongji/ansgo:latest -f deploy/Dockerfile.allinone .`（国内需配 `HTTPS_PROXY`）。多架构构建命令见下文 [Docker 镜像构建](#docker-镜像构建)。
+> 手动构建镜像：`docker build -t ghcr.io/6667084/ansgo:latest -f deploy/Dockerfile.allinone .`（国内需配 `HTTPS_PROXY`）。多架构构建命令见下文 [Docker 镜像构建](#docker-镜像构建)。
 
 ---
 
@@ -139,7 +139,7 @@ systemctl restart systemd-journald
 ```bash
 mkdir -p /etc/ansgo /etc/ansgo-deploy /etc/sing-box /etc/caddy /var/www/html
 for f in ansgo-admin ansgo-genconf ansgo-cert-reload ansgo-cert-issue.sh dns_dynukey.sh; do
-  curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/$f -o /etc/ansgo-deploy/$f
+  curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/$f -o /etc/ansgo-deploy/$f
 done
 install -m 0755 /etc/ansgo-deploy/ansgo-admin       /usr/local/bin/ansgo-admin
 install -m 0755 /etc/ansgo-deploy/ansgo-genconf     /usr/local/bin/ansgo-genconf
@@ -156,7 +156,7 @@ install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
 
 # caddy-naive：本项目 release 预编译产物（推荐）
 VER=v1.5.17
-curl -fsSL https://github.com/jiasongji/ANS-GO/releases/download/${VER}/caddy-naive-linux-${ARCH} -o /usr/local/bin/caddy
+curl -fsSL https://github.com/6667084/ANS-GO/releases/download/${VER}/caddy-naive-linux-${ARCH} -o /usr/local/bin/caddy
 chmod 0755 /usr/local/bin/caddy
 # 失败则现场 xcaddy 编译（需 Go 1.22+ + git，约 3-5 分钟）：
 #   go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
@@ -258,7 +258,7 @@ ansgo-genconf all && ansgo-genconf validate
 ```bash
 # 装 sing-box / caddy unit
 for s in sing-box caddy; do
-  curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/systemd/$s.service \
+  curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/systemd/$s.service \
     -o /etc/systemd/system/$s.service
 done
 systemctl daemon-reload
@@ -276,7 +276,7 @@ install -m 0755 ansgo-panel /usr/local/bin/ansgo-panel
 PW=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
 /usr/local/bin/ansgo-panel -setpass "$PW" && echo "面板密码: $PW"
 
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/ansgo-panel.service \
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/ansgo-panel.service \
   -o /etc/systemd/system/ansgo-panel.service
 systemctl daemon-reload
 systemctl enable --now ansgo-panel
@@ -326,7 +326,7 @@ ssh root@<server> 'systemctl start ansgo-panel'
 ### 单架构本地构建
 
 ```bash
-docker build -t ghcr.io/jiasongji/ansgo:latest -f deploy/Dockerfile.allinone .
+docker build -t ghcr.io/6667084/ansgo:latest -f deploy/Dockerfile.allinone .
 ```
 
 ### 多架构构建 + 推送 ghcr.io（开发机执行）
@@ -342,8 +342,8 @@ docker buildx build --builder ansgo-builder \
   --platform linux/amd64,linux/arm64 \
   --build-arg HTTP_PROXY=http://host.docker.internal:1666 \
   --build-arg HTTPS_PROXY=http://host.docker.internal:1666 \
-  -t ghcr.io/jiasongji/ansgo:latest \
-  -t ghcr.io/jiasongji/ansgo:v1.5.17 \
+  -t ghcr.io/6667084/ansgo:latest \
+  -t ghcr.io/6667084/ansgo:v1.5.17 \
   -f deploy/Dockerfile.allinone . --push
 ```
 
@@ -363,7 +363,7 @@ docker buildx build --builder ansgo-builder \
 
 ```bash
 # 在已部署的服务器上执行（root），自动识别裸金属/Docker
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrade.sh | bash
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash
 
 # 或加参数
 bash upgrade.sh --yes        # 跳过确认（自动化）
@@ -374,7 +374,7 @@ bash upgrade.sh --help       # 查看用法
 
 **两种形态各自做了什么：**
 
-| | 裸金属（LXC / systemd 直管） | Docker（`ghcr.io/jiasongji/ansgo`） |
+| | 裸金属（LXC / systemd 直管） | Docker（`ghcr.io/6667084/ansgo`） |
 |---|---|---|
 | **更新内容** | ① 更新 `ansgo-genconf` + `ansgo-admin` 脚本 ② 更新 `ansgo-panel` 二进制（md5 对比，相同则跳过）③ 补 `panel.json` 字段（`socks_port`/`svc_socks_enabled`/`panel_title`）④ 补 `secrets.env` 凭证 | 只拉新镜像重建容器（配置在 volume 里，不丢） |
 | **影响范围** | 仅重启 `ansgo-panel`（~2s），代理服务不动 | 重建容器，三服务短暂中断几秒 |
@@ -389,7 +389,7 @@ bash upgrade.sh --help       # 查看用法
 ### 重新部署（配置保留）
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh)
 # 已存在的 panel.json / secrets.env 会被保留
 ```
 
@@ -445,12 +445,12 @@ bash install.sh --uninstall --purge
 
 ## 资源来源（全部自有 GitHub）
 
-- 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
+- 脚本/源码：`raw.githubusercontent.com/6667084/ANS-GO/main/deploy/...`
 - sing-box：**SagerNet 官方 release**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/...`），本项目 release vendored 兜底
 - caddy-naive：本项目 release 预编译产物（双架构），失败回退 xcaddy 现场编译
-- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/v1.5.17/ansgo-panel-linux-<arch>`
+- ansgo-panel 二进制：`github.com/6667084/ANS-GO/releases/download/v1.5.17/ansgo-panel-linux-<arch>`
 - acme.sh：本仓库 vendored 快照（可选），或官方 `https://get.acme.sh`
-- 面板镜像：`ghcr.io/jiasongji/ansgo:latest`（all-in-one）/ `ghcr.io/jiasongji/ansgo-panel:latest`（面板单镜像）
+- 面板镜像：`ghcr.io/6667084/ansgo:latest`（all-in-one）/ `ghcr.io/6667084/ansgo-panel:latest`（面板单镜像）
 
 > ⚠️ **release 资产维护**：每次发新版本 release 必须上传全部 6 个资产（`ansgo-panel-linux-{amd64,arm64}` + `caddy-naive-linux-{amd64,arm64}` + `sing-box-linux-{amd64,arm64}.tar.gz`）。
 
