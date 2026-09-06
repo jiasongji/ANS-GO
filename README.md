@@ -2,17 +2,18 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.35-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.36-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
-> ℹ️ 当前版本重点：健康检测新增 Shadowsocks/落地远端协议级诊断与 SS2022 时间/NTP 提示；NaiveProxy / SOCKS5 仍不参与远端落地，只有「落地服务」可配置远端出口。
+> ℹ️ 当前版本重点（v1.5.36）：Docker 容器内存/资源约束（防长跑失控拖垮宿主）+ 裸金属全新部署 caddy 资产断供根治 + 证书签发状态误判修复。详见 [版本历史](#-版本历史)。
 
 ---
 
 ## 📚 目录
 
 - [🚀 快速开始（30 秒看完）](#-快速开始30-秒看完)
+- [✨ 核心特性](#-核心特性)
 - [🆕 全新安装](#-全新安装)
   - [方式 1：交互式安装（推荐首次使用）](#方式-1交互式安装推荐首次使用)
   - [方式 2：裸金属一键安装（LXC / 低配 256MB 推荐）](#方式-2裸金属一键安装lxc--低配-256mb-推荐)
@@ -23,9 +24,9 @@
 - [🗑 卸载 / 彻底卸载 / 清理](#-卸载--彻底卸载--清理)
 - [📖 部署后使用指南](#-部署后使用指南)
 - [🛠 故障排查](#-故障排查)
-- [✨ 特性](#-特性)
 - [🏗 架构](#-架构)
 - [📁 仓库结构](#-仓库结构)
+- [📜 版本历史](#-版本历史)
 - [🔒 安全声明](#-安全声明)
 
 ---
@@ -54,6 +55,23 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh | 
 ```
 
 > 所有资源取自本仓库 GitHub（脚本/源码走 raw，二进制走 Releases，镜像走 ghcr.io），不依赖第三方 CDN。需 root，支持 Debian 11/12 / Ubuntu（含 LXC、KVM）。
+
+---
+
+## ✨ 核心特性
+
+- **多协议代理**：Shadowsocks-2022 / AnyTLS / SOCKS5（sing-box 三 inbound）+ NaiveProxy（caddy forwardproxy-naive 分支，含 padding 与反探测），面板内按需安装/卸载
+- **面板优先架构**：install.sh 只装面板 + 证书 + :443 伪装站；代理服务登录面板后按需启用，不装不占端口
+- **Web 管理面板**：Go 单二进制（~15-20MB 运行内存），中文 UI，管全部协议参数 / 端口 / 证书 / 服务启停 + 节点二维码 + 协议级健康检测（端口 LISTEN + TCP 握手 + 真实协议链路诊断）
+- **双部署形态**：裸金属（LXC / 256MB 低配，systemd 直管三进程）/ Docker 一体化（KVM，单容器 all-in-one），面板代码 0 差异
+- **资源约束（v1.5.36）**：Docker 形态自带内存/swap/进程数/日志轮转硬限制，按宿主内存自动计算，泄漏失控只 OOM 容器自愈重启，不再拖垮整机
+- **一张证书共享**：acme.sh + Dynu DNS-01 全自动签发（60 天续期），或手动引用已有证书（nginx/宝塔签发的直接用）；caddy / sing-box / 面板三服务共享
+- **多落地中转架构**：可创建多个落地服务（AnyTLS 入站），各自可选 SS/SOCKS5 远端出口（隐藏中转 IP）；落地机一键部署独立 ss-server
+- **域名双伪装**：`:443` 纯反代伪装站 + naive 端口独立伪装，probe_resistance 反探测，两个伪装站点面板内可配
+- **完全解耦**：caddy / sing-box / 面板三个独立进程，改协议端口永远不会断面板；所有配置变更走「生成 → validate 预检 → 重启 → 验证 active」同步事务
+- **离线兜底**：`ansgo-admin` bash 脚本零依赖，面板全挂也能 SSH 管理一切；一键升级自动识别形态 + 自动备份 + 回滚指引
+- **nginx 共存**：`--no-caddy` 模式让已装 nginx/宝塔的服务器无缝接入
+- **安全**：管理员密码 bcrypt、按 IP 登录锁定、会话超时、随机 URL 路径、全程 TLS、密钥/凭证文件 600 权限
 
 ---
 
@@ -211,6 +229,22 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 >
 > **v1.5.6+ 已发布公开镜像 `ghcr.io/jiasongji/ansgo:latest`（amd64+arm64 双架构，312MB）**，正常网络下 `docker compose pull` 直接成功，无需本地构建。需 `privileged` + host 网络（脚本已自动配置）。
 
+<details>
+<summary>🛡 容器资源约束（v1.5.36，防长跑卡死宿主）</summary>
+
+v1.5.36 起 Docker 部署的 `docker-compose.yml` 自带资源硬限制，解决「长期运行内存耗尽 → 宿主整机卡死只能强制重启」的问题：
+
+| 限制项 | 默认值 | 作用 |
+|--------|--------|------|
+| `mem_limit` | 按宿主内存自动：≤1G 宿主取 70%，>1G 取 512m（`--docker-mem` 可覆盖）| 容器内存硬顶；失控泄漏被 cgroup 拦住 |
+| `memswap_limit` | mem_limit + 256m | 内存+swap 总顶，留缓冲防过早 OOM |
+| `pids_limit` | 512 | 防 fork 炸弹（正常业务约 30-60 进程）|
+| `logging` | json-file 10m × 3 | 日志轮转，防写满小盘 |
+
+常驻内存约 50-105MiB，限制留有 3-5 倍余量；真顶到限时**只 OOM 容器内进程**，`restart: unless-stopped` 自动重启自愈，宿主整机不受影响。已手动调过限制的部署（`mem_limit` 已存在）升级时**保留不覆盖**。
+
+</details>
+
 **Docker 管理常用命令**：
 
 ```bash
@@ -252,9 +286,9 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
   | bash -s -- --landing --port 8388 --non-interactive
 ```
 
-落地机 SS 信息（host / port / method / password）随后填入中转机面板**「落地服务」页**下半部分的「远端 SS 落地服务器」。
+落地机 SS/SOCKS5 信息（host / port / method / password 或 user / password）随后填入中转机面板**「落地服务」页**对应落地卡片的「远端落地出口」区。
 
-> ℹ️ **落地服务仅支持 AnyTLS-2 → 远端 SS**（隐藏中转 IP）。NaiveProxy 保留为普通可选代理服务，但**不参与任何远端落地**（caddy 与 sing-box 是两个独立进程，跨进程路由不可行）。
+> ℹ️ **落地服务 = 本机 AnyTLS 入站 + 可选远端出口**（可创建多个，v1.5.26 起）。远端出口支持 SS / SOCKS5 二选一，隐藏中转 IP。NaiveProxy / 第一组 SOCKS5 不参与远端落地（caddy 与 sing-box 是两个独立进程，跨进程路由不可行）。远端字段填写齐全并校验通过时**自动启用远端出口**（v1.5.35）。
 
 ---
 
@@ -288,6 +322,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 | `--cert-fullchain` | — | manual 模式：证书文件完整绝对路径 ⭐ v1.5.0 |
 | `--cert-privkey` | — | manual 模式：私钥文件完整绝对路径 ⭐ v1.5.0 |
 | `--docker` | 关 | Docker 一体化形态（KVM 用；否则裸金属）|
+| `--docker-mem` | 自动 | Docker 容器内存硬限制，单位 MB（默认按宿主内存自动：≤1G 宿主取 70%，>1G 取 512）⭐ v1.5.36 |
 | `--no-caddy` | 关 | 不部署 caddy 的 80/443（让已装 nginx/宝塔接管）⭐ v1.5.6 |
 | `--non-interactive` | 关 | 非交互模式，缺必填项报错退出（CI / 自动化）|
 | `--force-bin` | 关 | 强制重装 sing-box/caddy 二进制（已装则跳过）|
@@ -326,7 +361,7 @@ bash upgrade.sh --help       # 查看用法
 
 | | 裸金属（LXC / systemd 直管） | Docker（`ghcr.io/jiasongji/ansgo`） |
 |---|---|---|
-| **更新内容** | ① 更新 `ansgo-genconf` + `ansgo-admin` 脚本（SOCKS5 生成逻辑）② 更新 `ansgo-panel` 二进制（md5 对比，相同则跳过）③ 补 `panel.json` 字段（`socks_port`/`svc_socks_enabled`/`panel_title`）④ 补 `secrets.env` 凭证（`SOCKS_USER`/`SOCKS_PASS`）| 只拉新镜像重建容器（配置在 volume 里，不丢） |
+| **更新内容** | ① 更新 `ansgo-genconf` + `ansgo-admin` 脚本 ② 更新 `ansgo-panel` 二进制（md5 对比，相同则跳过）③ 补 `panel.json` 字段 + 多落地迁移 ④ 补 `secrets.env` 凭证（SS2022 密钥规范化）| ① 幂等补 compose 资源约束（v1.5.36，已有 mem_limit 则保留不覆盖）② 拉新镜像重建容器（配置在 volume 里，不丢） |
 | **影响范围** | 仅重启 `ansgo-panel`（~2s），代理服务（sing-box/caddy）不动 | 重建容器，三服务短暂中断几秒 |
 | **自动备份** | `/etc/ansgo-backup-upgrade-{时间戳}/` | compose 目录下 `ansgo-etc-vol-backup-{时间戳}.tgz` |
 
@@ -555,7 +590,17 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 
 ---
 
-## ✨ 特性
+## 📜 版本历史
+
+### v1.5.36 Docker 资源约束 + 裸金属部署根治 ⭐
+
+- **【修复】Docker 长跑卡死宿主**：旧版 compose 无任何资源限制，内存泄漏或进程失控会耗尽宿主内存（实测 464M VPS 长期运行后整机卡死，只能强制重启）。现在 `docker-compose.yml` 自带 `mem_limit`（按宿主内存自动计算，`--docker-mem` 可覆盖）/ `memswap_limit` / `pids_limit=512` / 日志 json-file 10m×3 轮转；失控只 OOM 容器自愈重启。已部署服务器跑 `upgrade.sh` 自动幂等补上（已手动调过限制的保留不覆盖）
+- **【修复】裸金属全新部署必败（caddy 资产断供）**：v1.5.17 起的 GitHub release 漏传 `caddy-naive-linux-{amd64,arm64}` 预编译资产（v1.5.16 是最后一个带此资产的版本），全新裸金属部署下载 caddy 必 404 → 回退 xcaddy 现场编译 → 在 256MB 内存 / 3.86GB 磁盘的目标机上必败。修复：install.sh 增加 v1.5.16 vendored 兜底下载源（二进制无版本耦合），并从 v1.5.36 起 release 资产清单恢复 6 件套齐全
+- **【修复】证书签发状态误判**：`ansgo-cert-issue.sh` 启动时不清旧 `/etc/ansgo-cert.status`，重部署 acme 模式时轮询立即读到上次残留的结果（旧 SUCCESS → 假成功）。现在签发前双端清除旧状态文件
+- **【修复】杂项**：install.sh 步骤编号 5/7~7/7 与 1/8~4/8 不一致；caddy 启动失败静默无提示（现在给出 journalctl/validate 排查指引）；Docker entrypoint 首次生成的 panel.json 缺 `landings` 字段（与裸金属路径对齐）
+
+<details>
+<summary>📦 v1.5.17 ~ v1.5.35 版本历史（点击展开）</summary>
 
 ### v1.5.35 多落地服务「第二个落地不走远端出口 / 检测不测远端协议」根治 ⭐
 
@@ -642,12 +687,12 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 - **【优化】操作按钮集中一行自适应**：每张服务卡底部操作行 `[💾应用][▶️启动/⏹停止][🔄重启][📤卸载][🔍检测]`，按可用性自适应（未安装只显示 `[📥安装]`）。「💾应用」串行调既有 portHandler+keyHandler 一次保存端口+密钥（零新增 API 端点）
 - 详见 [v1.5.18 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.18)
 
-### v1.5.17 最新修复 ⭐
+### v1.5.17 Docker manual 证书模式根治 ⭐
 
 - **【Bug修复】Docker manual 证书模式三根因根治**：① 面板证书页不再误显示「acme 自动签发」（entrypoint 保持 `cert_mode=manual` + 证书路径指向卷内 644 副本）；② `sing-box.service`/`caddy.service` 加回 `CAP_DAC_READ_SEARCH`，修掉 capability 收窄后 root 读不了宿主 `600` 证书目录致服务全挂（任何改服务/端口/落地都会触发）；③ 版本号 `vv1.5.16` 双 v 修正
 - 详见 [v1.5.17 release notes](https://github.com/jiasongji/ANS-GO/releases/tag/v1.5.17)
 
-### v1.5.16 最新特性
+### v1.5.16 SOCKS5 + 自定义标题
 
 - **【新功能】SOCKS5 支持**：sing-box 第三个 inbound，强制用户名/密码鉴权，面板可安装/卸载/改端口/改凭证/生成 URI/健康检测
 - **【新功能】面板自定义网页标题**：面板设置页可自定义浏览器标签标题，刷新后立即生效
@@ -661,20 +706,7 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 - **v1.5.13**：根治「重新部署后面板看不到」——ghcr.io 镜像二进制固化滞后问题；`main.go` version 改 `-ldflags` 构建时注入
 - **v1.5.12**：节点信息页重构（未启用不显示 + 分行复制）+ 落地服务合并页 + 端口全部随机生成 + 服务健康检测（systemd + 端口监听 + TCP 握手三合一）
 
-### 核心特性
-
-- **面板优先架构**：install.sh 只装面板 + 证书 + :443 伪装站；代理服务面板内按需启用（不装不占端口）
-- **多协议代理**：Shadowsocks-2022 / AnyTLS / SOCKS5（sing-box 三 inbound）+ NaiveProxy（caddy forwardproxy-naive 分支），均可面板内安装/卸载
-- **Web 管理面板**：Go 单二进制（~15-20MB 运行内存），中文 UI，管全部协议参数 / 端口 / 证书 / 服务安装卸载 + 客户端二维码 + **自定义网页标题**
-- **一张证书共享**：acme.sh 自动签发 或 手动指定已有证书；caddy / sing-box / 面板三服务共享
-- **域名双伪装**：`:443` 纯反代伪装站 + naive 端口独立伪装；两个伪装站点均可在 Web 后台独立配置
-- **落地服务 + 链式出站**：仅 AnyTLS-2 经 SS 走另一台落地服务器（隐藏中转 IP）；NaiveProxy / SOCKS5 不参与落地
-- **完全解耦**：caddy / sing-box / 面板三个独立进程、端口、systemd unit，**改协议端口永远不会断面板**
-- **离线兜底**：`ansgo-admin` bash 脚本零依赖，面板全挂也能 SSH 管理一切
-- **一键升级**：`upgrade.sh` 已部署服务器跨版本升级，自动识别裸金属/Docker，自动备份 + 补全新功能配置字段
-- **nginx 共存模式**：`--no-caddy` 让 caddy 不监听 80/443，已装 nginx/宝塔的服务器可共存
-- **暗黑/白天双主题 + 移动端自适应**：左侧可折叠侧边栏（桌面折叠 + 移动端抽屉，localStorage 记忆）
-- **安全**：管理员密码 bcrypt、按 IP 登录锁定、8 小时会话、随机 URL 路径、全程 TLS
+</details>
 
 ---
 

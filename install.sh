@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.34
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.36
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.35"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.35，多落地远端自动启用修复）
+VER="v1.5.36"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.36：Docker 资源约束 + caddy 资产兜底 + 证书状态误判修复）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -100,6 +100,9 @@ CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
 # 各服务密码/密钥（v1.5.5 新增；留空则部署时自动随机生成）
 SS_PASSWORD="" ANYTLS_PASSWORD="" ANYTLS_UUID_IN="" SOCKS_USER_IN="" SOCKS_PASSWORD="" NAIVE_USER_IN="" NAIVE_PASSWORD=""
 PANEL_PASSWORD_IN="" URL_PATH_IN=""
+# v1.5.36: Docker 容器内存硬限制（MB，整数）。留空则部署时按宿主内存自动计算：
+#   宿主 ≤1G → MemTotal*70%；宿主 >1G → 512m。memswap 自动 = mem_limit + 256m。
+DOCKER_MEM_IN=""
 NONINT=0 DOCKER=0 FORCE_BIN=0 UNINSTALL=0 PURGE=0 LANDING=0 NO_CADDY=0
 LANDING_ARGS=()
 
@@ -148,6 +151,7 @@ usage(){ cat <<EOF
   --cert-fullchain PATH    manual 模式：证书文件完整绝对路径（如 /etc/letsencrypt/live/x.com/fullchain.pem）
   --cert-privkey PATH      manual 模式：私钥文件完整绝对路径（如 /etc/letsencrypt/live/x.com/privkey.pem）
   --docker                 用 ghcr.io all-in-one 镜像跑（KVM；否则裸金属）
+  --docker-mem MB          Docker 容器内存硬限制，单位 MB（默认按宿主内存自动：≤1G 宿主取 70%，>1G 取 512）
   --no-caddy               不部署 caddy 的 :80/:443 站点（让已装的 nginx/其它 web 服务器接管；naive 仍可装但只听 naive 端口）
   --force-bin              强制从 Releases 重装 sing-box/caddy（已装则跳过）
   --non-interactive        不交互，缺项报错退出
@@ -187,6 +191,7 @@ while [ $# -gt 0 ]; do
     --cert-fullchain) CERT_FILE="$2"; shift 2;;
     --cert-privkey) KEY_FILE="$2"; shift 2;;
     --docker) DOCKER=1; shift;;
+    --docker-mem) DOCKER_MEM_IN="$2"; shift 2;;
     --no-caddy) NO_CADDY=1; shift;;
     --force-bin) FORCE_BIN=1; shift;;
     --non-interactive) NONINT=1; shift;;
@@ -234,6 +239,14 @@ validate_inputs(){
     done
     conf_ports+=("$port")
   done
+
+  # Docker 容器内存限制（v1.5.36）：正整数 MB
+  if [ -n "${DOCKER_MEM_IN:-}" ]; then
+    if ! [[ "$DOCKER_MEM_IN" =~ ^[0-9]+$ ]] || [ "$DOCKER_MEM_IN" -lt 128 ] || [ "$DOCKER_MEM_IN" -gt 65536 ]; then
+      err "--docker-mem=${DOCKER_MEM_IN} 不合法（须 128-65536 的整数，单位 MB）"
+      errs=$((errs+1))
+    fi
+  fi
 
   # SS2022 密钥：base64 解码后必须恰好 16 字节（aes-128-gcm）
   if [ -n "$SS_PASSWORD" ]; then
@@ -531,6 +544,30 @@ EOF
 
   dl_or_exit "$RAW/docker-compose.yml" "$DIR/docker-compose.yml"
 
+  # ---- v1.5.36: 按宿主内存收紧容器资源约束 ----
+  #   模板默认 mem_limit=512m / memswap_limit=768m（适配 >1G 宿主）。
+  #   小内存宿主（≤1G）若无限制，泄漏/失控会拖垮整机（用户实测 464M VPS 长跑卡死
+  #   只能强制重启）。规则（与生产实测调优一致：464M 宿主 → 约 320m/576m）：
+  #     --docker-mem 显式指定 > 优先；否则 宿主 ≤1G → MemTotal*70%；>1G → 512m
+  #   memswap_limit 始终 = mem_limit + 256m（swap 缓冲防过早 OOM）。
+  #   常驻仅 50-105MiB，限制值有 3-5 倍余量；顶到限时容器内 OOM，
+  #   restart: unless-stopped 自动重启自愈，宿主整机不受影响。
+  local COMPOSE_MEM COMPOSE_MEMSWAP _mem_total_mb
+  _mem_total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+  if [ -n "$DOCKER_MEM_IN" ]; then
+    COMPOSE_MEM="${DOCKER_MEM_IN}m"
+    COMPOSE_MEMSWAP="$(( DOCKER_MEM_IN + 256 ))m"
+  elif [ -n "$_mem_total_mb" ] && [ "$_mem_total_mb" -le 1024 ] 2>/dev/null; then
+    COMPOSE_MEM="$(( _mem_total_mb * 70 / 100 ))m"
+    COMPOSE_MEMSWAP="$(( _mem_total_mb * 70 / 100 + 256 ))m"
+  else
+    COMPOSE_MEM="512m"; COMPOSE_MEMSWAP="768m"
+  fi
+  sed -i "s/^    mem_limit: .*/    mem_limit: ${COMPOSE_MEM}/; s/^    memswap_limit: .*/    memswap_limit: ${COMPOSE_MEMSWAP}/" \
+    "$DIR/docker-compose.yml" \
+    && log "容器资源约束: mem_limit=${COMPOSE_MEM} memswap_limit=${COMPOSE_MEMSWAP}$([ -n "$_mem_total_mb" ] && echo "（宿主内存 ${_mem_total_mb}MB）" || echo "")" \
+    || warn "docker-compose.yml 资源约束注入失败（模板结构变化？容器将以模板默认值运行）"
+
   # v1.5.32: Docker 手动证书改为「固定同步目录」模型。
   #   compose 已固定挂载 /etc/ansgo-docker/manual-certs -> /host/manual-certs（只读），
   #   不再为 cert/key 原目录动态注入 bind mount（旧方案对 Let's Encrypt live->archive
@@ -815,9 +852,18 @@ fi
 #        toolchain 指令（需 Go 1.21+），故必须用 Go 官方二进制，不能 apt 装。
 if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -q forwardproxy; then
   log "安装 caddy (naive 分支, arch=$AARCH)"
+  # 源优先级：① 当前版本 release 预编译产物（秒级）
+  #          ② v1.5.16 release vendored 兜底（最后已知带 caddy-naive 资产的 release，
+  #             二进制无版本耦合；v1.5.17~v1.5.35 的 release 曾漏传该资产，导致全新
+  #             裸金属部署被迫走 xcaddy 现场编译，在 256MB/3.86GB 低配机上必败——
+  #             此兜底保证「发版忘传资产」不再阻断部署）
+  #          ③ 现场 xcaddy 编译（需 Go 1.22+ + git + ≥1.5GB 磁盘，约 3-5 分钟）
   if dl "$REL/$VER/caddy-naive-linux-${AARCH}" /usr/local/bin/caddy 2>/dev/null && [ -s /usr/local/bin/caddy ]; then
     chmod 0755 /usr/local/bin/caddy
     log "  → 从本项目 release 下载成功"
+  elif dl "$REL/v1.5.16/caddy-naive-linux-${AARCH}" /usr/local/bin/caddy 2>/dev/null && [ -s /usr/local/bin/caddy ]; then
+    chmod 0755 /usr/local/bin/caddy
+    log "  → 当前版本 release 无 caddy 资产，从 v1.5.16 vendored 兜底下载成功（二进制一致）"
   else
     # 回退：现场用 xcaddy 编译
     # v1.5.14: 磁盘空间预检——caddy v2.11.4 依赖树 + Go 工具链约 1.5GB，
@@ -957,6 +1003,10 @@ else
   if dl "$REL/$VER/acme.sh-master.tar.gz" /tmp/acme.tar.gz 2>/dev/null; then ACME_TARBALL=/tmp/acme.tar.gz; log "使用本仓库 vendored acme.sh"; fi
   export DOMAIN EMAIL ACME_TARBALL
   export DYNU_API_KEY="$DYNU_KEY" DYNU_CLIENT_ID="$DYNU_CID" DYNU_SECRET="$DYNU_SECRET"
+  # v1.5.36: 先清掉旧 status 文件再启动签发。轮询以「文件出现」为完成信号，
+  #   旧部署残留的 SUCCESS/FAILED 会让首次轮询立即误判（假成功/假失败）。
+  #   ansgo-cert-issue.sh 开头也会自清（双保险，防旧版脚本被复用）。
+  rm -f /etc/ansgo-cert.status
   log "后台签发中…（日志 /root/ansgo-cert-issue.log）"
   nohup bash /etc/ansgo-deploy/ansgo-cert-issue.sh > /root/ansgo-cert-issue.log 2>&1 </dev/null &
   CERT_PID=$!
@@ -974,12 +1024,12 @@ else
   fi
 fi
 
-hr "5/7 生成配置（代理服务默认关闭，面板内按需安装）"
+hr "5/8 生成配置（代理服务默认关闭，面板内按需安装）"
 # 初始化占位配置（genconf 已自建父目录，v1.5.4）。失败不阻塞部署——
 # 代理服务本就是面板内按需安装，占位配置缺失不影响面板/caddy 起来。
 ansgo-genconf all 2>&1 | tail -3 || warn "ansgo-genconf 初始化失败（不阻塞，面板内装服务时会再调）"
 
-hr "6/7 部署 systemd unit + 启动面板与伪装站"
+hr "6/8 部署 systemd unit + 启动面板与伪装站"
 # sing-box / caddy 的 unit（面板安装服务时会 enable）
 for s in sing-box caddy; do
   if [ ! -f /etc/systemd/system/$s.service ]; then
@@ -994,11 +1044,13 @@ if [ "$NO_CADDY" = 1 ]; then
   log "跳过 caddy 启动（--no-caddy 模式；80/443 由现有 web 服务器接管）"
 else
   systemctl enable caddy >/dev/null 2>&1 || true
-  systemctl restart caddy && log "caddy 已启动（:443 伪装站）"
+  systemctl restart caddy \
+    && log "caddy 已启动（:443 伪装站）" \
+    || { err "caddy 启动失败（域名直访伪装站不可用；代理服务不受影响）"; err "  排查: journalctl -u caddy -n 30 / caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"; }
 fi
 # sing-box 暂不启动（无代理服务安装前不需要）
 
-hr "7/7 部署 Web 管理面板"
+hr "7/8 部署 Web 管理面板"
 log "下载 ansgo-panel 二进制 (from release)"
 dl_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" /usr/local/bin/ansgo-panel
 chmod 0755 /usr/local/bin/ansgo-panel

@@ -36,6 +36,21 @@ services:
     tmpfs:
       - /run:exec
       - /run/lock
+    # ---- v1.5.36: 资源约束（防泄漏/失控拖垮小内存宿主，失控时容器内 OOM 自愈重启）----
+    #   常驻约 50-105MiB（sing-box+caddy+panel+容器内 systemd），峰值含 acme 签发/健康检测。
+    #   mem_limit     : 容器内存硬限制。install.sh 部署时按宿主内存自动收紧（≤1G 宿主取 70%），
+    #                   可用 --docker-mem <MB> 覆盖；手动部署可按机器规格自行调整。
+    #   memswap_limit : 内存+swap 总上限（比 mem_limit 多 256m swap 缓冲，防过早 OOM）。
+    #   pids_limit    : 进程数上限（防 fork 炸弹；正常业务约 30-60 进程）。
+    mem_limit: 512m
+    memswap_limit: 768m
+    pids_limit: 512
+    # ---- v1.5.36: 容器日志限制（json-file 轮转，防长期运行日志写满小盘）----
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     env_file:
       - ansgo.env
     volumes:

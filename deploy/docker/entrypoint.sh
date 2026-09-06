@@ -80,7 +80,8 @@ if [ ! -f "$CONF" ]; then
   "dynu_client_id": "${DYNU_CLIENT_ID:-}",
   "dynu_secret": "${DYNU_SECRET:-}",
   "acme_email": "${EMAIL:-}",
-  "db_path": "/etc/ansgo/sessions.db"
+  "db_path": "/etc/ansgo/sessions.db",
+  "landings": []
 }
 EOF
   chmod 600 "$CONF"
@@ -196,6 +197,8 @@ fi
 
 # v1.5.19: 幂等补全 panel.json 新增字段（容器重建后旧 panel.json 可能缺字段）
 #   - server_ip（v1.5.18 新增，VPC 公网 IP，缺则空串走探测，Go 端兼容）
+#   - landings（v1.5.26 新增；entrypoint 首次生成的 panel.json 在 v1.5.36 前漏了该字段，
+#     旧容器卷升级时在此幂等补空数组，与裸金属 install.sh 对齐）
 #   与裸金属 upgrade.sh 的补字段逻辑保持一致，避免 Docker 形态字段滞后。
 if [ -f "$CONF" ] && command -v python3 >/dev/null 2>&1; then
   python3 -c "
@@ -207,9 +210,13 @@ changed = False
 if 'server_ip' not in c:
     c['server_ip'] = ''
     changed = True
+# v1.5.36: landings（多落地服务数组，Go 端 nil-safe 但空列表引导更友好）
+if 'landings' not in c:
+    c['landings'] = []
+    changed = True
 if changed:
     json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
-    print('[entrypoint] panel.json 已补全新字段: server_ip')
+    print('[entrypoint] panel.json 已补全缺失字段: server_ip/landings')
 " 2>/dev/null || true
 fi
 

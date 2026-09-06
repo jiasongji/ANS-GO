@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.34
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.36
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
@@ -52,7 +52,7 @@ fi
 REPO="jiasongji/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.35"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.36"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -156,6 +156,13 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
+  - 【v1.5.36】① Docker：为 docker-compose.yml 幂等补充容器资源约束（mem_limit /
+    memswap_limit / pids_limit / 日志 json-file 10m×3），防泄漏或失控拖垮小内存宿主
+    （此前无限制，长跑内存耗尽整卡死只能强制重启）；按宿主内存自动算限制值
+    （≤1G 宿主取 70%），已有手动限制则保留不覆盖。② install.sh：Docker 部署
+    --docker-mem 参数 + 同样的自动约束；caddy 二进制下载加 v1.5.16 vendored
+    兜底源（v1.5.17~35 release 漏传 caddy 资产曾致全新裸金属部署必败）；
+    acme 签发前清除旧 /etc/ansgo-cert.status（防重部署误读上次结果）。
   - 【v1.5.34】upgrade.sh 升级说明文案同步到 v1.5.33+；裸金属升级后显式回显面板版本号
     （从 journalctl 日志行提取 "ansgo-panel v1.5.x 监听..." 并比对目标版本，不匹配则告警，
     让用户明确知道升级是否真的生效）。
@@ -601,6 +608,37 @@ upgrade_docker(){
       ok "已为 docker-compose.yml 补充 manual-certs 固定挂载（v1.5.32）"
     else
       warn "docker-compose.yml 结构异常，未自动补充 manual-certs 挂载（如用 manual 模式，请手动加入：${MOUNT_LINE})"
+    fi
+  fi
+
+  # v1.5.36: 确保 Docker 容器资源约束存在（幂等；已有限制则不动，尊重手动调优值）。
+  #   旧部署的 compose 无 mem_limit/memswap_limit/pids_limit/日志轮转，
+  #   内存泄漏或进程失控会拖垮小内存宿主（实测 464M VPS 长跑卡死只能强制重启）。
+  #   规则与 install.sh 一致：宿主 ≤1G → MemTotal*70% / +256m swap；>1G → 512m/768m。
+  #   约束生效后失控只会容器内 OOM，restart: unless-stopped 自动重启自愈。
+  if grep -qE '^\s*mem_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
+    log "docker-compose.yml 已有 mem_limit（保留现有值，不覆盖手动调优）"
+  else
+    local _mem_total_mb _cl _cs
+    _mem_total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    if [ -n "$_mem_total_mb" ] && [ "$_mem_total_mb" -le 1024 ] 2>/dev/null; then
+      _cl="$(( _mem_total_mb * 70 / 100 ))m"; _cs="$(( _mem_total_mb * 70 / 100 + 256 ))m"
+    else
+      _cl="512m"; _cs="768m"
+    fi
+    # 插在 restart: unless-stopped 行后（与服务属性平级缩进）
+    if grep -q 'restart: unless-stopped' "$DOCKER_COMPOSE_FILE"; then
+      cp -a "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.bak-pre-v1.5.36" 2>/dev/null || true
+      awk -v ml="    mem_limit: ${_cl}" -v ms="    memswap_limit: ${_cs}" -v pl="    pids_limit: 512" \
+          -v l1='    logging:' -v l2='      driver: json-file' \
+          -v l3='        max-size: "10m"' -v l4='        max-file: "3"' -v l5='      options:' \
+        '/restart: unless-stopped/ { print; print ml; print ms; print pl; print l1; print l2; print l5; print l3; print l4; next } { print }' \
+        "$DOCKER_COMPOSE_FILE" > "${DOCKER_COMPOSE_FILE}.tmp" \
+        && mv "${DOCKER_COMPOSE_FILE}.tmp" "$DOCKER_COMPOSE_FILE" \
+        && ok "已为 docker-compose.yml 补充资源约束（v1.5.36）: mem_limit=${_cl} memswap_limit=${_cs} pids_limit=512 + 日志 10m×3" \
+        || warn "docker-compose.yml 资源约束注入失败（结构异常？可手动在 ansgo 服务下加 mem_limit: ${_cl}）"
+    else
+      warn "docker-compose.yml 未找到 restart 行，未自动补资源约束（可手动加: mem_limit: ${_cl} / memswap_limit: ${_cs} / pids_limit: 512）"
     fi
   fi
 

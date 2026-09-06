@@ -22,6 +22,9 @@ ACME="/root/.acme.sh/acme.sh"
 log(){ echo "[$(date '+%H:%M:%S')] $*"; }
 
 mkdir -p "$CERTDIR"
+# v1.5.36: 启动即清旧状态文件。调用方（install.sh / entrypoint.sh）以「本文件出现」为
+#   签发完成信号轮询；旧部署残留的 SUCCESS/FAILED 会让轮询立即误判（假成功/假失败）。
+rm -f "$STATUS_FILE"
 
 # ---- 步骤1: 安装 acme.sh ----
 log "=== 步骤1: 安装 acme.sh ==="
