@@ -1,14 +1,21 @@
 # =============================================================================
-# ANS-GO all-in-one 镜像构建推送（ghcr.io）
+# ANS-GO 发布流水线（ghcr.io 镜像 + GitHub release 资产）
 #
 # 触发：
-#   1. 手动 workflow_dispatch（可指定 version 输入，如 v1.5.36）
-#   2. 推送 v* tag 自动触发（与 release 同步）
+#   1. 推送 v* tag 自动触发（标准发版路径）
+#   2. 手动 workflow_dispatch（可指定 version 输入，如 v1.5.36；用于补资产/补镜像）
 #
-# 背景（v1.5.36 教训）：v1.5.17~v1.5.35 连续 19 个版本漏传 release 资产/镜像滞后，
-# 根因是发版依赖开发机手动三件套（release + 资产 + buildx --push），任何一步遗漏
-# 都会让服务器升级拿不到产物。本工作流用仓库自带 GITHUB_TOKEN（packages:write）
-# 消除对开发机 ghcr 凭据的依赖，push tag 即自动出镜像。
+# 背景（v1.5.36 教训）：v1.5.17~v1.5.35 连续 19 个版本 release 漏传 caddy/sing-box
+# 资产（全新裸金属部署 caddy 必 404 → xcaddy 现场编译 → 低配机必败），根因是发版
+# 依赖开发机手动三件套（release + 6 资产 + buildx --push），任何一步遗漏都会让
+# 服务器升级拿不到产物。本流水线用仓库 GITHUB_TOKEN 自动完成：
+#   build-push      → all-in-one 镜像（amd64+arm64 → ghcr.io/6667084/ansgo）
+#   release-assets  → 6 资产（panel 编译与镜像同源 golang:1.26-alpine，md5 可对齐；
+#                     caddy 复用 v1.5.16 二进制；sing-box 从 SagerNet 官方转传）
+#                     自动 gh release upload --clobber（release 不存在则创建）
+#
+# 发版从此只需：改版本号 → commit → git tag vX.Y.Z && git push --tags，
+# 镜像与资产由 CI 保证齐全；手动 gh release create 仅作首次占位（CI 会补资产）。
 #
 # 命名空间说明：仓库曾用名 jiasongji/ANS-GO（账号已改名 6667084）。实测 ghcr 旧路径
 # jiasongji/ansgo 是只读冻结快照（推送报 "requested installation does not exist"，
@@ -29,7 +36,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -79,3 +86,109 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/ansgo:${{ steps.ver.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # release 资产：6 件套（panel/caddy/sing-box × amd64/arm64）
+  # panel 在 golang:1.26-alpine 内编译——与 Dockerfile.allinone 的镜像构建同源，
+  # 保证 release 资产与镜像内二进制 md5 一致（排查"升级没生效"时可比对）。
+  # caddy 复用 v1.5.16 资产（klzgrad/forwardproxy naive 分支二进制无版本耦合）；
+  # sing-box 从 SagerNet 官方 release 下载并按本项目命名转传。
+  # ---------------------------------------------------------------------------
+  release-assets:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算版本号
+        id: ver
+        run: |
+          V="${{ inputs.version }}"
+          [ -z "$V" ] && V="${GITHUB_REF_NAME}"
+          case "$V" in v*) NV="${V#v}" ;; *) NV="$V" ;; esac
+          echo "tag=$V"      >> "$GITHUB_OUTPUT"
+          echo "version=$NV" >> "$GITHUB_OUTPUT"
+
+      - name: 编译 ansgo-panel（与镜像构建同源 golang:1.26-alpine）
+        run: |
+          docker run --rm -v "$PWD":/src -w /src \
+            golang:1.26-alpine sh -c '
+              cd deploy/panel &&
+              CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} \
+              go build -trimpath -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}" \
+              -o /src/ansgo-panel-linux-${{ matrix.arch }} .'
+          test -s "ansgo-panel-linux-${{ matrix.arch }}"
+
+      - name: 下载 caddy-naive（复用 v1.5.16，二进制无版本耦合）
+        run: |
+          curl -fsSL --retry 3 -o "caddy-naive-linux-${{ matrix.arch }}" \
+            "https://github.com/${{ github.repository }}/releases/download/v1.5.16/caddy-naive-linux-${{ matrix.arch }}"
+          test -s "caddy-naive-linux-${{ matrix.arch }}"
+
+      - name: 下载 sing-box 并按项目命名转传（SagerNet 官方）
+        run: |
+          SBV=1.13.13
+          curl -fsSL --retry 3 -o sb.tgz \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SBV}/sing-box-${SBV}-linux-${{ matrix.arch }}.tar.gz"
+          mkdir -p sbx && tar xzf sb.tgz -C sbx
+          tar czf "sing-box-linux-${{ matrix.arch }}.tar.gz" -C sbx "sing-box-${SBV}-linux-${{ matrix.arch }}"
+          test -s "sing-box-linux-${{ matrix.arch }}.tar.gz"
+
+      - name: 上传架构资产（artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.arch }}
+          path: |
+            ansgo-panel-linux-${{ matrix.arch }}
+            caddy-naive-linux-${{ matrix.arch }}
+            sing-box-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 3
+
+  upload-assets:
+    runs-on: ubuntu-latest
+    needs: [release-assets]
+    steps:
+      - name: 计算版本号
+        id: ver
+        run: |
+          V="${{ inputs.version }}"
+          [ -z "$V" ] && V="${GITHUB_REF_NAME}"
+          case "$V" in v*) NV="${V#v}" ;; *) NV="$V" ;; esac
+          echo "tag=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 下载全部架构资产
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          pattern: release-assets-*
+          merge-multiple: true
+
+      - name: 核对 6 件套齐全
+        run: |
+          cd assets
+          for f in ansgo-panel-linux-amd64 ansgo-panel-linux-arm64 \
+                   caddy-naive-linux-amd64 caddy-naive-linux-arm64 \
+                   sing-box-linux-amd64.tar.gz sing-box-linux-arm64.tar.gz; do
+            test -s "$f" || { echo "MISSING: $f"; exit 1; }
+          done
+          ls -la
+
+      - name: 创建（或复用）release 并上传资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          if ! gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "${{ github.repository }}" \
+              --title "$TAG" --notes "（CI 自动补齐资产；完整 release notes 见 AGENTS.md / 历史版本格式，可手动编辑本页）"
+          fi
+          gh release upload "$TAG" -R "${{ github.repository }}" \
+            assets/ansgo-panel-linux-amd64 assets/ansgo-panel-linux-arm64 \
+            assets/caddy-naive-linux-amd64 assets/caddy-naive-linux-arm64 \
+            assets/sing-box-linux-amd64.tar.gz assets/sing-box-linux-arm64.tar.gz \
+            --clobber
+          echo "=== release assets after upload ==="
+          gh release view "$TAG" -R "${{ github.repository }}" --json assets --jq '[.assets[].name]'
