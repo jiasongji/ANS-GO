@@ -595,6 +595,17 @@ upgrade_docker(){
     rm -f "$backup_file"
   fi
 
+  # v1.5.36: 镜像命名空间改写（GitHub 账号 jiasongji → 6667084 改名遗留）。
+  #   实测 ghcr 旧路径 ghcr.io/jiasongji/ansgo 是只读冻结快照：新镜像只推规范路径
+  #   ghcr.io/6667084/ansgo，旧路径拉到的永远是改名前的旧版本——存量 compose 若
+  #   仍引用旧路径，`compose pull` 永远拉不到新镜像（升级"没变化"）。这里幂等把
+  #   compose 内的 image: 引用改写为规范路径。
+  if grep -q "ghcr.io/jiasongji/ansgo" "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
+    cp -a "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.bak-pre-ns" 2>/dev/null || true
+    sed -i 's#ghcr\.io/jiasongji/ansgo#ghcr.io/6667084/ansgo#g' "$DOCKER_COMPOSE_FILE"
+    ok "已把 docker-compose.yml 镜像引用从旧命名空间 jiasongji 改写为规范命名空间 6667084（v1.5.36；旧路径已冻结拉不到新镜像）"
+  fi
+
   # v1.5.32: 确保 Docker 手动证书「固定同步目录」与 compose 挂载存在（幂等）。
   #   旧部署的 docker-compose.yml 没有该挂载，需要补上才能让 /host/manual-certs 生效。
   mkdir -p "${DOCKER_DIR}/manual-certs"

@@ -10,10 +10,10 @@
 # 都会让服务器升级拿不到产物。本工作流用仓库自带 GITHUB_TOKEN（packages:write）
 # 消除对开发机 ghcr 凭据的依赖，push tag 即自动出镜像。
 #
-# 双命名空间推送说明：仓库曾用名 jiasongji/ANS-GO（已改名 6667084），存量部署的
-# compose 拉取 ghcr.io/jiasongji/ansgo:latest。容器注册表对改名用户的旧路径仍会
-# 解析，这里同时推两个命名空间保证存量部署 `docker compose pull` 不断供；新部署
-# 的 compose 模板已改为跟随 repository_owner（6667084）。
+# 命名空间说明：仓库曾用名 jiasongji/ANS-GO（账号已改名 6667084）。实测 ghcr 旧路径
+# jiasongji/ansgo 是只读冻结快照（推送报 "requested installation does not exist"，
+# 且新推送不会传播到旧路径）——存量部署的 compose 由 upgrade.sh 自动改写为规范
+# 路径 ghcr.io/6667084/ansgo，故这里只推规范命名空间。
 # =============================================================================
 name: docker-publish
 
@@ -77,7 +77,5 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/ansgo:latest
             ghcr.io/${{ github.repository_owner }}/ansgo:${{ steps.ver.outputs.tag }}
-            ghcr.io/jiasongji/ansgo:latest
-            ghcr.io/jiasongji/ansgo:${{ steps.ver.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
