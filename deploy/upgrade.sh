@@ -627,29 +627,41 @@ upgrade_docker(){
   #   内存泄漏或进程失控会拖垮小内存宿主（实测 464M VPS 长跑卡死只能强制重启）。
   #   规则与 install.sh 一致：宿主 ≤1G → MemTotal*70% / +256m swap；>1G → 512m/768m。
   #   约束生效后失控只会容器内 OOM，restart: unless-stopped 自动重启自愈。
+  #   注：pids_limit 与日志轮转独立于 mem_limit 补（生产实测：手动加过 mem_limit
+  #   的部署跳过整块补丁会连 pids_limit 也漏掉）。
+  local _mem_total_mb _cl _cs
+  _mem_total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+  if [ -n "$_mem_total_mb" ] && [ "$_mem_total_mb" -le 1024 ] 2>/dev/null; then
+    _cl="$(( _mem_total_mb * 70 / 100 ))m"; _cs="$(( _mem_total_mb * 70 / 100 + 256 ))m"
+  else
+    _cl="512m"; _cs="768m"
+  fi
   if grep -qE '^\s*mem_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
     log "docker-compose.yml 已有 mem_limit（保留现有值，不覆盖手动调优）"
+  elif grep -q 'restart: unless-stopped' "$DOCKER_COMPOSE_FILE"; then
+    cp -a "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.bak-pre-v1.5.36" 2>/dev/null || true
+    awk -v ml="    mem_limit: ${_cl}" -v ms="    memswap_limit: ${_cs}" -v pl="    pids_limit: 512" \
+        -v l1='    logging:' -v l2='      driver: json-file' \
+        -v l3='        max-size: "10m"' -v l4='        max-file: "3"' -v l5='      options:' \
+      '/restart: unless-stopped/ { print; print ml; print ms; print pl; print l1; print l2; print l5; print l3; print l4; next } { print }' \
+      "$DOCKER_COMPOSE_FILE" > "${DOCKER_COMPOSE_FILE}.tmp" \
+      && mv "${DOCKER_COMPOSE_FILE}.tmp" "$DOCKER_COMPOSE_FILE" \
+      && ok "已为 docker-compose.yml 补充资源约束（v1.5.36）: mem_limit=${_cl} memswap_limit=${_cs} pids_limit=512 + 日志 10m×3" \
+      || warn "docker-compose.yml 资源约束注入失败（结构异常？可手动在 ansgo 服务下加 mem_limit: ${_cl}）"
   else
-    local _mem_total_mb _cl _cs
-    _mem_total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-    if [ -n "$_mem_total_mb" ] && [ "$_mem_total_mb" -le 1024 ] 2>/dev/null; then
-      _cl="$(( _mem_total_mb * 70 / 100 ))m"; _cs="$(( _mem_total_mb * 70 / 100 + 256 ))m"
-    else
-      _cl="512m"; _cs="768m"
-    fi
-    # 插在 restart: unless-stopped 行后（与服务属性平级缩进）
-    if grep -q 'restart: unless-stopped' "$DOCKER_COMPOSE_FILE"; then
-      cp -a "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.bak-pre-v1.5.36" 2>/dev/null || true
-      awk -v ml="    mem_limit: ${_cl}" -v ms="    memswap_limit: ${_cs}" -v pl="    pids_limit: 512" \
-          -v l1='    logging:' -v l2='      driver: json-file' \
-          -v l3='        max-size: "10m"' -v l4='        max-file: "3"' -v l5='      options:' \
-        '/restart: unless-stopped/ { print; print ml; print ms; print pl; print l1; print l2; print l5; print l3; print l4; next } { print }' \
-        "$DOCKER_COMPOSE_FILE" > "${DOCKER_COMPOSE_FILE}.tmp" \
-        && mv "${DOCKER_COMPOSE_FILE}.tmp" "$DOCKER_COMPOSE_FILE" \
-        && ok "已为 docker-compose.yml 补充资源约束（v1.5.36）: mem_limit=${_cl} memswap_limit=${_cs} pids_limit=512 + 日志 10m×3" \
-        || warn "docker-compose.yml 资源约束注入失败（结构异常？可手动在 ansgo 服务下加 mem_limit: ${_cl}）"
-    else
-      warn "docker-compose.yml 未找到 restart 行，未自动补资源约束（可手动加: mem_limit: ${_cl} / memswap_limit: ${_cs} / pids_limit: 512）"
+    warn "docker-compose.yml 未找到 restart 行，未自动补资源约束（可手动加: mem_limit: ${_cl} / memswap_limit: ${_cs} / pids_limit: 512）"
+  fi
+  # pids_limit / 日志轮转独立补（mem_limit 已存在手动值时也补齐这两项）
+  if ! grep -qE '^\s*pids_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null \
+     && grep -qE '^\s*mem_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
+    sed -i '/^[[:space:]]*memswap_limit:/a\    pids_limit: 512' "$DOCKER_COMPOSE_FILE" 2>/dev/null \
+      && ok "已补充 pids_limit: 512（防 fork 炸弹；mem_limit 为手动值不受影响）" \
+      || warn "pids_limit 补充失败，可手动在 memswap_limit 下加一行: pids_limit: 512"
+  fi
+  if ! grep -qE '^\s*logging:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
+    if grep -qE '^[[:space:]]*pids_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
+      sed -i '/^[[:space:]]*pids_limit:/a\    logging:\n      driver: json-file\n      options:\n        max-size: "10m"\n        max-file: "3"' "$DOCKER_COMPOSE_FILE" 2>/dev/null \
+        && ok "已补充容器日志轮转（json-file 10m×3，防长期运行日志写满小盘）" || true
     fi
   fi
 
@@ -680,11 +692,17 @@ upgrade_docker(){
 
   # 版本号验证（从容器日志读；容器重建后 systemd 要拉起 caddy→sing-box→ansgo-panel，
   # 面板启动行可能十几秒才输出，轮询最多 30 秒）
+  # v1.5.36: 双通道读取。systemd 容器内 ansgo-panel.service 的 stdout 进容器内
+  #   journald（volatile），docker logs 只有 entrypoint 行 —— 生产实测 docker logs
+  #   通道常年空导致误报「未能读取版本号」。两个通道都试，任一命中即可。
   local logged_ver="" vi
   for vi in $(seq 1 15); do
     sleep 2
     logged_ver=$(docker logs ansgo 2>&1 | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' \
       | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
+    [ -n "$logged_ver" ] && break
+    logged_ver=$(docker exec ansgo journalctl -u ansgo-panel --no-pager -n 20 2>/dev/null \
+      | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
     [ -n "$logged_ver" ] && break
   done
   if [ -n "$logged_ver" ]; then
@@ -696,7 +714,7 @@ upgrade_docker(){
       err "强制重建：cd $DOCKER_DIR && $COMPOSE up -d --force-recreate"
     fi
   else
-    warn "未能从容器日志读取版本号（可稍后执行：docker logs ansgo 2>&1 | grep 'ansgo-panel v'）"
+    warn "未能从容器日志读取版本号（可稍后执行：docker exec ansgo journalctl -u ansgo-panel --no-pager | grep 'ansgo-panel v'）"
   fi
 
   echo

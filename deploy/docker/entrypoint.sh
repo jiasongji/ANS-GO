@@ -210,8 +210,10 @@ changed = False
 if 'server_ip' not in c:
     c['server_ip'] = ''
     changed = True
-# v1.5.36: landings（多落地服务数组，Go 端 nil-safe 但空列表引导更友好）
-if 'landings' not in c:
+# v1.5.36: landings（多落地服务数组，Go 端 nil-safe 但空列表引导更友好）。
+# 用 isinstance 判断而非 'not in'：Go 面板 saveConfig 会把 nil 切片序列化成
+# "landings": null —— 键存在但值非法，not in 检测不到（生产实测踩过）。
+if not isinstance(c.get('landings'), list):
     c['landings'] = []
     changed = True
 if changed:
