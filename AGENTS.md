@@ -564,13 +564,18 @@ bash install.sh --uninstall --purge
 - ⚠️ `curl ... | bash -s -- --uninstall` 历史问题已 **v1.5.3 根治**（bootstrap 落地机制：检测管道/进程替换运行时先落地临时文件再 exec 重跑，bash 从文件读，curl 能完整输出，二者解耦；详见风险表）。所有 curl|bash 形式（`--uninstall` / `--purge` / `--landing` / `--non-interactive` 全参数部署 / 交互式主菜单）均通过 PTY + 回归测试验证
 
 ### 资源来源（全部自有 GitHub / 官方上游）
-- 脚本/源码：`raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/...`
-- ansgo-panel 二进制：`github.com/jiasongji/ANS-GO/releases/download/vX.Y.Z/ansgo-panel-linux-<arch>`
+
+> ⚠️ **GitHub 账号已由 `jiasongji` 改名为 `6667084`**（v1.5.36 时点确认）。所有旧 URL（github.com/raw.githubusercontent/ghcr.io 的 jiasongji 路径）经重定向仍可用，但 v1.5.36 起 install.sh/upgrade.sh/compose/Dockerfile 的功能引用已全部改为规范命名空间 `6667084`；ghcr 镜像双命名空间推送（Actions 工作流），存量部署 compose 拉旧路径不断供。
+
+- 脚本/源码：`raw.githubusercontent.com/6667084/ANS-GO/main/deploy/...`（旧 jiasongji 路径重定向可用）
+- ansgo-panel 二进制：`github.com/6667084/ANS-GO/releases/download/vX.Y.Z/ansgo-panel-linux-<arch>`
 - sing-box：**v1.5.3 起裸金属优先从 SagerNet 官方 release 下载**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-linux-<arch>.tar.gz`，多架构），本项目 release vendored 作为兜底。Docker 在 `Dockerfile.allinone` 内同样从 SagerNet 拉取
-- caddy（naive 分支）：从 klzgrad/forwardproxy 源码用 xcaddy 编译。**裸金属 install.sh 优先拉本项目 release 预编译产物**（v1.5.2 release 已上传双架构），**失败则现场 xcaddy 编译**（自动装 Go 官方 1.22 二进制——apt 的 1.19 不支持 xcaddy 的 `toolchain` 指令；需 git，约 3-5 分钟）；Docker 在 `Dockerfile.allinone` 内现场编译
+- caddy（naive 分支）：从 klzgrad/forwardproxy 源码用 xcaddy 编译。**裸金属 install.sh 优先拉本项目 release 预编译产物**（下载序：当前版本 release → **v1.5.16 vendored 兜底**（v1.5.36 新增，防发版漏传资产阻断部署）→ 现场 xcaddy 编译（自动装 Go 官方 1.22 二进制——apt 的 1.19 不支持 xcaddy 的 `toolchain` 指令；需 git，约 3-5 分钟））；Docker 在 `Dockerfile.allinone` 内现场编译
 - ⚠️ **release 资产维护（历史两次断供，必须逐资产核对）**：每次发新版本 release 必须上传全部 6 个资产（`ansgo-panel-linux-{amd64,arm64}` + `caddy-naive-linux-{amd64,arm64}` + `sing-box-linux-{amd64,arm64}.tar.gz`）。**v1.5.17~v1.5.35 连续 19 个版本只传了 panel 双架构资产**（caddy/sing-box 全缺），导致全新裸金属部署 caddy 必 404 → xcaddy 现场编译 → 低配机必败（v1.5.36 兜底修复：install.sh 加 v1.5.16 vendored 兜底源 + 资产恢复齐全）；更早 v1.5.0 也漏传过一次。**发版后自检命令**：`gh release view vX.Y.Z --json assets --jq '[.assets[].name]'` 必须 6 项齐全。caddy-naive 资产可直接复用 v1.5.16 的二进制（无版本耦合）；sing-box 资产从 SagerNet 官方 release 下载同名 tar.gz 转传。caddy-naive 本地交叉编译（仅当需更新 forwardproxy 版本时）：`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 xcaddy build --with github.com/caddyserver/forwardproxy=<本地forwardproxy naive分支> --output caddy-naive-linux-amd64`
-- Docker 一体化镜像（all-in-one：sing-box + caddy + 面板 + systemd，单容器跑全套）：`ghcr.io/jiasongji/ansgo:latest`（**v1.5.6 已发布公开多架构镜像** amd64+arm64，312MB，含 OCI labels；服务器直接 `docker compose pull` 成功，无需本地构建。多阶段构建定义见 `deploy/Dockerfile.allinone` + `deploy/docker/entrypoint.sh`）。**更新镜像命令（开发机执行）**：`docker buildx build --builder <builder> --platform linux/amd64,linux/arm64 --build-arg HTTP_PROXY=http://host.docker.internal:1666 --build-arg HTTPS_PROXY=http://host.docker.internal:1666 -t ghcr.io/jiasongji/ansgo:latest -t ghcr.io/jiasongji/ansgo:vX.Y.Z -f deploy/Dockerfile.allinone . --push`（国内首次构建需 `docker buildx create --driver docker-container` + 代理注入）
-- Docker 面板单镜像（仅面板，兼容用）：`ghcr.io/jiasongji/ansgo-panel:latest`（见 `deploy/Dockerfile`）
+- Docker 一体化镜像（all-in-one：sing-box + caddy + 面板 + systemd，单容器跑全套）：`ghcr.io/6667084/ansgo:latest`（规范）+ `ghcr.io/jiasongji/ansgo:latest`（旧命名空间，存量部署兼容，双推送）。
+  **⭐ v1.5.36 起镜像更新主路径 = GitHub Actions 自动构建**（`.github/workflows/docker-publish.yml`）：推 `v*` tag 自动触发（或手动 `gh workflow run docker-publish.yml -f version=vX.Y.Z`），用仓库 `GITHUB_TOKEN`（packages:write）构建 amd64+arm64 并推送双命名空间 4 个 tag——**不再依赖开发机 ghcr 凭据**（本机 gh token 无 write:packages scope，曾致手动 push 被拒）。
+  手动兜底（Actions 不可用时，开发机执行）：`docker buildx build --builder ansgo-builder --platform linux/amd64,linux/arm64 --build-arg HTTP_PROXY=http://host.docker.internal:1666 --build-arg HTTPS_PROXY=http://host.docker.internal:1666 --build-arg PANEL_VERSION=X.Y.Z -t ghcr.io/6667084/ansgo:latest -t ghcr.io/6667084/ansgo:vX.Y.Z -f deploy/Dockerfile.allinone . --push`（国内需 `docker buildx create --driver docker-container --name ansgo-builder` + 代理注入；注意 OrbStack 默认 builder 对 amd64 模拟 + 代理下 apt 偶发 exit 255，换 docker-container builder 重试）
+- Docker 面板单镜像（仅面板，兼容用）：`ghcr.io/6667084/ansgo-panel:latest`（见 `deploy/Dockerfile`）
 
 > **两种部署形态**：LXC / 低配（256MB）用裸金属（`install.sh`，systemd 直管三服务，内存最小）；KVM / 资源充裕用 Docker 一体化（`install.sh --docker`，host 网络 + privileged，单容器内 systemd 复用全部 unit/脚本/面板代码，面板 0 改动）。
 
