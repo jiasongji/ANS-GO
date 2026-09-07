@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.36
+# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.37
 #
 # 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
 # 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
@@ -52,7 +52,7 @@ fi
 REPO="6667084/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.36"         # 升级目标版本（发新版只改这一行）
+VER="v1.5.37"         # 升级目标版本（发新版只改这一行）
 
 # 架构映射（uname -m -> release 二进制后缀）
 ARCH="$(uname -m)"
@@ -156,6 +156,10 @@ usage(){ cat <<EOF
   bash upgrade.sh --docker --yes
 
 升级内容（${VER}）:
+  - 【v1.5.37】连接 IP 未配置时，面板启动后自动查询公网 IPv4 并保存；已有值保留。
+    多出口/NAT 的连接入口可能不同，请手动指定连接 IP。安装新增 --server-ip / --panel-title。
+    AnyTLS / 落地 AnyTLS / SS / SOCKS5 URI 优先使用 IP，TLS SNI 保留域名；NaiveProxy 保留域名。
+    ACME 界面精简为 API Key（旧 OAuth 配置继续兼容），宿主证书同步脚本仅 Docker 手动模式显示。
   - 【v1.5.36】① Docker：为 docker-compose.yml 幂等补充容器资源约束（mem_limit /
     memswap_limit / pids_limit / 日志 json-file 10m×3），防泄漏或失控拖垮小内存宿主
     （此前无限制，长跑内存耗尽整卡死只能强制重启）；按宿主内存自动算限制值

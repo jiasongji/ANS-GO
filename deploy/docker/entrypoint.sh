@@ -45,26 +45,66 @@ RANYTLS_PORT="${ANYTLS_PORT:-$(_rand_port)}"
 RSOCKS_PORT="${SOCKS_PORT:-$(_rand_port)}"
 RNAIVE_PORT="${NAIVE_PORT:-$(_rand_port)}"
 
-# ---- 1/3 首次：panel.json + secrets.env ----
-if [ ! -f "$CONF" ]; then
-  log "首次初始化：生成 panel.json + secrets.env（端口随机：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT socks=$RSOCKS_PORT naive=$RNAIVE_PORT）"
+# ---- v1.5.37: panel.json 首次生成抽出为函数（可离线测试 + JSON 转义防御）----
+# 函数体约定：fnname(){ 顶格起、结束 } 顶格独立一行，供 scripts/test-*.sh 提取执行。
+# JSON 字符串体转义（" \ 全部控制字符 -> \t \n \r \uXXXX；非 ASCII 原样）——
+# env 来源可能绕过上游校验（如 percent 解码出的 TAB），写入前防御性标准转义，
+# 保证任何值都不会破坏 JSON 结构（分层防御，与 install.sh 同语义）
+ansgo_json_escape(){
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read(),ensure_ascii=False)[1:-1])'
+  else
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g'
+  fi
+}
+
+# percent 解码（与 install.sh ansgo_pct_encode 配对；python3 缺失时原样返回）
+ansgo_pct_decode(){
+  python3 -c 'import urllib.parse,sys;print(urllib.parse.unquote(sys.argv[1]))' "$1" 2>/dev/null || printf '%s' "$1"
+}
+
+# 首次生成 panel.json（$1=输出路径）。返回：0=成功；1=已存在（不动文件，卷数据优先，
+# 已有配置不覆盖：容器重建/升级时保留用户在面板改过的标题/IP/端口等）；2=失败（stderr 有原因）。
+# Sentinel 修复：原子写（同目录 tmp + python3 JSON 校验 + chmod 0600 + mv），失败绝不被吞成 0。
+# v1.5.37: 消费 ansgo.env 的 PANEL_TITLE_ENCODED（install.sh --panel-title 经 percent-encoding
+#   transport；ENCODED 键名自明编码语义），解码 + trim 后写 panel.json 可读值；空走旧语义
+#   "ANS-GO 管理面板"。SERVER_IP_IN 明文（install 侧已严格校验值域）。本脚本不做公网查询。
+entrypoint_ensure_panel_json(){
+  local out="$1"
+  [ -f "$out" ] && return 1
+  local title_raw URLPATH title_json ip_json tmp
+  local pport ssport atport skport nvport
+  if [ -n "${PANEL_TITLE_ENCODED:-}" ]; then
+    title_raw="$(ansgo_pct_decode "${PANEL_TITLE_ENCODED}")"
+    title_raw="$(printf '%s' "$title_raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  fi
+  [ -n "$title_raw" ] || title_raw="ANS-GO 管理面板"
   URLPATH="${URL_PATH:-/$(openssl rand -hex 4)/}"
-  cat > "$CONF" <<EOF
+  title_json="$(ansgo_json_escape "$title_raw")"
+  ip_json="$(ansgo_json_escape "$(printf '%s' "${SERVER_IP_IN:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')")"
+  # 端口优先级：顶部已算好的 RPANEL_PORT（日志与实际一致）> ansgo.env 原值 > 随机兜底
+  pport="${RPANEL_PORT:-${PANEL_PORT:-$(_rand_port)}}"
+  ssport="${RSS_PORT:-${SS_PORT:-$(_rand_port)}}"
+  atport="${RANYTLS_PORT:-${ANYTLS_PORT:-$(_rand_port)}}"
+  skport="${RSOCKS_PORT:-${SOCKS_PORT:-$(_rand_port)}}"
+  nvport="${RNAIVE_PORT:-${NAIVE_PORT:-$(_rand_port)}}"
+  tmp="${out}.tmp.$$"
+  if ! cat > "$tmp" <<EOF
 {
   "domain": "${DOMAIN}",
-  "panel_port": ${RPANEL_PORT},
-  "panel_title": "ANS-GO 管理面板",
+  "panel_port": ${pport},
+  "panel_title": "${title_json}",
   "url_path": "${URLPATH}",
   "admin_user": "${PANEL_USER:-admin}",
   "admin_pass_hash": "PLACEHOLDER",
   "session_hours": 8,
   "login_lock_threshold": 5,
   "login_lock_minutes": 10,
-  "ss_port": ${RSS_PORT},
+  "ss_port": ${ssport},
   "ss_method": "2022-blake3-aes-128-gcm",
-  "anytls_port": ${RANYTLS_PORT},
-  "socks_port": ${RSOCKS_PORT},
-  "naive_port": ${RNAIVE_PORT},
+  "anytls_port": ${atport},
+  "socks_port": ${skport},
+  "naive_port": ${nvport},
   "disguise_panel": "${DISGUISE_PANEL:-proxy:https://example.com}",
   "disguise_naive": "${DISGUISE_NAIVE:-proxy:https://example.com}",
   "svc_ss_enabled": "false",
@@ -81,11 +121,37 @@ if [ ! -f "$CONF" ]; then
   "dynu_secret": "${DYNU_SECRET:-}",
   "acme_email": "${EMAIL:-}",
   "db_path": "/etc/ansgo/sessions.db",
+  "server_ip": "${ip_json}",
   "landings": []
-}
+  }
 EOF
-  chmod 600 "$CONF"
-  log "已生成 $CONF (url_path=${URLPATH})"
+  then
+    rm -f "$tmp" 2>/dev/null
+    log "ERROR: panel.json 写入临时文件失败（磁盘/权限）: $tmp"
+    return 2
+  fi
+  if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    log "ERROR: panel.json JSON 校验失败（env 变量含非法值），中止"
+    return 2
+  fi
+  chmod 600 "$tmp" || { rm -f "$tmp"; log "ERROR: chmod 失败: $tmp"; return 2; }
+  if ! mv -f "$tmp" "$out"; then
+    rm -f "$tmp" 2>/dev/null
+    log "ERROR: panel.json 原子替换失败: $out"
+    return 2
+  fi
+  log "已生成 $out (url_path=${URLPATH})"
+}
+
+# ---- 1/3 首次：panel.json + secrets.env ----
+if [ ! -f "$CONF" ]; then
+  log "首次初始化：生成 panel.json + secrets.env（端口随机：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT socks=$RSOCKS_PORT naive=$RNAIVE_PORT）"
+  # Sentinel 修复：生成失败必须中止容器初始化，不允许带病拉起 systemd
+  if ! entrypoint_ensure_panel_json "$CONF"; then
+    log "FATAL: panel.json 首次生成失败，容器初始化中止（docker logs ansgo 查看原因）"
+    exit 1
+  fi
   log "⚠️ 随机端口：panel=$RPANEL_PORT ss=$RSS_PORT anytls=$RANYTLS_PORT socks=$RSOCKS_PORT naive=$RNAIVE_PORT（请记下！）"
 
   if [ ! -f "$SECRETS" ]; then

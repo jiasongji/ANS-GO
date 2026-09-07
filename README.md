@@ -2,11 +2,13 @@
 
 > 在低配 VPS（LXC 或 KVM）上部署 **Shadowsocks + AnyTLS + SOCKS5 + NaiveProxy** 多协议代理 + **Go Web 管理面板**，共享一张证书（acme.sh 自动签发 **或** 手动指定已有证书）。支持**裸金属脚本**与 **Docker 一体化**两种部署形态，可审计、可回滚、可离线管理（SSH 兜底）。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/version-v1.5.36-blue) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/latest_release-v1.5.36-blue) ![dev](https://img.shields.io/badge/v1.5.37-开发中%2F待发布-orange) ![license](https://img.shields.io/badge/license-MIT-blue) ![stack](https://img.shields.io/badge/stack-Go%20%7C%20bash%20%7C%20sing--box%20%7C%20caddy-orange)
 
 > 📌 **所有命令默认以 `root` 用户执行**（非 root 用户请加 `sudo`）。一键命令均可直接复制粘贴。
 >
-> ℹ️ 当前版本重点（v1.5.36）：Docker 容器内存/资源约束（防长跑失控拖垮宿主）+ 裸金属全新部署 caddy 资产断供根治 + 证书签发状态误判修复。详见 [版本历史](#-版本历史)。
+> ℹ️ 最新发布版本重点（v1.5.36）：Docker 容器内存/资源约束（防长跑失控拖垮宿主）+ 裸金属全新部署 caddy 资产断供根治 + 证书签发状态误判修复。
+>
+> 🚧 **v1.5.37 开发中 / 待发布**（尚未发版，无 release/资产/镜像）：公网 IPv4 自动获取（空 `server_ip` 启动一次异步查询自动保存）+ `--server-ip` / `--panel-title` 安装参数 + 节点 URI IP 优先（Naive 保留域名）+ Dynu API Key 主引导 + Docker manual 同步脚本显隐。规划见 [docs/release-v1.5.37.md](docs/release-v1.5.37.md)。详见 [版本历史](#-版本历史)。
 
 ---
 
@@ -63,6 +65,7 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh | ba
 - **多协议代理**：Shadowsocks-2022 / AnyTLS / SOCKS5（sing-box 三 inbound）+ NaiveProxy（caddy forwardproxy-naive 分支，含 padding 与反探测），面板内按需安装/卸载
 - **面板优先架构**：install.sh 只装面板 + 证书 + :443 伪装站；代理服务登录面板后按需启用，不装不占端口
 - **Web 管理面板**：Go 单二进制（~15-20MB 运行内存），中文 UI，管全部协议参数 / 端口 / 证书 / 服务启停 + 节点二维码 + 协议级健康检测（端口 LISTEN + TCP 握手 + 真实协议链路诊断）
+- **公网入口 IP 自动获取** ⭐ v1.5.37（开发中/待发布）：未设置 `server_ip` 时面板普通启动异步查询一次公网 IPv4 并自动保存（直连不走环境代理，失败不阻塞）；已设不覆盖；`--server-ip` 显式入口优先。节点连接地址 AT/落地 AT/SS/SOCKS 优先 IP（SNI 仍域名），Naive 保留域名
 - **双部署形态**：裸金属（LXC / 256MB 低配，systemd 直管三进程）/ Docker 一体化（KVM，单容器 all-in-one），面板代码 0 差异
 - **资源约束（v1.5.36）**：Docker 形态自带内存/swap/进程数/日志轮转硬限制，按宿主内存自动计算，泄漏失控只 OOM 容器自愈重启，不再拖垮整机
 - **一张证书共享**：acme.sh + Dynu DNS-01 全自动签发（60 天续期），或手动引用已有证书（nginx/宝塔签发的直接用）；caddy / sing-box / 面板三服务共享
@@ -91,7 +94,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.
 3. **彻底卸载**（删除配置/密钥/证书/卷/镜像/调优，**不可恢复**）
 4. **部署落地服务器**（独立 ss-server，供中转机落地服务接入）
 
-选「安装」后，依次提示输入：**域名 → 证书来源（acme/manual）→ Dynu 凭证（仅 acme 模式）→ 各端口（v1.5.12 起默认随机）→ 面板用户名 → 伪装站点**。
+选「安装」后，依次提示输入：**域名 → 证书来源（acme/manual）→ Dynu 凭证（仅 acme 模式）→ 各端口（v1.5.12 起默认随机）→ 面板用户名 → 伪装站点**。v1.5.37（待发布）起新增可选输入：节点信息（`--panel-title`）与公网入口 IP（`--server-ip`，不填则面板启动后自动查询一次并保存）；Dynu 凭证以 API Key 为主引导（OAuth 凭证仅旧配置兼容）。
 
 > 💡 交互式会**显示每个参数的默认值**（端口默认随机，回车采纳），方便不熟悉参数的用户。
 
@@ -309,6 +312,8 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
 | `--panel-user` | `admin` | 面板管理员用户名 |
 | `--panel-password` | 随机 | 面板密码（自定义须 6-64 字符）⭐ v1.5.5 |
 | `--panel-url-path` | 随机 `/xxxxxxxx/` | 面板 URL 路径（形如 `/my-path/`）⭐ v1.5.5 |
+| `--server-ip` | — | 服务器公网**入口** IP（IPv4/IPv6 严格校验，显式指定优先级最高，填写后跳过启动自动查询；VPC/NAT 出口≠入口时必填）⭐ v1.5.37 待发布 |
+| `--panel-title` | 空（回退默认 `Manage_ANS` 标题规则）| 节点信息基名（浏览器标题 `<基名>_ANS`、节点 URI fragment `<基名>-<简称>` 的来源，裸金属/Docker 通用）⭐ v1.5.37 待发布 |
 | `--ss-password` | 随机 | Shadowsocks 密钥（须 base64(16字节)，`openssl rand -base64 16` 生成）⭐ v1.5.5 |
 | `--anytls-password` | 随机 | AnyTLS 密码（非空即可）⭐ v1.5.5 |
 | `--anytls-uuid` | 随机 | AnyTLS 用户 UUID（标准格式）⭐ v1.5.5 |
@@ -330,7 +335,7 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
 | `--uninstall` | — | 子命令：卸载 |
 | `--purge` | — | 与 `--uninstall` 同用：彻底删除一切 |
 
-> 💡 **Dynu 凭证双保险**：DNS 托管在 Dynu，证书走 DNS-01（绕开 80 端口依赖）。路径 A（API Key，推荐）失败时自动降级到路径 B（OAuth2）。
+> 💡 **Dynu 凭证双保险**：DNS 托管在 Dynu，证书走 DNS-01（绕开 80 端口依赖）。v1.5.37 起（待发布）安装引导以路径 A（API Key）为主；路径 B（OAuth2）保留旧配置兼容，A 失败时仍自动降级到 B。**新装 acme 模式若无 API Key 且 OAuth 不完整（半对）/缺失会明确报错中止**——请提供 `--dynu-key` 或完整 OAuth 对，或改用 `--cert-mode manual`。
 
 ---
 
@@ -535,7 +540,7 @@ cat /etc/ansgo/panel.json | python3 -c 'import json,sys;d=json.load(sys.stdin);p
 
 ### 节点信息（v1.5.12 重构，v1.5.18 连接地址改 IP，v1.5.19 二维码浮动 + 字段补全）
 
-「节点信息」页**只显示已启用的服务**（未启用不显示，避免空 URI 误导）。每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示（**v1.5.19 起 NaiveProxy 补全 SNI + 密码**），每行独立「📋 复制」按钮 + URI。**v1.5.18 起「连接地址」显示服务器公网 IP**（自动探测，探测失败回退域名）；URI 仍是域名（TLS 协议 SNI 需要）。**v1.5.19 起二维码默认隐藏**，服务名旁加「📱 二维码」按钮，点击浮动展示（点空白关闭）。**v1.5.19 服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5**。
+「节点信息」页**只显示已启用的服务**（未启用不显示，避免空 URI 误导）。每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示（**v1.5.19 起 NaiveProxy 补全 SNI + 密码**），每行独立「📋 复制」按钮 + URI。**v1.5.37（待发布）起连接地址与 URI 优先显示公网 IPv4**：AnyTLS / 落地 AnyTLS / Shadowsocks / SOCKS5 的连接地址与 URI 均优先 IP（IPv6 连接地址自动加 `[]`），**SNI 行仍为域名**（TLS 校验需要）；**NaiveProxy 保留域名**。IP 来源优先级：手动 / `--server-ip` 填写 > 启动一次异步公网 IPv4 查询（仅 `server_ip` 为空时，自动保存，失败不阻塞）> UDP 出口探测回退 > 回退域名（v1.5.18~v1.5.36 为「连接地址显示 IP、URI 用域名」）。**v1.5.19 起二维码默认隐藏**，服务名旁加「📱 二维码」按钮，点击浮动展示（点空白关闭）。**v1.5.19 服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5**。
 
 ### 启用落地服务（中转→落地架构）
 
@@ -591,6 +596,19 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ---
 
 ## 📜 版本历史
+
+### v1.5.37（开发中 / 待发布 — 尚未创建 release / 资产 / 镜像，服务器未部署）
+
+> 🚧 本节内容**代码已实现、尚未发布**（无 release/资产/镜像，服务器未部署），发版以 GitHub Releases 实际标签为准。详细见 [docs/release-v1.5.37.md](docs/release-v1.5.37.md)。
+
+- **【新功能】公网 IPv4 自动获取**：`server_ip` 为空时（新安装/升级后的普通启动即命中），面板异步发起一次公网 IPv4 查询并自动保存；已设不覆盖；失败不阻塞启动；查询直连第三方 echo 服务、不经过环境代理（仅限公网 IPv4：tcp4 拨号、拒绝重定向/超长响应/内网保留地址、总超时 18s）；面板设置「🔍 自动检测」保留为手动候选入口（结果需点保存才生效）
+- **【新参数】`--server-ip` / `--panel-title`**（裸金属/Docker 通用）：`--server-ip` 显式指定公网**入口** IP（IPv4/IPv6 严格校验，优先级最高，填写后跳过自动查询，VPC/NAT 出口≠入口时必填，IPv6 在节点 URI 自动加 `[]`）；`--panel-title` 安装时设置「节点信息」基名（驱动浏览器标题 `<基名>_ANS` 与节点 URI fragment；支持 `$` `#` 引号 空格 中文等常见特殊字符，经 JSON 转义 / percent-encoding 安全传输，1-64 字符拒控制字符）
+- **【优化】节点 URI IP 优先**：AT / 落地 AT / SS / SOCKS 的连接地址与 URI 优先用 IP（IPv6 自动加括号），SNI 行仍为域名；NaiveProxy URI 保留域名
+- **【优化】Dynu 凭证 API Key 主引导**：安装/面板引导以 API Key（路径 A）为主，OAuth（Client ID+Secret，路径 B）保留旧配置兼容，A 失败仍自动降级 B；**新装 acme 模式无 API Key 且 OAuth 不完整（半对）/缺失时明确报错中止安装**（避免无证书面板起不来）；面板 acme 凭证区精简为 API Key + 邮箱（旧 OAuth 凭证不删除、续期不受影响）
+- **【优化】Docker manual 同步脚本显隐**：两套证书同步脚本（系统自动任务 / 宝塔计划任务）仅在 Docker + manual 模式显示；cert_mode 下拉切换未保存时旧模式操作（签发/续期/重载）隐藏并提示先保存
+- **【加固】配置初始化原子写**：panel.json 首次生成走同目录临时文件 + JSON 校验 + 原子替换，失败即中止安装 / 容器初始化（绝不带病启动）；已存在一律不覆盖
+- **【加固】server_ip 表单防误抹**：设置页「初值为空且未编辑」保存时不提交该字段（启动自动探测保存的 IP 不被空表单回显抹掉），显式清空仍生效
+- **【说明】隐私规则更新**：v1.5.18「公网 IP 查询仅用户手动触发、启动不外发」的约束由本版取代（自动查询仅 `server_ip` 为空时触发一次并落盘，已设不覆盖，可用 `--server-ip` 彻底关闭）；v1.5.18 历史记录保留于下方，不回改
 
 ### v1.5.36 Docker 资源约束 + 裸金属部署根治 ⭐
 
@@ -743,6 +761,7 @@ Docker 用户加前缀：`docker exec ansgo ansgo-admin <命令>`。
 ├── install.sh              # ⭐ 一键部署（交互式 + 带参数 + 卸载）
 ├── AGENTS.md               # ⭐ 唯一事实来源（方案/架构/部署顺序/约束/版本演进摘要）
 ├── README.md               # ⭐ 本文档（用户教程入口）
+├── docs/                   # 补充文档（如 release-v1.5.37.md 发布说明）
 ├── deploy/                 # 全部部署产物
 │   ├── README.md           #    手动部署 / 复现指南
 │   ├── upgrade.sh          # ⭐ 已部署服务器跨版本升级（裸金属/Docker 自动识别）

@@ -7,7 +7,9 @@
 >
 > 📌 **所有命令默认以 `root` 用户执行**。
 >
-> 开发中变更：当前源码已加入 SOCKS5（sing-box inbound，强制用户名/密码）与面板自定义网页标题；NaiveProxy 保留普通可选部署但不参与落地。**v1.5.26 起落地服务支持创建多个**（每个独立端口/凭证/远端出口），远端落地出口支持 SS 和 SOCKS5 两种协议。
+> 开发中变更（**v1.5.37 / 待发布，尚未发版**）：① `--server-ip`（显式公网**入口** IPv4，优先级最高，填写后跳过自动查询）与 `--panel-title`（节点信息基名）安装参数，裸金属/Docker 通用；② `server_ip` 为空时面板普通启动异步查询一次公网 IPv4 **出口**并自动保存（已设不覆盖、失败不阻塞、直连不走环境代理）；③ 节点 URI：AT/落地 AT/SS/SOCKS 优先 IP（SNI 仍域名），Naive 保留域名；④ Dynu 凭证 API Key 主引导（OAuth 旧配置兼容）；⑤ Docker manual 证书同步脚本仅 Docker+manual 显示、切换立即隐藏。规划见 [`../docs/release-v1.5.37.md`](../docs/release-v1.5.37.md)。
+>
+> 历史进行中变更（均已发版）：SOCKS5（sing-box inbound，强制用户名/密码）与面板自定义网页标题（v1.5.16）；NaiveProxy 保留普通可选部署但不参与落地；**v1.5.26 起落地服务支持创建多个**（每个独立端口/凭证/远端出口），远端落地出口支持 SS 和 SOCKS5 两种协议。
 
 ---
 
@@ -192,6 +194,7 @@ cat > /etc/ansgo/panel.json <<EOF
   "domain": "your-domain.com",
   "panel_port": ${PANEL_PORT},
   "panel_title": "ANS-GO 管理面板",
+  "server_ip": "",
   "url_path": "${URLPATH}",
   "admin_user": "admin",
   "admin_pass_hash": "PLACEHOLDER",
@@ -217,6 +220,8 @@ cat > /etc/ansgo/panel.json <<EOF
 EOF
 chmod 600 /etc/ansgo/panel.json
 echo "⚠️ 随机端口：ss=${SS_PORT} anytls=${ANYTLS_PORT} socks=${SOCKS_PORT} naive=${NAIVE_PORT} panel=${PANEL_PORT}"
+# server_ip 留空时：面板普通启动会异步查询一次公网 IPv4 出口并自动回填（v1.5.37 待发布；已设不覆盖，失败不阻塞）。
+# VPC/NAT 下公网出口≠入口，须手动填真实入口 IP（panel.json 的 server_ip 或安装参数 --server-ip）。
 ```
 
 ### 步骤 4：签发证书

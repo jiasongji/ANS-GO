@@ -115,7 +115,7 @@ var (
 	cfg     Config
 	cfgMu   sync.RWMutex
 	db      *sql.DB
-	version = "1.5.36"
+	version = "1.5.37"
 )
 
 func loadConfig() (Config, error) {
@@ -264,6 +264,67 @@ func configSet(c Config) error {
 	}
 	cfg = c
 	return nil
+}
+
+// maybeAutoProbeServerIP 启动链路的自动探测编排（main 在 DB 初始化后调用）：
+// server_ip 为空才异步探测，已有值不探测不覆盖，失败不阻塞启动。
+func maybeAutoProbeServerIP(c Config) {
+	if strings.TrimSpace(c.ServerIP) == "" {
+		go autoProbeServerIPOnStartup()
+	}
+}
+
+// settingsApplyFrom 把「设置页可编辑字段」从 src 覆盖到 dst，其余字段以 dst 为准。
+// serverIPSubmitted=false（请求未携带 server_ip 字段）时跳过 ServerIP，
+// 不触碰最新值——否则请求处理期间（bcrypt 等耗时步骤）并发落盘的
+// 自动探测结果会被旧快照回写清掉（丢失更新）。
+func settingsApplyFrom(dst *Config, src Config, serverIPSubmitted bool) {
+	dst.URLPath = src.URLPath
+	dst.PanelTitle = src.PanelTitle
+	dst.SessionHours = src.SessionHours
+	dst.AdminUser = src.AdminUser
+	dst.AdminPassHash = src.AdminPassHash
+	dst.PanelPort = src.PanelPort
+	dst.LoginLockThreshold = src.LoginLockThreshold
+	dst.LoginLockMinutes = src.LoginLockMinutes
+	dst.DisguisePanel = src.DisguisePanel
+	dst.DisguiseNaive = src.DisguiseNaive
+	if serverIPSubmitted {
+		dst.ServerIP = src.ServerIP
+	}
+}
+
+// configSetApplySettings 设置页保存的锁内重放落盘：
+// base = 锁内最新内存配置（cloneConfig），只覆盖设置页拥有的字段，
+// tmp+rename 原子写盘，失败时内存 cfg 不变。
+func configSetApplySettings(src Config, serverIPSubmitted bool) error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	next := cloneConfig(cfg)
+	settingsApplyFrom(&next, src, serverIPSubmitted)
+	if err := saveConfig(next); err != nil {
+		return err
+	}
+	cfg = next
+	return nil
+}
+
+// configSetServerIPIfEmpty 配置锁内检查 server_ip 仍为空才写入（探测期间用户
+// 已保存则放弃）；base 为锁内最新 cfg 的深拷贝，只改 ServerIP 一个字段；
+// saveConfig tmp+rename 原子替换，失败时内存 cfg 不变。
+func configSetServerIPIfEmpty(ip string) (bool, error) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	if strings.TrimSpace(cfg.ServerIP) != "" {
+		return false, nil
+	}
+	updated := cloneConfig(cfg)
+	updated.ServerIP = ip
+	if err := saveConfig(updated); err != nil {
+		return false, err
+	}
+	cfg = updated
+	return true, nil
 }
 
 // ===================== SQLite 存储 =====================
@@ -440,6 +501,10 @@ func main() {
 		log.Fatalf("初始化数据库失败: %v", err)
 	}
 	defer db.Close()
+
+	// 首次启动且未填写 server_ip 时，异步探测公网 IPv4 并原子持久化。
+	// 不阻塞启动（探测失败只记日志）；已有值（用户手动填写过）绝不探测覆盖。
+	maybeAutoProbeServerIP(c)
 
 	if c.AdminPassHash == "" || strings.HasPrefix(c.AdminPassHash, "PLACEHOLDER") {
 		log.Println("警告: 管理员密码尚未设置（PLACEHOLDER），请执行 ansgo-admin panel-pass 设置。")

@@ -284,30 +284,27 @@ func probeLocalIP() string {
 	return probeIPCache
 }
 
-// isPrivateIP 判定一个 IPv4 字符串是否为内网（RFC1918 / CGNAT / 回环 / 链路本地）。
+// isPrivateIP 判定一个 IP 字符串是否为内网/保留/不可用作连接目标的地址。
+// 覆盖：RFC1918 / CGNAT / ULA(fc00::/7) / 回环 / 链路本地 / 未指定(0.0.0.0、::) /
+// 组播 / IPv4 保留段 240.0.0.0/4（含广播 255.255.255.255）。
+// 非法 IP 字符串视为不可用（返回 true）。注：TEST-NET 文档段（192.0.2/198.51.100/
+// 203.0.113）不在此列——真实 echo 不可能返回它们，测试用其作受控 mock 公网 IP。
 func isPrivateIP(s string) bool {
 	ip := net.ParseIP(s)
 	if ip == nil {
 		return true // 非法 IP 视为不可用
 	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() {
 		return true
 	}
 	if ip4 := ip.To4(); ip4 != nil {
-		// 10.0.0.0/8
-		if ip4[0] == 10 {
-			return true
-		}
-		// 172.16.0.0/12
-		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
-			return true
-		}
-		// 192.168.0.0/16
-		if ip4[0] == 192 && ip4[1] == 168 {
-			return true
-		}
-		// 100.64.0.0/10 (CGNAT)
+		// 100.64.0.0/10 (CGNAT，IsPrivate 不覆盖)
 		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true
+		}
+		// 240.0.0.0/4 保留段（含 255.255.255.255 广播）
+		if ip4[0] >= 240 {
 			return true
 		}
 	}
@@ -332,11 +329,33 @@ func resolveServerIP(c Config) (ip string, hint string) {
 	return "", "无法探测服务器 IP，请在「面板设置」填写公网 IP（留空则连接地址显示域名）"
 }
 
+// nodeConnectHost 返回节点 URI 的连接主机：优先 resolveServerIP 解析出的连接 IP
+// （手动 server_ip > UDP 探测出口；与节点页「连接地址」展示同源），
+// 解析不出则回退域名。返回未加括号的原始文本（IPv6 由 bracketIPv6Host 处理）。
+func nodeConnectHost(c Config) string {
+	if ip, _ := resolveServerIP(c); ip != "" {
+		return ip
+	}
+	return c.Domain
+}
+
+// bracketIPv6Host 给 URI authority 中的主机按需加 []（仅 IPv6 需要，IPv4/域名原样）。
+// RFC 3986：authority 里 IPv6 文本必须写成 [hextext]，否则客户端会把冒号误解析。
+func bracketIPv6Host(host string) string {
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return "[" + host + "]"
+	}
+	return host
+}
+
 func nodeHandler(w http.ResponseWriter, r *http.Request) {
 	c := configGet()
 	sec := readSecrets()
 	uris := buildURIs(c, sec)
 	ip, hint := resolveServerIP(c)
+	// host 字段与 URI 连接主机对齐（优先连接 IP，回退域名）；naive 保留域名；
+	// sni 字段始终为域名（与 URI 的 sni= 参数一致）。
+	connHost := nodeConnectHost(c)
 	// v1.5.26: 落地服务列表（替代旧 anytls2 单条）
 	landings := []map[string]any{}
 	for _, L := range c.Landings {
@@ -357,7 +376,7 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 			"password":    pass,
 			"sni":         c.Domain,
 			"enabled":     L.Enabled,
-			"host":        c.Domain,
+			"host":        connHost,
 			"via":         via,
 			"remote_type": L.RemoteType,
 		})
@@ -366,9 +385,9 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 		"domain":         c.Domain,
 		"server_ip":      ip,
 		"server_ip_hint": hint,
-		"ss":             map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": sec.SSKey, "enabled": c.SvcSSEnabled == "true", "host": c.Domain},
-		"anytls":         map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": sec.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": c.Domain},
-		"socks":          map[string]any{"uri": uris["socks"], "port": c.SocksPort, "user": sec.SocksUser, "pass": sec.SocksPass, "password": sec.SocksPass, "enabled": c.SvcSocksEnabled == "true", "host": c.Domain},
+		"ss":             map[string]any{"uri": uris["ss"], "method": c.SSMethod, "port": c.SSPort, "password": sec.SSKey, "enabled": c.SvcSSEnabled == "true", "host": connHost},
+		"anytls":         map[string]any{"uri": uris["anytls"], "port": c.AnyTLSPort, "password": sec.AnyTLSPass, "sni": c.Domain, "enabled": c.SvcAnyTLSEnabled == "true", "host": connHost},
+		"socks":          map[string]any{"uri": uris["socks"], "port": c.SocksPort, "user": sec.SocksUser, "pass": sec.SocksPass, "password": sec.SocksPass, "enabled": c.SvcSocksEnabled == "true", "host": connHost},
 		"naive":          map[string]any{"uri": uris["naive"], "port": c.NaivePort, "user": sec.NaiveUser, "pass": sec.NaivePass, "password": sec.NaivePass, "sni": c.Domain, "enabled": c.SvcNaiveEnabled == "true", "host": c.Domain},
 		"landings":       landings,
 	}
@@ -1277,7 +1296,9 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 			needCaddyReload = true
 		}
 	}
-	// v1.5.18：服务器公网 IP（VPC 下手动填写）。允许空（清空则回退自动探测/域名）。
+	// v1.5.18：服务器公网 IP（VPC 下手动填写）。
+	// 字段存在性语义：未提交（nil，前端未编辑不提交该字段）→ 完全不动 ServerIP
+	//（锁内重放也跳过）；显式提交空串 → 清空（回退自动探测/域名）；非空 → 校验后生效。
 	if b.ServerIP != nil {
 		ip := strings.TrimSpace(*b.ServerIP)
 		if ip != "" {
@@ -1294,7 +1315,10 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		c.ServerIP = ip
 	}
-	if err := configSet(c); err != nil {
+	// 写回走锁内重放（configSetApplySettings）：以最新内存配置为 base 只覆盖
+	// 设置页字段；请求处理期间并发落盘的探测 server_ip / 落地 / 端口 / 证书
+	// 变更不被旧快照抹掉。ServerIP 仅在请求显式提交时才重放。
+	if err := configSetApplySettings(c, b.ServerIP != nil); err != nil {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
 	}
@@ -1314,34 +1338,150 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // detectPublicIPHandler 主动检测公网 IP（v1.5.18）。
-// 仅当用户在面板设置页点「🔍 自动检测公网 IP」按钮时才触发，
-// 默认不做任何外发（避免每次启动都外发，符合 §13 隐私偏好）。
-// 依次尝试多个公网 echo 服务（互为兜底），取第一个有效结果返回。
-// 返回的 IP 由前端填入输入框供用户确认后保存，不直接写配置。
+// 仅当用户在面板设置页点「🔍 自动检测公网 IP」按钮时才触发外发请求。
+// 与启动自动探测共用 fetchPublicIP（同一套校验：直连不走环境代理、超时、
+// 响应限长、拒绝内网/非法地址），区别是本接口只把候选 IP 返回给前端，
+// 由用户确认后在「💾 保存」里提交，绝不直接写配置。
 func detectPublicIPHandler(w http.ResponseWriter, r *http.Request) {
-	clients := []string{
-		"https://api.ipify.org?format=text",
-		"https://ifconfig.me/ip",
-		"https://4.icanhazip.com",
+	ip, source, err := fetchPublicIP(r.Context(), false, publicIPProbeTimeout)
+	if err != nil {
+		log.Printf("手动公网 IP 检测失败: %v", err)
+		jerr(w, 503, "所有公网 IP 检测服务均不可达（可能服务器无法访问外网），请手动填写 IP")
+		return
 	}
-	client := &http.Client{Timeout: 6 * time.Second}
-	for _, url := range clients {
-		resp, err := client.Get(url)
-		if err != nil || resp.StatusCode != 200 {
-			if resp != nil {
-				resp.Body.Close()
-			}
+	jwrite(w, 200, map[string]any{"ok": true, "ip": ip, "source": source})
+}
+
+// publicIPEchoEndpoints 依次尝试的公网 echo 服务（互为兜底）。
+var publicIPEchoEndpoints = []string{
+	"https://api.ipify.org?format=text",
+	"https://ifconfig.me/ip",
+	"https://4.icanhazip.com",
+}
+
+const (
+	// publicIPProbeTimeout 单个 echo 服务的请求超时。
+	publicIPProbeTimeout = 6 * time.Second
+	// publicIPMaxBodyLength echo 响应体最大字节数（IP 文本最长 45 字符），
+	// 超长视为异常响应拒绝，防被劫持端点倾倒数据。
+	publicIPMaxBodyLength = 64
+)
+
+// publicIPProbeTotalTimeout 一次完整探测（全部端点串行）的总超时。
+// var 而非常量便于测试注入更短时限。
+var publicIPProbeTotalTimeout = 3 * publicIPProbeTimeout
+
+// newDirectHTTPClient 探测专用客户端，约束：
+//   - Proxy=nil 显式禁用 HTTP_PROXY/HTTPS_PROXY：经代理出站拿到的是代理出口
+//     IP 而非本机公网 IP，且生产机常见 HTTP_PROXY 指向本机会直接失败；
+//   - 禁跟随重定向：echo 端点不该重定向，防被劫持端点把探测导向任意目标；
+//   - DisableKeepAlives：探测为一次性请求，不留 keepalive 连接残留；
+//   - ipv4Only 时强制 tcp4 拨号（IPv4-only 探测从拨号层保证，而非只过滤响应）。
+func newDirectHTTPClient(timeout time.Duration, ipv4Only bool) *http.Client {
+	tr := &http.Transport{Proxy: nil, DisableKeepAlives: true}
+	if ipv4Only {
+		d := &net.Dialer{}
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return d.DialContext(ctx, "tcp4", addr)
+		}
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// fetchPublicIP 依次请求 publicIPEchoEndpoints，返回第一个通过校验的公网 IP。
+// 校验：HTTP 200、响应体限长、可解析为 IP、非内网/保留地址；ipv4Only=true 时
+// 额外强制 tcp4 拨号且只接受 IPv4 响应。err 聚合各端点失败原因便于排障。
+func fetchPublicIP(ctx context.Context, ipv4Only bool, timeout time.Duration) (string, string, error) {
+	if len(publicIPEchoEndpoints) == 0 {
+		return "", "", fmt.Errorf("无可用公网 IP 检测服务")
+	}
+	client := newDirectHTTPClient(timeout, ipv4Only)
+	defer client.CloseIdleConnections()
+	var lastErr error
+	for _, ep := range publicIPEchoEndpoints {
+		ip, err := fetchEchoEndpoint(ctx, client, ep, ipv4Only)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", ep, err)
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		ip := strings.TrimSpace(string(body))
-		if ip != "" && net.ParseIP(ip) != nil {
-			jwrite(w, 200, map[string]any{"ok": true, "ip": ip, "source": url})
-			return
-		}
+		return ip, ep, nil
 	}
-	jerr(w, 503, "所有公网 IP 检测服务均不可达（可能服务器无法访问外网），请手动填写 IP")
+	return "", "", fmt.Errorf("全部 %d 个公网 IP 检测服务均失败: %v", len(publicIPEchoEndpoints), lastErr)
+}
+
+// fetchEchoEndpoint 请求单个 echo 服务并校验响应为可用的公网 IP。
+func fetchEchoEndpoint(ctx context.Context, client *http.Client, ep string, ipv4Only bool) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	// 多读 1 字节用于判断超长
+	body, err := io.ReadAll(io.LimitReader(resp.Body, publicIPMaxBodyLength+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > publicIPMaxBodyLength {
+		return "", fmt.Errorf("响应超长（>%d 字节）", publicIPMaxBodyLength)
+	}
+	cand := strings.TrimSpace(string(body))
+	parsed := net.ParseIP(cand)
+	if parsed == nil {
+		return "", fmt.Errorf("响应不是合法 IP: %q", cand)
+	}
+	if isPrivateIP(cand) {
+		return "", fmt.Errorf("响应为内网/保留地址: %s", cand)
+	}
+	if ipv4Only && parsed.To4() == nil {
+		return "", fmt.Errorf("响应为 IPv6（本次探测要求 IPv4）: %s", cand)
+	}
+	return cand, nil
+}
+
+// autoProbeServerIPOnStartup 启动时 server_ip 为空的异步自动探测入口。
+// 失败只记日志，不阻塞启动；下次重启（仍为空时）重试。
+func autoProbeServerIPOnStartup() {
+	if err := probeAndPersistServerIP(context.Background()); err != nil {
+		log.Printf("启动自动探测公网 IPv4 未成功（面板运行不受影响，可在「面板设置」手动填写）: %v", err)
+	}
+}
+
+// probeAndPersistServerIP 探测公网 IPv4 并在 server_ip 仍为空时原子持久化。
+// caller ctx 无 deadline 时套 18s 总超时（3 端点 × 单端点 6s）；
+// 落盘经 configSetServerIPIfEmpty 锁内复查，已有值不覆盖。
+func probeAndPersistServerIP(ctx context.Context) error {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, publicIPProbeTotalTimeout)
+		defer cancel()
+	}
+	ip, source, err := fetchPublicIP(ctx, true, publicIPProbeTimeout)
+	if err != nil {
+		return err
+	}
+	set, err := configSetServerIPIfEmpty(ip)
+	if err != nil {
+		return fmt.Errorf("探测到 IPv4 %s 但写盘失败: %w", ip, err)
+	}
+	if !set {
+		log.Printf("自动探测到 %s，但 server_ip 已有值，不覆盖（来源 %s）", ip, source)
+		return nil
+	}
+	log.Printf("已自动探测并保存服务器公网 IPv4: %s（来源 %s）", ip, source)
+	return nil
 }
 
 // ===================== 日志 =====================
@@ -2067,15 +2207,19 @@ func enabledLandings(c Config) []LandingService {
 
 func buildURIs(c Config, s secretData) map[string]string {
 	u := map[string]string{}
+	// 连接主机：优先连接 IP（IPv6 需加 [] 括号），解析不出回退域名。
+	// SNI 参数始终保留域名（证书按域名签发）；NaiveProxy 整体保留域名
+	//（其伪装/TLS 链路与域名强绑定，不参与 IP 直连）。
+	host := bracketIPv6Host(nodeConnectHost(c))
 	if s.SSKey != "" {
 		ui := base64.RawURLEncoding.EncodeToString([]byte(c.SSMethod + ":" + s.SSKey))
-		u["ss"] = fmt.Sprintf("ss://%s@%s:%d#%s", ui, c.Domain, c.SSPort, nodeFragment(c, "SS"))
+		u["ss"] = fmt.Sprintf("ss://%s@%s:%d#%s", ui, host, c.SSPort, nodeFragment(c, "SS"))
 	}
 	if s.AnyTLSPass != "" {
-		u["anytls"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", s.AnyTLSPass, c.Domain, c.AnyTLSPort, c.Domain, nodeFragment(c, "AT"))
+		u["anytls"] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", s.AnyTLSPass, host, c.AnyTLSPort, c.Domain, nodeFragment(c, "AT"))
 	}
 	if s.SocksUser != "" {
-		u["socks"] = fmt.Sprintf("socks5://%s:%s@%s:%d#%s", url.QueryEscape(s.SocksUser), url.QueryEscape(s.SocksPass), c.Domain, c.SocksPort, nodeFragment(c, "SK"))
+		u["socks"] = fmt.Sprintf("socks5://%s:%s@%s:%d#%s", url.QueryEscape(s.SocksUser), url.QueryEscape(s.SocksPass), host, c.SocksPort, nodeFragment(c, "SK"))
 	}
 	if s.NaiveUser != "" {
 		u["naive"] = fmt.Sprintf("naive+https://%s:%s@%s:%d#%s", url.QueryEscape(s.NaiveUser), url.QueryEscape(s.NaivePass), c.Domain, c.NaivePort, nodeFragment(c, "NV"))
@@ -2095,7 +2239,7 @@ func buildURIs(c Config, s secretData) map[string]string {
 			name = L.ID
 		}
 		frag := nodeFragment(c, "LD-"+name)
-		u["landing-"+L.ID] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", pass, c.Domain, L.Port, c.Domain, frag)
+		u["landing-"+L.ID] = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", pass, host, L.Port, c.Domain, frag)
 	}
 	return u
 }

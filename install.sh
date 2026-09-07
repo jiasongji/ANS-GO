@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.36
+# ANS-GO 一键部署脚本 (install.sh)   v1.5.37
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -80,7 +80,7 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 REPO="6667084/ANS-GO"
 RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.36"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.36：Docker 资源约束 + caddy 资产兜底 + 证书状态误判修复）
+VER="v1.5.37"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.37：--panel-title/--server-ip 安装参数 + ACME 引导精简）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -100,6 +100,10 @@ CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
 # 各服务密码/密钥（v1.5.5 新增；留空则部署时自动随机生成）
 SS_PASSWORD="" ANYTLS_PASSWORD="" ANYTLS_UUID_IN="" SOCKS_USER_IN="" SOCKS_PASSWORD="" NAIVE_USER_IN="" NAIVE_PASSWORD=""
 PANEL_PASSWORD_IN="" URL_PATH_IN=""
+# v1.5.37: 节点信息基础名（--panel-title）与显式连接 IP（--server-ip）。
+#   留空保持旧语义：panel_title="ANS-GO 管理面板"、server_ip=""（空值由面板 Go 端
+#   启动时自动探测公网 IP 并保存；shell 层不做任何公网查询）。
+PANEL_TITLE_IN="" SERVER_IP_IN=""
 # v1.5.36: Docker 容器内存硬限制（MB，整数）。留空则部署时按宿主内存自动计算：
 #   宿主 ≤1G → MemTotal*70%；宿主 >1G → 512m。memswap 自动 = mem_limit + 256m。
 DOCKER_MEM_IN=""
@@ -127,8 +131,8 @@ usage(){ cat <<EOF
 用法: bash install.sh [选项]
   --domain DOMAIN          你的域名（必填）
   --dynu-key KEY           Dynu API Key（路径A，推荐）
-  --dynu-client-id ID      Dynu OAuth Client ID（路径B，与 --dynu-secret 同用）
-  --dynu-secret SECRET     Dynu OAuth Secret（路径B）
+  --dynu-client-id ID      [兼容保留] Dynu OAuth Client ID（路径B，与 --dynu-secret 同用；安装交互已只引导 API Key）
+  --dynu-secret SECRET     [兼容保留] Dynu OAuth Secret（路径B）
   --email EMAIL            ACME 注册邮箱
   --ss-port N              Shadowsocks 端口（默认随机 10000-65535）
   --anytls-port N          AnyTLS 端口（默认随机 10000-65535）
@@ -136,6 +140,11 @@ usage(){ cat <<EOF
   --naive-port N           NaiveProxy 端口（默认随机 10000-65535，勿用 443）
   --panel-port N           面板端口（默认随机 10000-65535）
   --panel-user USER        面板管理员用户名（默认 admin）
+  --panel-title TITLE      节点信息基础名（浏览器标题 <TITLE>_ANS、节点 URI 名称 <TITLE>-AT/NV/SS/SK/LD；
+                           默认 "ANS-GO 管理面板"→显示 Manage；1-64 字符（首尾空白自动去除，纯空白/控制字符拒绝），
+                           其余字符（含 $ # 引号 空格 中文等）均可——Docker 侧经 percent-encoding 透传，裸金属 JSON 转义）
+  --server-ip IP           节点「连接地址」显式公网 IP（严格 IPv4/IPv6 校验；VPC/NAT 网络必填）。
+                           留空保持旧语义：面板启动时自动探测并保存；已有配置不会被覆盖
   --panel-password PASS    面板管理员密码（默认随机；自定义须 6-64 字符）
   --panel-url-path PATH    面板 URL 路径（默认随机 /xxxxxxxx/；自定义形如 /my-path/）
   --ss-password KEY        Shadowsocks 密钥（默认随机；须 base64(16字节)，用 'openssl rand -base64 16' 生成）
@@ -176,6 +185,8 @@ while [ $# -gt 0 ]; do
     --naive-port) NAIVE_PORT="$2"; shift 2;;
     --panel-port) PANEL_PORT="$2"; shift 2;;
     --panel-user) PANEL_USER="$2"; shift 2;;
+    --panel-title) PANEL_TITLE_IN="$2"; shift 2;;
+    --server-ip) SERVER_IP_IN="$2"; shift 2;;
     --panel-password) PANEL_PASSWORD_IN="$2"; shift 2;;
     --panel-url-path) URL_PATH_IN="$2"; shift 2;;
     --ss-password) SS_PASSWORD="$2"; shift 2;;
@@ -203,6 +214,86 @@ while [ $# -gt 0 ]; do
     *) err "未知参数: $1"; usage; exit 1;;
   esac
 done
+
+# =============================================================================
+# 工具函数（v1.5.37）：在 validate_inputs 调用前定义——校验在依赖安装前执行，
+# 此时 python3 可能尚未安装，所有工具函数都有无 python 的 shell 兜底路径。
+# 函数体约定：fnname(){ 顶格起、结束 } 顶格独立一行，供 scripts/test-*.sh 提取执行。
+# =============================================================================
+# JSON 字符串字面量转义（" 与 \ 与全部控制字符 -> \t \n \r \uXXXX，非 ASCII 原样）。
+# python3 存在时用 json.dumps 保证与标准 JSON 一致；缺失时 sed 兜底（" \ TAB），
+# 其余控制字符依赖上游校验拒绝（分层防御）。
+ansgo_json_escape(){
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read(),ensure_ascii=False)[1:-1])'
+  else
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g'
+  fi
+}
+
+# RFC3986 percent-encode（safe=''）：把任意可读值收敛为 [A-Za-z0-9%_.-] 字符集，
+# 专门用于 Docker ansgo.env transport——compose v2 会解析 env_file 中的 $ 插值与
+# " #" 行内注释，v1 逐行全字面；percent 值在两代解析器下均字面安全。
+# 仅 Docker 路径使用（install.sh 依赖段已确保 python3 存在）；裸金属不走 env 无需编码。
+ansgo_pct_encode(){
+  python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$1"
+}
+
+# 严格校验 IPv4/IPv6 文本（rc 0=合法）。优先 python3 ipaddress（覆盖 IPv4-mapped 等
+# 边缘格式）；python3 未装时（校验先于依赖安装执行）用 shell 结构化规则兜底，
+# 保证普通安装流程在无 python 环境不会崩溃、也不会放过明显非法值。
+# 兜底较 python 略严：不支持 IPv4 映射尾段（::ffff:1.2.3.4）——依赖段确保 python3
+# 后安装流程会用 ipaddress 复核一次（见环境校验段），两侧取交集不产生误拒。
+# ANSGO_IP_FORCE_SHELL=1 强制走 shell 分支（离线测试用）。
+ansgo_ip_check(){
+  local ip="$1"
+  if [ -z "${ANSGO_IP_FORCE_SHELL:-}" ] && command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import ipaddress,sys
+try:
+    ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    sys.exit(1)' "$ip" 2>/dev/null
+    return $?
+  fi
+  # ---- shell 结构化兜底（无 python3）----
+  [[ "$ip" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1        # 字符集
+  if [[ "$ip" != *:* ]]; then
+    # 无冒号：只可能是纯 IPv4（点分四段，各 0-255）
+    [[ "$ip" == *.* ]] || return 1
+    local -a o; local IFS='.'; read -r -a o <<<"$ip"; unset IFS
+    [ ${#o[@]} -eq 4 ] || return 1
+    local x
+    for x in "${o[@]}"; do
+      [[ "$x" =~ ^[0-9]{1,3}$ ]] && [ "$x" -le 255 ] || return 1
+    done
+    return 0
+  fi
+  [[ "$ip" == *.* ]] && return 1                      # 有冒号又含点（IPv4-mapped）→ 兜底不支持（依赖段 python 复核）
+  [[ "$ip" == *":::"* ]] && return 1                  # 三连及以上冒号（2001:::1 / :::）
+  [[ "$ip" == :* && "$ip" != ::* ]] && return 1       # 前导单冒号（:2001:db8::1）
+  [[ "$ip" == *: && "$ip" != *:: ]] && return 1       # 尾部单冒号（2001:db8::1:）
+  local pre post part g groups=0
+  if [[ "$ip" == *"::"* ]]; then
+    [[ "$ip" == *::*::* ]] && return 1                # :: 只能压缩一次（1::2::3）
+    pre="${ip%%::*}"; post="${ip##*::}"
+    for part in "$pre" "$post"; do
+      [ -z "$part" ] && continue
+      local -a segs; local IFS=':'; read -r -a segs <<<"$part"; unset IFS
+      for g in "${segs[@]}"; do
+        [[ "$g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        groups=$((groups+1))
+      done
+    done
+    [ "$groups" -le 7 ] || return 1
+  else
+    local -a segs; local IFS=':'; read -r -a segs <<<"$ip"; unset IFS
+    [ ${#segs[@]} -eq 8 ] || return 1
+    for g in "${segs[@]}"; do
+      [[ "$g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    done
+  fi
+  return 0
+}
 
 # =============================================================================
 # 参数校验（v1.5.5 新增）
@@ -291,6 +382,36 @@ validate_inputs(){
     fi
   fi
 
+  # v1.5.37: 节点信息基础名（--panel-title）
+  #   接受任意可读字符（含 $ ` \ " ' # 空格 中文 % 等）：Docker 侧经 PANEL_TITLE_ENCODED
+  #   percent-encoding transport（见 docker_gen_ansgo_env / ansgo_pct_encode），裸金属
+  #   仅 JSON 转义（ansgo_json_escape），无需拒绝特殊字符。
+  #   仅限制：长度 1-64、拒绝控制字符（换行/制表破坏 env 行协议且无合法输入场景）。
+  if [ -n "$PANEL_TITLE_IN" ]; then
+    # 统一 trim 首尾空白（与生成函数同语义）；trim 后为空（纯空白标题）拒绝
+    PANEL_TITLE_IN="$(printf '%s' "$PANEL_TITLE_IN" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -z "$PANEL_TITLE_IN" ]; then
+      err "--panel-title 不能为纯空白（去除首尾空白后为空）"; errs=$((errs+1))
+    fi
+    local tn=${#PANEL_TITLE_IN}
+    if [ "$tn" -lt 1 ] || [ "$tn" -gt 64 ]; then
+      err "--panel-title 长度须 1-64 字符（当前 ${tn}）"; errs=$((errs+1))
+    fi
+    if [[ "$PANEL_TITLE_IN" =~ [[:cntrl:]] ]]; then
+      err "--panel-title 含控制字符（换行/制表等），不允许"; errs=$((errs+1))
+    fi
+  fi
+
+  # v1.5.37: 显式连接 IP（--server-ip）：严格 IPv4/IPv6 校验。
+  #   ansgo_ip_check 优先 python3 ipaddress；python3 未装时（校验先于依赖安装）走
+  #   shell 结构化兜底——拒绝 2001:::1 / ::: / 仅冒号 / 双:: 等非法文本，不崩溃。
+  #   依赖段确保 python3 后安装流程会用 ipaddress 再复核一次。
+  if [ -n "$SERVER_IP_IN" ]; then
+    if ! ansgo_ip_check "$SERVER_IP_IN"; then
+      err "--server-ip 格式错误（须 IPv4 如 203.0.113.7 或 IPv6 如 2001:db8::1）"; errs=$((errs+1))
+    fi
+  fi
+
   # 面板 URL 路径：/xxxx/ 形式
   if [ -n "$URL_PATH_IN" ]; then
     if ! [[ "$URL_PATH_IN" =~ ^/[A-Za-z0-9_-]+/$ ]]; then
@@ -307,6 +428,137 @@ validate_inputs(){
 if [ "$UNINSTALL" = 0 ] && [ "$LANDING" = 0 ]; then
   validate_inputs
 fi
+
+# =============================================================================
+# v1.5.37: 初始化生成函数（抽出为独立函数 + 路径参数化，便于离线测试覆盖；
+#   与 Go 端 confPath var 测试覆盖同一模式。工具函数 ansgo_json_escape /
+#   ansgo_pct_encode / ansgo_ip_check 已前移至参数校验段之前）
+# =============================================================================
+# 裸金属 panel.json 生成（$1=输出路径）。返回：0=成功生成；1=已存在（不动文件）；
+#   2=失败（stderr 有原因，绝不让失败被吞成 0）。
+#   Sentinel 修复：原子写——同目录临时文件 + python3 JSON 合法性校验 + chmod 0600 +
+#   mv 原子替换；校验失败/写失败立即清理 tmp 并返回 2，不落地半成品/坏文件。
+#   依赖环境变量：DOMAIN/PANEL_PORT/SS_*/... 与 --panel-title/--server-ip 的
+#   PANEL_TITLE_IN/SERVER_IP_IN（trim 后为空走旧语义默认值）。
+#   注意：heredoc JSON 结尾 } 带 2 空格缩进（合法 JSON），避免与函数提取的
+#   顶格 } 结束约定冲突。
+metal_ensure_panel_json(){
+  local out="$1"
+  [ -f "$out" ] && return 1
+  local title_raw ip_raw URLPATH title_json ip_json tmp
+  # 统一 trim 首尾空白（CLI 校验层同语义；纯空白=空=旧语义默认）
+  title_raw="$(printf '%s' "${PANEL_TITLE_IN:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  ip_raw="$(printf '%s' "${SERVER_IP_IN:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -n "$title_raw" ] || title_raw="ANS-GO 管理面板"
+  URLPATH="${URL_PATH_IN:-/$(openssl rand -hex 4)/}"
+  title_json="$(ansgo_json_escape "$title_raw")"
+  ip_json="$(ansgo_json_escape "$ip_raw")"
+  tmp="${out}.tmp.$$"
+  if ! cat > "$tmp" <<EOF
+{
+  "domain": "${DOMAIN}",
+  "panel_port": ${PANEL_PORT},
+  "panel_title": "${title_json}",
+  "url_path": "${URLPATH}",
+  "admin_user": "${PANEL_USER}",
+  "admin_pass_hash": "PLACEHOLDER",
+  "session_hours": 8,
+  "login_lock_threshold": 5,
+  "login_lock_minutes": 10,
+  "ss_port": ${SS_PORT},
+  "ss_method": "2022-blake3-aes-128-gcm",
+  "anytls_port": ${ANYTLS_PORT},
+  "socks_port": ${SOCKS_PORT},
+  "naive_port": ${NAIVE_PORT},
+  "disguise_panel": "${DISGUISE_PANEL}",
+  "disguise_naive": "${DISGUISE_NAIVE}",
+  "svc_ss_enabled": "false",
+  "svc_anytls_enabled": "false",
+  "svc_socks_enabled": "false",
+  "svc_naive_enabled": "false",
+  "caddy_enable": "$([ "$NO_CADDY" = 1 ] && echo false || echo true)",
+  "cert_mode": "${CERT_MODE}",
+  "cert_dir": "/etc/ssl/ansgo",
+  "cert_fullchain": "${CERT_FILE}",
+  "cert_privkey": "${KEY_FILE}",
+  "dynu_api_key": "${DYNU_KEY}",
+  "dynu_client_id": "${DYNU_CID}",
+  "dynu_secret": "${DYNU_SECRET}",
+  "acme_email": "${EMAIL}",
+  "db_path": "/etc/ansgo/sessions.db",
+  "server_ip": "${ip_json}",
+  "landings": []
+  }
+EOF
+  then
+    rm -f "$tmp" 2>/dev/null
+    printf 'metal_ensure_panel_json: 写入临时文件失败（磁盘/权限）: %s\n' "$tmp" >&2
+    return 2
+  fi
+  # JSON 合法性校验（python3 在依赖段已确保；缺失环境跳过校验但保留原子替换）
+  if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    printf 'metal_ensure_panel_json: 生成的 JSON 校验失败（变量含非法值），中止\n' >&2
+    return 2
+  fi
+  chmod 600 "$tmp" || { rm -f "$tmp"; printf 'metal_ensure_panel_json: chmod 失败: %s\n' "$tmp" >&2; return 2; }
+  if ! mv -f "$tmp" "$out"; then
+    rm -f "$tmp" 2>/dev/null
+    printf 'metal_ensure_panel_json: 原子替换失败: %s\n' "$out" >&2
+    return 2
+  fi
+  log "已生成 $out (url_path=${URLPATH})"
+}
+
+# Docker ansgo.env 生成（$1=输出路径；宿主侧凭证+端口+预指定密钥透传给容器 entrypoint）。
+#   v1.5.37: 标题经 PANEL_TITLE_ENCODED percent-encoding 透传（ansgo_pct_encode）——
+#   compose v2 对 env_file 做 $ 插值与 " #" 行内注释截断，明文特殊字符跨版本不安全；
+#   ENCODED 键名自明编码语义（与「标题本身含 %」无歧义）。entrypoint 解码后写
+#   panel.json 可读值。SERVER_IP_IN 经严格 IP 校验（值域 [0-9a-fA-F:.]）明文透传。
+#   卷内已有 panel.json 时 entrypoint 不覆盖，以容器内实际为准。
+docker_gen_ansgo_env(){
+  local out="$1" _pw _up _title_enc
+  # 取值优先级：显式 CLI 输入（PANEL_PASSWORD_IN/URL_PATH_IN）> 调用方已算好的值
+  # （do_docker_deploy 的显示输出与 env 文件保持一致）> 随机（测试/独立调用路径）
+  _pw="${PANEL_PASSWORD_IN:-${PANEL_PW:-}}"
+  [ -n "$_pw" ] || _pw="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)"
+  _up="${URL_PATH_IN:-${URL_PATH:-}}"
+  [ -n "$_up" ] || _up="/$(openssl rand -hex 4)/"
+  # 标题 percent-encode（transport 编码；entrypoint 解码后写可读值）。
+  # 此函数仅在 Docker 部署路径调用，python3 已由依赖段确保。
+  _title_enc="$(ansgo_pct_encode "$(printf '%s' "${PANEL_TITLE_IN:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')")"
+  cat > "$out" <<EOF
+DOMAIN=${DOMAIN}
+EMAIL=${EMAIL}
+PANEL_USER=${PANEL_USER}
+PANEL_PASS=${_pw}
+URL_PATH=${_up}
+PANEL_PORT=${PANEL_PORT}
+SS_PORT=${SS_PORT}
+ANYTLS_PORT=${ANYTLS_PORT}
+SOCKS_PORT=${SOCKS_PORT}
+NAIVE_PORT=${NAIVE_PORT}
+DISGUISE_PANEL=${DISGUISE_PANEL}
+DISGUISE_NAIVE=${DISGUISE_NAIVE}
+DYNU_API_KEY=${DYNU_KEY}
+DYNU_CLIENT_ID=${DYNU_CID}
+DYNU_SECRET=${DYNU_SECRET}
+CERT_MODE=${CERT_MODE}
+CERT_FULLCHAIN=${CERT_FILE}
+CERT_PRIVKEY=${KEY_FILE}
+SS_KEY_IN=${SS_PASSWORD}
+ANYTLS_PASS_IN=${ANYTLS_PASSWORD}
+ANYTLS_UUID_IN=${ANYTLS_UUID_IN}
+SOCKS_USER_IN=${SOCKS_USER_IN}
+SOCKS_PASS_IN=${SOCKS_PASSWORD}
+NAIVE_USER_IN=${NAIVE_USER_IN}
+NAIVE_PASS_IN=${NAIVE_PASSWORD}
+PANEL_TITLE_ENCODED=${_title_enc}
+SERVER_IP_IN=${SERVER_IP_IN}
+NO_CADDY=${NO_CADDY}
+EOF
+}
+
 
 # =============================================================================
 # 随机端口填补（v1.5.12）
@@ -513,35 +765,9 @@ do_docker_deploy(){
   # ansgo.env：凭证 + 端口 + 用户预指定密钥（600 权限，敏感不入 git）
   # 注：代理服务密钥（SS_KEY_IN 等）用 _IN 后缀避免与容器内同名变量冲突；
   #     entrypoint.sh 用 ${VAR:-随机} 接收，留空则在容器内随机生成。
-  cat > "$DIR/ansgo.env" <<EOF
-DOMAIN=${DOMAIN}
-EMAIL=${EMAIL}
-PANEL_USER=${PANEL_USER}
-PANEL_PASS=${PANEL_PW}
-URL_PATH=${URL_PATH}
-PANEL_PORT=${PANEL_PORT}
-SS_PORT=${SS_PORT}
-ANYTLS_PORT=${ANYTLS_PORT}
-SOCKS_PORT=${SOCKS_PORT}
-NAIVE_PORT=${NAIVE_PORT}
-DISGUISE_PANEL=${DISGUISE_PANEL}
-DISGUISE_NAIVE=${DISGUISE_NAIVE}
-DYNU_API_KEY=${DYNU_KEY}
-DYNU_CLIENT_ID=${DYNU_CID}
-DYNU_SECRET=${DYNU_SECRET}
-CERT_MODE=${CERT_MODE}
-CERT_FULLCHAIN=${CERT_FILE}
-CERT_PRIVKEY=${KEY_FILE}
-SS_KEY_IN=${SS_PASSWORD}
-ANYTLS_PASS_IN=${ANYTLS_PASSWORD}
-ANYTLS_UUID_IN=${ANYTLS_UUID_IN}
-SOCKS_USER_IN=${SOCKS_USER_IN}
-SOCKS_PASS_IN=${SOCKS_PASSWORD}
-NAIVE_USER_IN=${NAIVE_USER_IN}
-NAIVE_PASS_IN=${NAIVE_PASSWORD}
-NO_CADDY=${NO_CADDY}
-EOF
-  chmod 600 "$DIR/ansgo.env"
+  #     v1.5.37: 抽出为 docker_gen_ansgo_env 函数 + 新增 PANEL_TITLE_IN/SERVER_IP_IN 透传。
+  docker_gen_ansgo_env "$DIR/ansgo.env" || { err "生成 $DIR/ansgo.env 失败（磁盘满或目录不可写），已中止部署"; exit 1; }
+  chmod 600 "$DIR/ansgo.env" || { err "无法设置 $DIR/ansgo.env 权限"; exit 1; }
   log "已生成 $DIR/ansgo.env（含凭证，权限 600）"
 
   dl_or_exit "$RAW/docker-compose.yml" "$DIR/docker-compose.yml"
@@ -691,6 +917,14 @@ command -v curl >/dev/null || apt-get update && apt-get install -y curl ca-certi
 command -v python3 >/dev/null || apt-get install -y python3
 command -v openssl >/dev/null || apt-get install -y openssl
 
+# v1.5.37: --server-ip 严格复核（此时 python3 已确保）。顶层校验执行在依赖安装之前，
+#   python3 未装的环境走 shell 结构化兜底（不支持 IPv4-mapped 尾段等边缘格式）；
+#   此处用 ipaddress 复核一遍，非法即中止——两层取交集不会误拒合法值。
+if [ -n "$SERVER_IP_IN" ] && ! ansgo_ip_check "$SERVER_IP_IN"; then
+  err "--server-ip 复核不合法（ipaddress 严格解析）: $SERVER_IP_IN"
+  exit 1
+fi
+
 # ---- stage1: 系统调优（任意服务器都做，幂等）----
 hr "0/8 系统调优（stage1，幂等）"
 mkdir -p /etc/sysctl.d /etc/security/limits.d /etc/systemd/journald.conf.d
@@ -747,15 +981,22 @@ if [ "$CERT_MODE" = "manual" ]; then
   [ -f "$KEY_FILE" ]  || { err "私钥文件不存在: $KEY_FILE"; exit 2; }
   inf "证书来源：手动模式（跳过 Dynu / acme 签发）"
 else
-  # acme 模式：需要 Dynu 凭证
+  # acme 模式：需要 Dynu 凭证。Sentinel 修复：缺 API Key 且无完整 OAuth 对时明确中止——
+  #   裸金属没有自签占位证书路径，无凭证签发必败且面板 TLS 全挂，不允许静默继续。
+  #   交互：API Key 必填（推荐），留空则要求完整 OAuth Client ID+Secret（兼容旧部署）。
+  #   CLI：--dynu-key 或 --dynu-client-id + --dynu-secret（完整对）。
   CERT_MODE="acme"
-  if [ -z "$DYNU_KEY" ] && [ -z "$DYNU_CID" ]; then
-    inf "Dynu 凭证双保险：路径A(API Key，推荐) 或 路径B(OAuth Client ID+Secret)"
-    ask "Dynu API Key（路径A，留空则用路径B）"; DYNU_KEY="$ASK_VAL"
-    if [ -z "$DYNU_KEY" ]; then
-      ask_req "Dynu OAuth Client ID（路径B）"; DYNU_CID="$ASK_VAL"
-      ask_req "Dynu OAuth Secret（路径B）"; DYNU_SECRET="$ASK_VAL"
+  if [ -z "$DYNU_KEY" ] && [ -z "$DYNU_CID" ] && [ -z "$DYNU_SECRET" ]; then
+    inf "acme 自动签发需要 Dynu API Key；已有完整 OAuth Client ID + Secret 的部署请用参数传入"
+    ask_req "Dynu API Key（必填）"; DYNU_KEY="$ASK_VAL"
+  fi
+  # 凭证完整性终检（交互 + NONINT + CLI 半对场景统一拦截）
+  if [ -z "$DYNU_KEY" ]; then
+    if { [ -n "$DYNU_CID" ] && [ -z "$DYNU_SECRET" ]; } || { [ -z "$DYNU_CID" ] && [ -n "$DYNU_SECRET" ]; }; then
+      err "Dynu OAuth 凭证不完整（Client ID 与 Secret 必须成对）；或改用 --dynu-key API Key"
+      exit 2
     fi
+    [ -n "$DYNU_CID" ] || { err "acme 模式缺少 Dynu 凭证：--dynu-key（API Key，推荐）或 --dynu-client-id + --dynu-secret（完整对）；也可改用 --cert-mode manual"; exit 2; }
   fi
 fi
 if [ "$NONINT" = 0 ]; then
@@ -786,6 +1027,8 @@ printf "  ⚠️ 端口（随机生成，请记下）：\n"
 printf "    ss=%s anytls=%s naive=%s panel=%s\n" "$SS_PORT" "$ANYTLS_PORT" "$NAIVE_PORT" "$PANEL_PORT"
 printf "  直访伪装   : %s\n" "$DISGUISE_PANEL"
 printf "  Naive伪装  : %s\n" "$DISGUISE_NAIVE"
+[ -n "$PANEL_TITLE_IN" ] && printf "  节点信息   : %s\n" "$PANEL_TITLE_IN"
+[ -n "$SERVER_IP_IN" ] && printf "  连接 IP    : %s\n" "$SERVER_IP_IN"
 if [ "$CERT_MODE" = "manual" ]; then
   printf "  证书来源    : 手动（%s）\n" "$CERT_FILE"
 else
@@ -944,46 +1187,17 @@ else warn "/etc/ansgo/secrets.env 已存在，保留现有密钥"; fi
 chmod 600 /etc/ansgo/secrets.env
 
 # panel.json（端口/设置/域名/伪装）
-# v1.5.5: URL 路径支持 --panel-url-path 指定，否则随机
-URLPATH="${URL_PATH_IN:-/$(openssl rand -hex 4)/}"
-if [ ! -f /etc/ansgo/panel.json ]; then
-  cat > /etc/ansgo/panel.json <<EOF
-{
-  "domain": "${DOMAIN}",
-  "panel_port": ${PANEL_PORT},
-  "panel_title": "ANS-GO 管理面板",
-  "url_path": "${URLPATH}",
-  "admin_user": "${PANEL_USER}",
-  "admin_pass_hash": "PLACEHOLDER",
-  "session_hours": 8,
-  "login_lock_threshold": 5,
-  "login_lock_minutes": 10,
-  "ss_port": ${SS_PORT},
-  "ss_method": "2022-blake3-aes-128-gcm",
-  "anytls_port": ${ANYTLS_PORT},
-  "socks_port": ${SOCKS_PORT},
-  "naive_port": ${NAIVE_PORT},
-  "disguise_panel": "${DISGUISE_PANEL}",
-  "disguise_naive": "${DISGUISE_NAIVE}",
-  "svc_ss_enabled": "false",
-  "svc_anytls_enabled": "false",
-  "svc_socks_enabled": "false",
-  "svc_naive_enabled": "false",
-  "caddy_enable": "$([ "$NO_CADDY" = 1 ] && echo false || echo true)",
-  "cert_mode": "${CERT_MODE}",
-  "cert_dir": "/etc/ssl/ansgo",
-  "cert_fullchain": "${CERT_FILE}",
-  "cert_privkey": "${KEY_FILE}",
-  "dynu_api_key": "${DYNU_KEY}",
-  "dynu_client_id": "${DYNU_CID}",
-  "dynu_secret": "${DYNU_SECRET}",
-  "acme_email": "${EMAIL}",
-  "db_path": "/etc/ansgo/sessions.db",
-  "landings": []
-}
-EOF
-  log "已生成 /etc/ansgo/panel.json (url_path=${URLPATH})"
-else warn "/etc/ansgo/panel.json 已存在，保留（端口/伪装以现有为准）"; fi
+# v1.5.5: URL 路径支持 --panel-url-path 指定，否则随机（函数内实现）
+# v1.5.37: 抽出为 metal_ensure_panel_json（可离线测试 + JSON 转义防御）；
+#   新增 --panel-title（节点信息）与 --server-ip（显式连接 IP）字段，留空保持旧语义；
+#   已有文件一律保留不覆盖（端口/伪装/节点信息以现有为准）。
+if [ -f /etc/ansgo/panel.json ]; then
+  warn "/etc/ansgo/panel.json 已存在，保留（端口/伪装/节点信息以现有为准）"
+elif ! metal_ensure_panel_json /etc/ansgo/panel.json; then
+  # Sentinel 修复：生成失败（写盘/JSON 校验）必须中止安装，不允许把失败当已存在继续
+  err "panel.json 生成失败（见上方错误），中止安装"
+  exit 3
+fi
 chmod 600 /etc/ansgo/panel.json
 
 mkdir -p /etc/ssl/ansgo

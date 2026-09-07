@@ -5,12 +5,15 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前版本：v1.5.36**（install.sh 脚本版本 v1.5.36；**面板 Go 二进制 v1.5.36 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
+> **当前已发布版本：v1.5.36**（install.sh 脚本版本 v1.5.36；**面板 Go 二进制 v1.5.36 + release 资产 + ghcr.io 镜像齐全**）。完整发布历史见 GitHub Releases。
+>
+> 🚧 **v1.5.37 状态：开发中 / 待发布。** 本文档已按 v1.5.37 规划更新功能说明（公网 IPv4 自动获取、`--server-ip`/`--panel-title` 安装参数、节点 URI IP 优先、Dynu API Key 主引导、Docker manual 同步脚本显隐），**尚未创建 release / 上传资产 / 推送镜像，服务器未部署**；发版前不得按已发布口径引用。规划与发版前检查见 `docs/release-v1.5.37.md`。
 >
 > ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
 > | 版本 | 要点 | 关键教训 / 约束 |
 > |------|------|----------------|
+> | **v1.5.37（开发中/待发布）** | **公网 IPv4 自动获取 + 节点 URI IP 优先 + Dynu API Key 主引导 + Docker manual 同步脚本显隐**：① `server_ip` 为空时（新安装/升级后普通启动即命中）面板异步发起一次公网 IPv4 出口查询（第三方 echo 服务，直连不走环境代理）并自动保存；已设不覆盖；失败不阻塞启动；「🔍 自动检测」保留为手动候选入口（结果需保存）。② install.sh 新增 `--server-ip`（显式公网入口 IPv4，优先级最高，填写即跳过自动查询）与 `--panel-title`（节点信息基名，裸金属/Docker 通用）。③ 节点 URI：AT/落地 AT/SS/SOCKS 连接地址与 URI 优先 IP（SNI 仍域名），IPv6 host 自动加 `[]`（RFC 3986），Naive 保留域名。④ Dynu 凭证 API Key（路径A）主引导，OAuth（路径B）旧配置兼容、A 失败仍降级 B；**新装 acme 无 API Key 且 OAuth 不完整（半对）/缺失时 install.sh 明确报错中止**（裸金属无自签占位证书，无凭证签发必败、面板 TLS 起不来）。⑤ Docker manual 证书两套同步脚本仅 Docker+manual 显示；cert 来源下拉**切换未保存时旧模式操作（签发/续期/重载）全部隐藏**并提示先保存。⑥ 加固与边界：启动探测仅公网 IPv4（tcp4 拨号、拒重定向/超长响应(>64B)/内网保留地址、总超时 18s、锁内复查为空才原子落盘）；panel.json 首次生成原子写（tmp+JSON 校验+chmod 600+mv）失败即中止安装/容器初始化；设置页 server_ip「初值空且未编辑」不回传该字段（防空表单抹掉自动探测值，显式清空仍可）；`--panel-title` 特殊字符（`$` `#` 引号 空格 中文 `%` 等，trim 后 1-64 字符拒控制字符）裸金属 JSON 转义 / Docker percent-encoding（`PANEL_TITLE_ENCODED`）安全传输 | **「隐私仅手动查询」规则随实现演进更新**：v1.5.18 的「启动不外发」针对旧实现（无落盘、展示期探测）；v1.5.37 改为「仅空值触发 + 一次落盘 + 已设不覆盖」，外发频次有上限且填显式 `--server-ip` 可彻底关闭，自动化收益与隐私可控兼得（v1.5.18 历史记录保留不改）。**自动查询测得的是公网出口 IP，不等于入口**：NAT/VPC/中转下出口≠入口，节点连接地址是入口语义，故显式 `--server-ip` 优先级最高、自动值只做兜底。**未发版前所有描述须带「开发中/待发布」标注**，不得虚称已发布/已部署 |
 > | **v1.5.36** | **Docker 容器资源约束（根治长跑卡死宿主）+ 裸金属全新部署 caddy 资产断供根治 + 证书签发状态误判修复**：① `deploy/docker-compose.yml` 模板加 `mem_limit`（默认 512m；install.sh 部署时按宿主内存自动收紧：≤1G 宿主取 MemTotal*70%，464M 宿主→324m，与生产机手动调优值一致）/ `memswap_limit`（mem+256m swap 缓冲）/ `pids_limit: 512` / 日志 json-file 10m×3 轮转；失控泄漏被 cgroup 拦住只 OOM 容器，`unless-stopped` 自愈重启，不再拖垮宿主整机。新增 `--docker-mem <MB>` 参数覆盖；`upgrade.sh` Docker 分支幂等补约束（**compose 已有 `mem_limit` 则保留不覆盖**，尊重手动调优值）。② install.sh caddy 下载加 **v1.5.16 vendored 兜底源**：v1.5.17~v1.5.35 的 release 全部漏传 `caddy-naive-linux-{amd64,arm64}` 资产（v1.5.16 是最后一个带此资产的版本），全新裸金属部署下载必 404 → 回退 xcaddy 现场编译 → 256MB 内存/3.86GB 磁盘目标机必败；已有部署因 caddy 已存在不受影响，**只有全新部署踩坑**（与用户报障「裸金属部署有 bug」吻合）。v1.5.36 起 release 恢复 6 资产齐全。③ `ansgo-cert-issue.sh` 启动即 `rm -f` 旧 `/etc/ansgo-cert.status` + install.sh nohup 前也清（双保险）：旧 status 残留让轮询首次检查立即误判（旧 SUCCESS → 假成功）。④ 杂项：install.sh 步骤编号 5/7~7/7→5/8~7/8 对齐；caddy restart 失败不再静默（给 journalctl/validate 排查指引）；entrypoint 首次生成的 panel.json 补 `"landings":[]`（与裸金属路径对齐）+ 幂等补字段段加 landings | **「部署产物断供」是渐进式发现的隐形炸弹**：release 资产缺失不会在开发/升级路径暴露（二进制已存在就跳过下载），只在「全新机器首次部署」爆炸，且报错形态（xcaddy 编译失败）与根因（资产 404）相距甚远——**发版自检必须逐资产核对 6 件套**（`gh release view --json assets`），CI 无法替代。**Docker 容器默认无资源限制 = 定时炸弹**：常驻 50-105MiB 的服务在 464M 宿主上看似安全，但泄漏/失控是渐进的，爆的时候整机卡死只能强制重启；**资源约束应在首次部署就内建**（按宿主内存自动算 + 参数覆盖），而不是等用户手动加。**幂等补丁要「存在即跳过」而非「永远重写」**：已有部署可能被用户手动调过值，升级脚本检测到已有 `mem_limit` 必须保留，否则覆盖用户调优。**以「文件出现」为完成信号的轮询，任务启动前必须清掉旧信号文件**：残留的 SUCCESS/FAILED 会让首次轮询立即误判，签发/构建类后台任务通用 |
 > | **v1.5.35** | **多落地服务「第二个落地不走远端出口 / 检测不测远端协议」根治**：用户新增第二个落地服务后填了远端 host/port/密钥，但「启用远端」开关仍是「关闭」→ `remote_enabled=false` → genconf 不为该落地生成 outbound/route（走 direct 泄漏中转 IP），健康检测 `probeLandingRemoteDetail` 在 `RemoteEnabled==false` 时直接 skip 远端协议探测，于是「填了配置不生效 + 检测不测远端」。卡片 UI 又没把「未启用远端」标出来，极具迷惑性。三层防御修复：① 后端 `normalizeLanding()`（Go）+ `_normalize_landings_and_persist()`（ansgo-genconf python）在远端字段齐全（host+port+凭证）且校验通过时**自动把 `remote_enabled` 置 true**，并按类型清理无关字段（ss 清 remote_user；socks 清 remote_method）；② 启动迁移 `migrateLandings()`（ansgo-panel main.go 启动时）+ entrypoint 的 ansgo-genconf 调用**都在容器/裸金属重启时自动修复历史脏 panel.json**，用户无需手动重存；③ 前端每张落地卡片顶部加「出口方式」徽章（绿「🌐 出口：SS/SOCKS5 远端落地」vs 橙「⚠️ 出口：直连未启用远端」），健康检测 `landing_remote==='skip'` 时明确显示「未启用远端出口（该落地走 direct 直连）」而非空白。新增 5 个 Go 回归测试锁定行为 | **「开关 + 字段」解耦的设计必须防止「字段配好但开关没开」的半成品状态**：用户填好配置自然会期望它生效，单独的开关容易被遗忘；要么让开关随字段自动联动（本修复：字段齐全自动启用），要么在 UI 把「当前实际生效的出口方式」显式标出来让用户一眼发现不一致。**genconf 与面板启动迁移要双写**：entrypoint 在 ansgo-panel 启动前就调 ansgo-genconf，Go 端的启动迁移此时还没跑，所以同样的规范化逻辑必须同时在 ansgo-genconf（python）实现，否则容器重启后 config.json 仍是旧的。**运行时诊断不能只测入口**：`remote_enabled=false` 跳过远端探测是合理的，但诊断面板**必须明确告诉用户为什么没测**（「未启用远端，走 direct」），而不是返回空白让用户误判「检测缺失」。**buildx 缓存 COPY 层会忽略脚本内容变化**：单纯改 `deploy/ansgo-genconf` 后重建镜像，buildx 可能复用旧的 COPY 缓存层导致新脚本没进镜像；需加 `ARG SCRIPTS_BUST` + `RUN echo "$SCRIPTS_BUST" > /dev/null` 在 COPY 前，CI 传 `--build-arg SCRIPTS_BUST=$(md5sum scripts)` 强制重建 |
 > | **v1.5.34** | **upgrade.sh 升级说明同步 + 裸金属/Docker 升级后浏览器硬刷新提示 + 多落地分流回归**：① upgrade.sh usage 文案从 v1.5.32 同步到 v1.5.33/v1.5.34，让用户明确知道每次升级内容（旧文案停留在节点命名/Docker证书，导致裸金属用户以为"没更新"）。② 裸金属/Docker 升级完成段都新增「⚠️ 浏览器需硬刷新才能看到新界面」提示（面板前端内嵌二进制，升级后必须清缓存，否则旧 JS 缓存让新功能"看不见"）。③ Docker 版本验证从单次读取改为轮询 5 次（容器刚重建日志要几秒才输出面板启动行，单次读取常返回"未能读取版本号"）。④ 新增多落地远端配置独立性回归测试 + 路由规则分流测试（锁定 v1.5.26 多落地改造后两个落地的远端 host/port/password 各自独立、outbound tag 不串） | **"升级了但没变化"首因是浏览器缓存**：面板前端经 `//go:embed` 编译进 Go 二进制，即使二进制更新了，浏览器仍可能用缓存的旧 HTML/JS。升级脚本必须在完成段显式提示硬刷新，否则用户误以为升级失败。**升级脚本的 usage 文案必须随版本更新**：文案停留在旧版会让用户（和运维）误判升级内容，以为是没发版。**容器日志读取要等待**：`--force-recreate` 后容器 systemd 要几秒才拉起 ansgo-panel 输出启动行，单次 `docker logs` 读取会扑空，需轮询 |
@@ -164,13 +167,15 @@
 ### 验证方式（acme 模式）
 **DNS-01**（绕开 80 端口依赖，可签泛域名）。
 
-### Dynu 凭证双保险（A 默认，A 失败降级 B；仅 acme 模式需要）
+### Dynu 凭证双保险（v1.5.37 起 API Key 主引导；B 保留旧配置兼容；仅 acme 模式需要）
 两套都已实测可用（HTTP 200，能读写 zone <Dynu_zone_id>）：
 
 | 路径 | 凭证 | 机制 | 用法 |
 |------|------|------|------|
-| **A（默认）** | API Key | `Api-Key` 请求头 | 自定义钩子 `dns_dynukey.sh`（~60行，直接调 Dynu REST API 加删 TXT 记录）|
-| **B（降级）** | Client ID + Secret | OAuth2 `client_credentials` 换 bearer token | acme.sh 官方 `dns_dynu` 插件 |
+| **A（主引导）** | API Key | `Api-Key` 请求头 | 自定义钩子 `dns_dynukey.sh`（~60行，直接调 Dynu REST API 加删 TXT 记录）|
+| **B（兼容/降级）** | Client ID + Secret | OAuth2 `client_credentials` 换 bearer token | acme.sh 官方 `dns_dynu` 插件 |
+
+**v1.5.37 起（待发布）安装与面板引导以 API Key（路径 A）为主**；已配置 OAuth 凭证（Client ID + Secret）的旧部署继续兼容可用，面板对两种凭证仍只按「已配置/未配置」回显存在性，不回传明文。
 
 **降级逻辑**：部署时先尝试 A 签发；若 A 返回非 0 退出码，自动切换到 B 重试。两套凭证均存 `/root/.acme.sh/` 下，root 独占可读。
 
@@ -279,7 +284,7 @@ https://your-domain.com:15608/<随机URL路径>/
 ### 6.4 功能模块（中文 UI，支持暗黑/白天双主题切换 + 移动端自适应 + 左侧可折叠导航，localStorage 记忆）
 1. **登录页**（含「忘记密码？」命令提示）
 2. **仪表盘**：各代理服务状态灯 + 开关 / 端口 / 内存 / TCP 连接数 / 负载 / 运行时长 / 证书倒计时 + **每服务「🔍 检测」按钮**（v1.5.12，调 `api/health` 三合一诊断：systemd active + 端口 LISTEN + TCP 握手）。**v1.5.20 起仅显示 4 个主要代理服务**（AnyTLS / NaiveProxy / Shadowsocks / SOCKS5），管理面板状态移至顶栏圆点（见 #9）
-3. **节点信息**（v1.5.12 重构，v1.5.18 连接地址改 IP，v1.5.19 二维码改浮动）：**只显示已启用的服务**（未启用不渲染卡片，避免空 URI 误导）；每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示（**v1.5.19 起 NaiveProxy 补全 SNI + 密码**），**每行独立「📋 复制」按钮**；**v1.5.18 起「连接地址」优先显示服务器公网出口 IP（Go 端 UDP 探测，进程级缓存，探测失败回退域名），URI 仍是域名**（TLS 协议 SNI 需域名）；URI 单独成行带复制；**v1.5.19 起二维码默认隐藏**，服务名旁加「📱 二维码」按钮，点击浮动展示（点空白关闭），不再常驻占版面。落地服务启用时仅显示 anytls-2（标注出口经 SS 落地）。**v1.5.19 服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5**
+3. **节点信息**（v1.5.12 重构；v1.5.18 连接地址改 IP；v1.5.19 二维码改浮动；v1.5.37 URI IP 优先）：**只显示已启用的服务**（未启用不渲染卡片，避免空 URI 误导）；每张卡按"连接地址/端口/加密方式/密码/用户名/SNI"分行展示（**v1.5.19 起 NaiveProxy 补全 SNI + 密码**），**每行独立「📋 复制」按钮**；**v1.5.37（待发布）起连接地址与 URI 优先用公网 IPv4**：AnyTLS / 落地 AnyTLS / Shadowsocks / SOCKS5 的连接地址与 URI host 均优先 IP（`server_ip` 来源优先级见 #7 面板设置），**SNI 行仍为域名**（TLS 证书校验需要）；**NaiveProxy 连接地址与 URI 保留域名**（伪装架构下域名即入口）；IP 缺失（未设置且探测失败）时回退域名（兼容 v1.5.18~v1.5.36「地址 IP + URI 域名」行为）；URI 单独成行带复制；**v1.5.19 起二维码默认隐藏**，服务名旁加「📱 二维码」按钮，点击浮动展示（点空白关闭），不再常驻占版面。落地服务启用时仅显示 anytls-2（标注出口经 SS 落地）。**v1.5.19 服务顺序统一 AnyTLS → NaiveProxy → Shadowsocks → SOCKS5**
 4. **服务管理** ⭐（v1.5.18 起「服务控制」菜单已删，服务管理成为唯一总操作页；v1.5.11 起由「服务安装」+「端口管理」+「密钥管理」三页合并；v1.5.12 加检测）：每服务一张卡片，一站式完成：① 状态标签（未安装/已安装·运行中/已安装·未运行）② Shadowsocks/AnyTLS/SOCKS5/NaiveProxy 独立安装/卸载 ③ 各服务端口 + 面板端口均可改（v1.5.12 起部署默认随机）④ 手动输入自定义密钥（SS/AnyTLS/SOCKS5/Naive，SS2022 自动校验 base64(16字节) 长度），**v1.5.18 起每个密钥/凭证输入框右侧带独立 🎲 按钮（纯前端 crypto.getRandomValues 生成，不自动保存）** ⑤ **v1.5.18 起操作按钮集中一行自适应**（按可用性）：未安装 `[📥安装]`；已安装 `[💾应用][▶️启动/⏹停止][🔄重启][📤卸载][🔍检测][🔧修复]`，「💾应用」串行调 portHandler+keyHandler 一次保存端口+密钥（零新增端点）⑥ **「🔍 检测」按钮**（v1.5.12，v1.5.18 起并入操作行末位）。**v1.5.20 起移除底部 AnyTLS-2 卡片**（AnyTLS-2 管理统一移至「落地服务」页）。手动设置走 Go 直接写 secrets.env（原子 tmp+rename，避开 sed 特殊字符坑）；整服务随机重置走 ansgo-admin regen/regen2（单字段随机已改前端 genField 不调后端）
 5. **落地服务** ⭐（**v1.5.26 重写为多落地服务动态列表**，替代旧的单 AnyTLS-2 两张固定卡片）：
    - **动态列表 + 新增按钮**：页面顶部「➕ 新增落地服务」按钮，弹窗填名称+端口创建（后端分配 id + 生成 anytls 凭证 + genconf+restart+verify）
@@ -289,8 +294,8 @@ https://your-domain.com:15608/<随机URL路径>/
    - **校验**：端口冲突（sing-box 同进程）+ SS2022 密钥长度 + SOCKS5 凭证非空，失败即时反馈
    - **v1.5.35 防御性自动启用**：保存落地服务时若远端字段齐全（host+port+凭证）且校验通过，后端 `normalizeLanding()` 自动把 `remote_enabled` 置 true（修「填了字段但开关没开 → 走 direct」脏数据）；启动时 `migrateLandings()` + entrypoint 的 ansgo-genconf 都会自动修复历史脏 panel.json，用户无需手动重存
    - ⚠️ **架构约束告知**：只有落地服务（landings）才路由到远端出口；NaiveProxy / 第一组 SOCKS5 不参与远端落地
-6. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果。**v1.5.27 起 acme 模式新增「Dynu 凭证」配置区**（API Key 路径A / Client ID+Secret 路径B / 注册邮箱）+ **「🚀 立即签发证书」按钮**（同步触发 Let's Encrypt DNS-01，约 1-3 分钟，回显 acme.sh 日志）。凭证只回传「已配置/未配置」状态不回传明文；解决 manual 部署后切 acme 没地方填凭证的遗漏。**新增 `api/cert/issue` 端点**
-7. **面板设置**：网页标题 / URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 服务器公网 IP（v1.5.18，VPC 必填 + 🔍 自动检测按钮）/ 伪装站点。**v1.5.19 起 `--no-caddy` 模式（caddy_enable=false）时隐藏「直访伪装(:443)」**（该站点由 nginx 等接管，caddy 不再生成，改了也不会生效）；Naive 伪装始终显示。**v1.5.22 起保存逻辑修复**：仅 url_path/panel_port 真正变化才重启（旧版每次保存都重启）；`saveSet()` 防御 disguise_panel 输入缺失（`--no-caddy` 场景）
+6. **证书管理**：⭐ **证书来源切换**（acme 自动 / manual 手动指定证书+私钥完整路径）+ 到期时间 + 手动续期（acme）/ 重新加载（manual）+ 上次续期结果。**v1.5.27 起 acme 模式新增「Dynu 凭证」配置区**（API Key 路径A / Client ID+Secret 路径B / 注册邮箱）+ **「🚀 立即签发证书」按钮**（同步触发 Let's Encrypt DNS-01，约 1-3 分钟，回显 acme.sh 日志）。凭证只回传「已配置/未配置」状态不回传明文；解决 manual 部署后切 acme 没地方填凭证的遗漏。**新增 `api/cert/issue` 端点**。**v1.5.37（待发布）起 Docker manual 证书的两套同步脚本（系统自动任务一键安装 / 宝塔计划任务）仅在 Docker + manual 模式显示**；证书来源切换（manual→acme）或非 Docker 部署时立即隐藏，避免误导
+7. **面板设置**：节点信息（v1.5.32 由「网页标题」改名；v1.5.37 起可用 `--panel-title` 安装参数预设）/ URL 路径 / 会话 / 管理员账号密码 / 面板端口 / 锁定阈值 / 服务器公网 IP / 伪装站点。**服务器公网 IP（`server_ip`）自动获取（v1.5.37，待发布）**：为空时面板普通启动**异步**查询一次公网 IPv4 出口并**自动保存**（新安装/升级生效；已设不覆盖；失败不阻塞启动；查询直连第三方 echo 服务、不走环境代理，仅限公网 IPv4：tcp4 拨号、拒重定向/内网/超长响应、总超时 18s）；「🔍 自动检测」按钮保留为手动候选入口（结果填入输入框，需点保存才生效；设置页保存对「初值为空且未编辑」的 server_ip 不回传，防抹掉自动值，显式清空仍生效）；VPC/NAT 出口≠入口时必须手动填写真实入口 IP 或 `--server-ip`。**v1.5.19 起 `--no-caddy` 模式（caddy_enable=false）时隐藏「直访伪装(:443)」**（该站点由 nginx 等接管，caddy 不再生成，改了也不会生效）；Naive 伪装始终显示。**v1.5.22 起保存逻辑修复**：仅 url_path/panel_port 真正变化才重启（旧版每次保存都重启）；`saveSet()` 防御 disguise_panel 输入缺失（`--no-caddy` 场景）
 8. **日志查看**：tail 最近 N 行
 9. **顶栏管理面板状态圆点**（v1.5.20）：顶栏用户名右侧一个小圆点，绿=运行中 / 红=未运行 / 灰=获取失败，hover 显示「管理面板：运行中 :端口」。登录时 + 每次切换页面时静默刷新（`refreshPanelDot()` 拉 `api/dashboard`，fire-and-forget 不阻塞页面加载）。**管理面板状态从仪表盘移出**（避免与代理服务并列显示冗余），全局常驻顶栏可见
 10. **侧栏底部版本号**（v1.5.22）：左侧导航栏底部常驻显示 `ANS-GO vX.Y.Z`（`api/auth` 返回后端 `-ldflags` 注入的 `version` 字段，`checkAuth` 填入 `#verTag`）。用户升级后一眼可核实是否生效（折叠态自适应为居中小字）。**解决「我升级了但不知道成没成」**——之前版本号只在启动日志 `journalctl` 里，用户不一定会查
@@ -423,8 +428,8 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 - **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
 - **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`。升级二进制前手动备份：`cp /usr/local/bin/ansgo-panel /etc/ansgo-backup-update-vX.Y.Z-{ts}/ansgo-panel.old`。
 - **前端改动后必须重新编译 + 上传**：HTML 经 `//go:embed` 编译进 Go 二进制，改 `deploy/panel/web/index.html` 后须 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` 重新出包 + 上面的 stop→rm→scp→md5→start 流程，浏览器硬刷新。
-- **公网 IP 获取的三层优先级**（v1.5.18 VPC 修正）：① 用户在「面板设置」手动填写的 `server_ip`（最高，VPC/NAT 下唯一可靠来源）② UDP "连接" 8.8.8.8:80 探测本机出口（`net.Dial` 取 `LocalAddr`，不真正发包只走路由表，进程级缓存 `sync.Once`）③ 空 → 前端回退域名。**UDP 探测需过滤内网**：VPC/NAT 下出口走内网网卡（10./172.16-31./192.168./100.64.），公网 IP 在 NAT 网关做 SNAT 本机无从得知，`isPrivateIP()` 判定为内网则丢弃并回退域名，同时在节点页顶部和设置页显示引导提示。
-- **主动检测公网 IP 必须用户点击触发**（v1.5.18）：`/api/detect-public-ip` 调用第三方 echo 服务（ipify/ifconfig/icanhazip 三选一兜底），**仅当用户在面板设置页点「🔍 自动检测」按钮才外发一次**（不在启动时自动外发，避免每次启动把"这台机器存在"告知第三方）。检测结果填入输入框供用户确认后保存，不直接写配置。这与 §13「禁用真实第三方域名作为 disguise 默认值」不冲突——后者限制的是 caddy 反代目标硬编码默认值，这里是用户主动触发的运行时调用。
+- **公网 IPv4（入口连接地址）获取的四层优先级**（v1.5.37 增强；v1.5.18 VPC 修正沿用）：① 显式入口——`--server-ip` 安装参数 / 用户在「面板设置」手动填写的 `server_ip`（最高；VPC/NAT 下出口≠入口，显式入口是唯一可靠来源）② **启动一次异步公网 IPv4 查询**（v1.5.37：`server_ip` 为空时面板普通启动后台调第三方 echo 服务查公网 IPv4 **出口**并**自动保存**进 `server_ip`；单次启动至多一次，已有值不覆盖，失败不阻塞启动）③ UDP "连接" 8.8.8.8:80 探测本机出口（`net.Dial` 取 `LocalAddr`，不真正发包只走路由表，进程级缓存 `sync.Once`，仅展示期回退、不落盘）④ 空 → 前端回退域名。**出口≠入口必须分清**：②③ 拿到的都是公网**出口** IP（简单 VPS 上出口=入口；NAT/VPC/中转下可能不同），节点连接地址是**入口**语义——所以显式入口优先级最高、自动值只做兜底。**UDP 探测需过滤内网**：VPC/NAT 下出口走内网网卡（10./172.16-31./192.168./100.64.），公网 IP 在 NAT 网关做 SNAT 本机无从得知，`isPrivateIP()` 判定为内网则丢弃并回退域名，同时在节点页顶部和设置页显示引导提示。
+- **公网 IPv4 自动查询的触发与隐私边界**（v1.5.37，取代 v1.5.18「仅手动触发」规则）：面板启动时若 `server_ip` 为空（新安装/升级后的普通启动即命中），后台**异步**调用第三方 echo 服务（ipify/ifconfig/icanhazip 三选一兜底）查询公网 IPv4 **出口**并写入 `server_ip` 持久化——单次启动至多查询一次；成功保存后已非空，后续启动不再触发；失败不写入也不阻塞面板启动（保持为空，下次启动仍会尝试或由手动检测补齐）。**查询直连第三方服务、不经过环境代理**（Go http 客户端忽略 `HTTP(S)_PROXY` 等环境代理变量），测得本机真实公网出口。**查询有多重硬边界（最终实现）**：tcp4 拨号仅接受公网 IPv4、不跟随重定向（3xx 拒绝）、响应限长 64 字节、`isPrivateIP()` 拒绝内网/保留/非法地址、总超时 18s（3 端点×6s）、落盘前锁内复查 `server_ip` 仍空（tmp+rename 原子写）。面板设置页「🔍 自动检测」按钮保留为手动候选入口：结果填入输入框、需用户点保存才覆盖，不自动写配置。规则更新理由：v1.5.18 的「不在启动时自动外发」针对旧实现（无本地落盘、展示期反复探测）；v1.5.37 改为「仅空值触发 + 一次落盘 + 已设不覆盖」后，外发频次有上限且填显式 `--server-ip` 可彻底关闭，隐私影响可控。v1.5.18 历史行为保留于版本演进摘要，不回改。这与 §13「禁用真实第三方域名作为 disguise 默认值」不冲突——后者限制的是 caddy 反代目标硬编码默认值，这里是运行时对公共 IP echo 服务的查询。
 - **Mac 本机无 Go 时的交叉编译**（v1.5.18）：用 `docker run --rm -v "$PWD":/src -w /src -e GOPROXY=https://goproxy.cn,direct -e HTTP_PROXY= -e HTTPS_PROXY= ... golang:1.26-alpine` 编译。**必须清空 `-e HTTP_PROXY=` 等环境变量**（orbstack/docker daemon 默认透传代理到容器内 `127.0.0.1:1666`，容器内访问不到会 `connection refused`）。go.mod 的 `go 1.26.4` 要求镜像版本 ≥ `golang:1.26`。
 - **合并操作按钮时优先复用现有 API 端点**（v1.5.18）：把端口「应用」+ 密钥「保存」整合成单个「💾 应用」按钮时，前端 `svcSave()` 串行调既有 `portHandler`+`keyHandler` 即可，**不要新增 `/api/svc-save` 端点**（重复实现校验 = 扩大回归面）。校验/重启逻辑已在两个 handler 内成熟稳定。
 - **Docker 升级必须 `--force-recreate`**（v1.5.19）：`docker compose up -d` 在镜像 digest 未变（或 compose 配置哈希相同）时会**跳过 recreate**，容器不重建 → entrypoint 不重跑 → 旧二进制继续运行，表现为「拉了新镜像但没变化」。upgrade.sh docker 分支改用 `up -d --force-recreate` 强制销毁重建（volume 数据不丢）。版本号验证从不匹配升级为 err（而非 warn），并给出 `md5sum` 对比 + force-recreate 排查命令。
@@ -475,7 +480,7 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
 # 先显示主菜单：1) 安装/部署  2) 卸载（保留配置/卷）  3) 彻底卸载  4) 部署落地服务器
-# 选 1 后依次交互输入：域名、Dynu API Key（或 OAuth Client ID+Secret）、各端口、面板用户名等
+# 选 1 后依次交互输入：域名、Dynu 凭证（v1.5.37 起 API Key 主引导，OAuth 旧配置兼容）、各端口、面板用户名等
 ```
 
 ### 带参数一键（全参数示例）
@@ -513,7 +518,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --non-interactive
 ```
 
-参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`，acme 模式必填）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--socks-port`(10808) `--naive-port`(44333) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--cert-mode`(acme|manual，默认 acme) `--cert-fullchain`(manual 模式证书完整路径) `--cert-privkey`(manual 模式私钥完整路径) `--docker` `--no-caddy`(v1.5.6+，不部署 caddy 的 80/443，让 nginx 等接管) `--non-interactive` `--force-bin`。
+参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`，acme 模式必填）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--socks-port`(10808) `--naive-port`(44333) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--cert-mode`(acme|manual，默认 acme) `--cert-fullchain`(manual 模式证书完整路径) `--cert-privkey`(manual 模式私钥完整路径) `--docker` `--server-ip`(v1.5.37+，显式公网入口 IP，IPv4/IPv6 严格校验，优先级最高，填了即跳过启动自动查询) `--panel-title`(v1.5.37+，节点信息基名，裸金属/Docker 通用) `--no-caddy`(v1.5.6+，不部署 caddy 的 80/443，让 nginx 等接管) `--non-interactive` `--force-bin`。
 >
 > **⭐ v1.5.5 新增：密码/密钥参数化（全部可选，留空则随机生成）**：
 > - `--ss-password KEY`：Shadowsocks 密钥，须 base64(16字节)，生成命令 `openssl rand -base64 16`
@@ -607,7 +612,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/deploy/upgrad
 
 1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 多协议连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
 2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.31
+3. ✅ **服务器部署（已完成 + 持续迭代）**：面板版本迭代走 §9「stop→rm→scp→md5→start」流程（裸金属）或 `docker compose up -d`（Docker），当前 v1.5.36（v1.5.37 开发中，未部署）
 4. **客户端实测（可选）**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
 
 ---
